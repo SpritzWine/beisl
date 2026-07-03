@@ -74,8 +74,9 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
     spawn_monitor(&run_dir);
 
     recorder.attach(proc.id());
-    cue::play(cue::Cue::RecordStart);
-    sess.state = State::Recording;
+    // Game is up but idle — capture is toggle-driven (and the recorder is still a stub),
+    // so don't claim we're recording yet.
+    sess.state = State::Running;
     let _ = sess.write(&run_dir);
 
     let start = Instant::now();
@@ -89,7 +90,7 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
             sess.state = State::Done;
             sess.elapsed_secs = start.elapsed().as_secs();
             sess.trace_bytes = trace_size(&run_dir);
-            sess.message = "Game exited — trace saved.".to_string();
+            sess.message = "Game exited.".to_string();
             let _ = sess.write(&run_dir);
             log.line(&format!("game exited: {status}"));
             return Ok(status.code().unwrap_or(0));

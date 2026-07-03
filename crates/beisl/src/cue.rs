@@ -8,7 +8,8 @@
 pub enum Cue {
     /// Beisl is set up and about to launch the game.
     Ready,
-    /// CPU capture started.
+    /// CPU capture started (used once the recorder toggles on).
+    #[allow(dead_code)]
     RecordStart,
     /// CPU capture stopped.
     RecordStop,

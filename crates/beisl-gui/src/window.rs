@@ -82,9 +82,10 @@ impl Application for SessionApp {
         let s = &self.session;
         let badge = match s.state {
             State::Starting => "Starting…",
+            State::Running => "Game running",
             State::Recording => "● Recording",
             State::Stopping => "Stopping…",
-            State::Done => "Saved",
+            State::Done => "Finished",
             State::Error => "Error",
         };
 

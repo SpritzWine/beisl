@@ -14,6 +14,8 @@ pub const FILE: &str = "session.json";
 pub enum State {
     #[default]
     Starting,
+    /// Game is up; not capturing (capture is toggle-driven / recorder not yet active).
+    Running,
     Recording,
     Stopping,
     Done,
