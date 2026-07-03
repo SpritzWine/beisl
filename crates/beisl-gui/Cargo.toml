@@ -28,3 +28,11 @@ features = ["dbus-config", "tokio", "winit", "wgpu"]
 
 # Own workspace root -> own Cargo.lock, kept out of the main Beisl lockfile.
 [workspace]
+
+# Separate workspace, so it doesn't inherit the main Beisl release profile — give it a
+# lean one of its own (Beisl ships bundled; keep the GUI small). thin LTO keeps the
+# libcosmic release build tractable while still stripping the debuginfo bulk.
+[profile.release]
+opt-level = "s"
+lto = "thin"
+strip = true
