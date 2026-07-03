@@ -17,3 +17,4 @@ path = "src/main.rs"
 [dependencies]
 preflight = { path = "../preflight" }
 session = { path = "../session" }
+libc = "0.2"        # PR_SET_PDEATHSIG so perf dies with us (no orphaned recorder)

@@ -73,10 +73,21 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
     // Open the session window alongside the game (best-effort; headless still works).
     spawn_monitor(&run_dir);
 
-    recorder.attach(proc.id());
-    // Game is up but idle — capture is toggle-driven (and the recorder is still a stub),
-    // so don't claim we're recording yet.
-    sess.state = State::Running;
+    // Record the whole session. If perf can't run, the game still launches un-traced and
+    // the reason shows up as a live warning.
+    match recorder.start() {
+        Ok(()) => {
+            sess.state = State::Recording;
+            log.line("perf: recording started");
+        }
+        Err(e) => {
+            sess.state = State::Running;
+            sess.warnings.push(e.clone());
+            log.line(&format!("perf: {e}"));
+        }
+    }
+    // Stop perf cleanly if beisl is signalled (Steam's Stop button = SIGTERM, or Ctrl-C).
+    perf::install_teardown();
     let _ = sess.write(&run_dir);
 
     let start = Instant::now();
@@ -84,15 +95,19 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
     loop {
         if let Some(status) = proc.try_wait()? {
             if !stopped {
-                recorder.finish();
+                recorder.stop();
                 cue::play(cue::Cue::RecordStop);
             }
             sess.state = State::Done;
             sess.elapsed_secs = start.elapsed().as_secs();
             sess.trace_bytes = trace_size(&run_dir);
-            sess.message = "Game exited.".to_string();
+            sess.message = if sess.trace_bytes > 0 {
+                "Game exited — trace saved.".to_string()
+            } else {
+                "Game exited.".to_string()
+            };
             let _ = sess.write(&run_dir);
-            log.line(&format!("game exited: {status}"));
+            log.line(&format!("game exited: {status}, trace {} bytes", sess.trace_bytes));
             return Ok(status.code().unwrap_or(0));
         }
 
@@ -105,10 +120,11 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
         if !stopped {
             if let Some(disk) = Session::read(&run_dir) {
                 if disk.stop_requested {
-                    recorder.finish();
+                    recorder.stop();
                     cue::play(cue::Cue::RecordStop);
                     stopped = true;
                     sess.stop_requested = true;
+                    sess.trace_bytes = trace_size(&run_dir);
                     sess.state = State::Done;
                     sess.message = "Stopped — trace saved. Game still running.".to_string();
                 }
@@ -170,6 +186,10 @@ impl Log {
 
 /// Launch the session window: prefer `beisl-setup` on PATH, else a sibling of this binary.
 fn spawn_monitor(dir: &Path) {
+    // Headless / testing: `BEISL_NO_UI=1` runs the wrapper without the window.
+    if std::env::var_os("BEISL_NO_UI").is_some() {
+        return;
+    }
     if Command::new("beisl-setup")
         .arg("--session")
         .arg(dir)
