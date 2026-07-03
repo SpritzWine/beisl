@@ -15,17 +15,39 @@ use crate::{cue, mangohud, perf};
 /// Run `cmd` under tracing; returns the game's exit code.
 pub fn trace(cmd: &[String]) -> io::Result<i32> {
     let run_dir = new_run_dir()?;
-    eprintln!("beisl: trace dir = {}", run_dir.display());
+    let mut log = Log::open(&run_dir);
+    log.line(&format!("launch argv = {cmd:?}"));
 
-    let mut child = Command::new(&cmd[0]);
-    child.args(&cmd[1..]);
+    // Steam runs launch options through a shell, and some %command% expansions carry
+    // leading `VAR=value` env assignments; peel those off so we run the real program, not
+    // a literal "VAR=value". A no-op when there are none (e.g. the usual reaper command).
+    let (envs, prog) = split_env_prefix(cmd);
+    if prog.is_empty() {
+        log.line("error: nothing to run after env assignments");
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "no program to run"));
+    }
+    if !envs.is_empty() {
+        log.line(&format!("env prefix = {envs:?}"));
+    }
+    log.line(&format!(
+        "program = {} (exists: {}), args = {:?}",
+        prog[0],
+        Path::new(&prog[0]).exists(),
+        &prog[1..]
+    ));
+
+    let mut child = Command::new(&prog[0]);
+    child.args(&prog[1..]);
+    for (k, v) in &envs {
+        child.env(k, v);
+    }
     mangohud::configure(&mut child, &run_dir); // frametime side-channel + toggle hotkey
 
     let mut recorder = perf::Recorder::new(&run_dir);
 
     // Publish the initial state so the window has something to show immediately.
     let mut sess = Session {
-        game: game_name(cmd),
+        game: game_name(&prog),
         trace_dir: run_dir.display().to_string(),
         hotkey: TOGGLE_KEY.to_string(),
         state: State::Starting,
@@ -35,7 +57,18 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
     let _ = sess.write(&run_dir);
 
     cue::play(cue::Cue::Ready);
-    let mut proc = child.spawn()?;
+    let mut proc = match child.spawn() {
+        Ok(p) => p,
+        Err(e) => {
+            log.line(&format!("error: failed to launch {}: {e}", prog[0]));
+            sess.state = State::Error;
+            sess.message = format!("Failed to launch {}: {e}", prog[0]);
+            let _ = sess.write(&run_dir);
+            spawn_monitor(&run_dir); // open the window so the error is visible
+            return Err(e);
+        }
+    };
+    log.line(&format!("launched pid {}", proc.id()));
 
     // Open the session window alongside the game (best-effort; headless still works).
     spawn_monitor(&run_dir);
@@ -58,6 +91,7 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
             sess.trace_bytes = trace_size(&run_dir);
             sess.message = "Game exited — trace saved.".to_string();
             let _ = sess.write(&run_dir);
+            log.line(&format!("game exited: {status}"));
             return Ok(status.code().unwrap_or(0));
         }
 
@@ -81,6 +115,55 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
         }
         let _ = sess.write(&run_dir);
         std::thread::sleep(Duration::from_millis(800));
+    }
+}
+
+/// Peel leading `VAR=value` tokens (Steam/user env assignments) off the front of the
+/// command, returning them plus the remaining program + args. Stops at the first token
+/// that isn't an assignment, so a normal `reaper …` command is left untouched.
+fn split_env_prefix(cmd: &[String]) -> (Vec<(String, String)>, Vec<String>) {
+    let mut envs = Vec::new();
+    let mut i = 0;
+    while i < cmd.len() {
+        match cmd[i].split_once('=') {
+            Some((k, v)) if is_env_name(k) => {
+                envs.push((k.to_string(), v.to_string()));
+                i += 1;
+            }
+            _ => break,
+        }
+    }
+    (envs, cmd[i..].to_vec())
+}
+
+fn is_env_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// A small append-only diagnostic log in the trace dir. Steam swallows the wrapper's
+/// stderr, so this is where a failed launch actually surfaces; mirrored to stderr too.
+struct Log {
+    file: Option<std::fs::File>,
+}
+
+impl Log {
+    fn open(dir: &Path) -> Self {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("beisl.log"))
+            .ok();
+        Log { file }
+    }
+
+    fn line(&mut self, s: &str) {
+        eprintln!("beisl: {s}");
+        if let Some(f) = self.file.as_mut() {
+            use std::io::Write;
+            let _ = writeln!(f, "{s}");
+        }
     }
 }
 
