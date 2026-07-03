@@ -7,6 +7,13 @@ name = "artifact"
 version = "0.0.1"
 
 [[package]]
+name = "beisl"
+version = "0.0.1"
+dependencies = [
+ "preflight",
+]
+
+[[package]]
 name = "preflight"
 version = "0.0.1"
 

@@ -1,0 +1,18 @@
+[package]
+name = "beisl"
+description = "Perf-tracing wrapper: drives MangoHud + perf around a game, emits a symbolicated trace"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "beisl"
+path = "src/main.rs"
+
+# Mostly std-only for now. Deps we'll pull in as the layers land: clap (arg parsing),
+# anyhow (errors), notify (mangohud-log file-watch), symbol-resolver + artifact (once
+# the post-run step is wired).
+[dependencies]
+preflight = { path = "../preflight" }
