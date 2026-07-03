@@ -120,16 +120,16 @@ impl Application for SessionApp {
             col = col.push(widget::text::caption("(waiting for the session to start…)"));
         }
 
-        let mut stop = widget::button::standard("Stop & save");
-        if s.state == State::Recording {
-            stop = stop.on_press(Msg::Stop);
-        }
-        let buttons = widget::Row::new()
+        // "Stop & save" only exists while a capture is actually running, so show it only
+        // then rather than as a permanently-disabled control.
+        let mut buttons = widget::Row::new()
             .spacing(8)
             .push(widget::button::text("Open folder").on_press(Msg::OpenFolder))
-            .push(widget::Space::new().width(Length::Fill))
-            .push(stop)
-            .push(widget::button::suggested("Close").on_press(Msg::Close));
+            .push(widget::Space::new().width(Length::Fill));
+        if s.state == State::Recording {
+            buttons = buttons.push(widget::button::standard("Stop & save").on_press(Msg::Stop));
+        }
+        let buttons = buttons.push(widget::button::suggested("Close").on_press(Msg::Close));
 
         // Content scrolls; the buttons stay pinned and visible at the bottom.
         let page = widget::Column::new()
