@@ -1,0 +1,12 @@
+[package]
+name = "symbol-resolver"
+description = "Resolve perf.data addresses to wine symbols, wine-agnostic with tiered fidelity"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# v0 is std-only. Deps we'll add: object/goblin (PE + ELF export/symbol tables),
+# gimli/addr2line (DWARF for the Full tier), perf.data parsing.
+[dependencies]

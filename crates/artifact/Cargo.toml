@@ -1,0 +1,12 @@
+[package]
+name = "artifact"
+description = "The Beisl trace artifact: frametime side-channel ⋈ symbolicated perf samples"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# v0 is std-only. Deps we'll add: serde (+ a self-contained container: rusqlite or
+# a versioned binary format) so the GUI + MCP can query without re-parsing perf.data.
+[dependencies]

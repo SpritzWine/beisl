@@ -1,0 +1,12 @@
+[package]
+name = "preflight"
+description = "UI-agnostic setup checks (perf / llvm / paranoid / mangohud) + privileged fix commands"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# std-only: detection is which()/sysfs; fixes are *described* here and executed by the
+# caller (GUI) via pkexec. No process is elevated from inside this crate.
+[dependencies]

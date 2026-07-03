@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/preflight",       # setup checks (perf/llvm/paranoid/mangohud) + pkexec fixes
+    "crates/symbol-resolver", # perf.data addresses -> wine symbols (tiered fidelity)
+    "crates/artifact",        # the merged, exportable trace (frametimes ⋈ samples)
+    # v1:
+    # "crates/beisl-gui",     # libcosmic control panel + results view
+    # "crates/beisl-mcp",     # serve the artifact to Claude
+]
+
+[workspace.package]
+authors = ["Florian Schaupp"]
+version = "0.0.1"
+edition = "2021"
+license = "LGPL-2.1-or-later"
+repository = "https://codeberg.org/SpritzWine/Beisl"
+
+[profile.release]
+# Beisl ships bundled with SpritzWine; keep it small.
+opt-level = "s"
+lto = true
+strip = true
