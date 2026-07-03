@@ -1,0 +1,30 @@
+# Beisl setup + trace GUI (libcosmic / COSMIC look).
+#
+# Standalone crate with its OWN workspace + lockfile, excluded from the main Beisl
+# workspace so the heavy libcosmic/winit/wgpu tree never touches the light CLI/lib build
+# (mirrors the SpritzWine installer's split). Same pinned libcosmic rev + feature set as
+# the installer, a known-good windowed-app baseline.
+[package]
+name = "beisl-gui"
+authors = ["Florian Schaupp"]
+version = "0.0.1"
+edition = "2021"
+description = "Beisl setup + trace GUI (COSMIC look)"
+license = "LGPL-2.1-or-later"
+publish = false
+
+[[bin]]
+name = "beisl-setup"
+path = "src/main.rs"
+
+[dependencies]
+preflight = { path = "../preflight" }
+
+[dependencies.libcosmic]
+git = "https://github.com/pop-os/libcosmic.git"
+rev = "8df1858e5d25b49e9d4e79f631ba7322c3fc6bd6"
+default-features = false
+features = ["dbus-config", "tokio", "winit", "wgpu"]
+
+# Own workspace root -> own Cargo.lock, kept out of the main Beisl lockfile.
+[workspace]

@@ -6,9 +6,12 @@ members = [
     "crates/symbol-resolver", # perf.data addresses -> wine symbols (tiered fidelity)
     "crates/artifact",        # the merged, exportable trace (frametimes ⋈ samples)
     # v1:
-    # "crates/beisl-gui",     # libcosmic control panel + results view
     # "crates/beisl-mcp",     # serve the artifact to Claude
 ]
+
+# beisl-gui is a standalone workspace (its own lockfile): the heavy libcosmic/wgpu tree
+# stays out of the light CLI/lib build. Built separately via crates/beisl-gui.
+exclude = ["crates/beisl-gui"]
 
 [workspace.package]
 authors = ["Florian Schaupp"]
