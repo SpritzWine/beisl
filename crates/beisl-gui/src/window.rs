@@ -130,7 +130,17 @@ impl Application for SessionApp {
             .push(stop)
             .push(widget::button::suggested("Close").on_press(Msg::Close));
 
-        widget::container(col.push(widget::Space::new().height(Length::Fill)).push(buttons))
+        // Content scrolls; the buttons stay pinned and visible at the bottom.
+        let page = widget::Column::new()
+            .spacing(10)
+            .push(
+                widget::scrollable(col)
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            )
+            .push(buttons);
+
+        widget::container(page)
             .padding(24)
             .width(Length::Fill)
             .height(Length::Fill)

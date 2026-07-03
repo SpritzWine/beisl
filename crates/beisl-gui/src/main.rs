@@ -235,7 +235,9 @@ impl Application for AppModel {
             "Getting Beisl ready"
         };
 
-        let mut col = widget::Column::new()
+        // The growing part (checklist + wrapping `why` lines + log) — this scrolls, so the
+        // tip and footer below never get pushed out of the window.
+        let mut content = widget::Column::new()
             .spacing(14)
             .push(widget::text::title1(title))
             .push(widget::text::caption(format!(
@@ -251,34 +253,35 @@ impl Application for AppModel {
                 .push(widget::checkbox(is_ok).label(c.label))
                 .push(widget::Space::new().width(Length::Fill))
                 .push(widget::text::caption(status_word(c)));
-            col = col.push(row).push(widget::text::caption(c.why));
+            content = content.push(row).push(widget::text::caption(c.why));
         }
 
-        // While fixing, show the command log.
+        // While fixing, show the command log (rides along in the same scroll region).
         if self.running() || !self.log.is_empty() {
             let mut logcol = widget::Column::new().spacing(2);
             for line in self.log.iter().rev().take(80).rev() {
                 logcol = logcol.push(widget::text::monotext(line.clone()));
             }
-            col = col.push(
-                widget::scrollable(logcol)
-                    .width(Length::Fill)
-                    .height(Length::Fixed(140.0)),
-            );
+            content = content.push(logcol);
         }
 
         if let Some(e) = &self.error {
-            col = col.push(widget::text::body(format!("Something went wrong: {e}")));
+            content = content.push(widget::text::body(format!("Something went wrong: {e}")));
         }
 
-        // Rotating onboarding tip.
-        col = col
-            .push(widget::Space::new().height(Length::Fill))
-            .push(widget::container(widget::text::body(TIPS[self.tip])).padding(12));
+        // Scrollable content fills the space; the rotating tip and the footer stay pinned
+        // and always visible at the bottom.
+        let page = widget::Column::new()
+            .spacing(14)
+            .push(
+                widget::scrollable(content)
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            )
+            .push(widget::container(widget::text::body(TIPS[self.tip])).padding(12))
+            .push(self.footer());
 
-        col = col.push(self.footer());
-
-        widget::container(col)
+        widget::container(page)
             .padding(28)
             .width(Length::Fill)
             .height(Length::Fill)
