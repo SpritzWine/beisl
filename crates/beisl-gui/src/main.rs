@@ -20,6 +20,8 @@ use cosmic::{Application, Element};
 
 use preflight::{all_checks, detect_distro, disk_check, fix_command, Check, Distro, Status};
 
+mod window; // the live session window (`--session`)
+
 /// Onboarding tips, cycled while the user waits.
 const TIPS: &[&str] = &[
     "Press your MangoHud logging hotkey (default Shift+F2) to start and stop a trace.",
@@ -330,6 +332,13 @@ fn status_word(c: &Check) -> String {
 }
 
 fn main() -> cosmic::iced::Result {
+    // `beisl-setup --session <dir>` opens the live session window; otherwise the setup page.
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() == Some("--session") {
+        let dir = PathBuf::from(args.next().unwrap_or_default());
+        let settings = Settings::default().size(cosmic::iced::Size::new(440.0, 560.0));
+        return cosmic::app::run::<window::SessionApp>(settings, dir);
+    }
     let settings = Settings::default().size(cosmic::iced::Size::new(640.0, 640.0));
     cosmic::app::run::<AppModel>(settings, ())
 }

@@ -481,6 +481,7 @@ version = "0.0.1"
 dependencies = [
  "libcosmic",
  "preflight",
+ "session",
 ]
 
 [[package]]
@@ -4093,6 +4094,14 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "session"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

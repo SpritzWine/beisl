@@ -16,3 +16,4 @@ path = "src/main.rs"
 # the post-run step is wired).
 [dependencies]
 preflight = { path = "../preflight" }
+session = { path = "../session" }

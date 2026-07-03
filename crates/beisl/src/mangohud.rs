@@ -9,6 +9,9 @@
 use std::path::Path;
 use std::process::Command;
 
+/// The MangoHud hotkey that toggles frametime logging (and, with it, our capture).
+pub const TOGGLE_KEY: &str = "Shift_L+F2";
+
 /// Configure `cmd`'s environment so MangoHud logs frametimes into `run_dir`.
 pub fn configure(cmd: &mut Command, run_dir: &Path) {
     cmd.env("MANGOHUD", "1");
@@ -19,8 +22,9 @@ pub fn configure(cmd: &mut Command, run_dir: &Path) {
         cfg.push(',');
     }
     cfg.push_str(&format!(
-        "output_folder={},toggle_logging=Shift_L+F2",
-        run_dir.display()
+        "output_folder={},toggle_logging={}",
+        run_dir.display(),
+        TOGGLE_KEY
     ));
     cmd.env("MANGOHUD_CONFIG", cfg);
 
