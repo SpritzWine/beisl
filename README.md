@@ -17,11 +17,32 @@ wine — not just ours, so a SpritzWine-vs-Proton comparison captures both halve
 
 See **[DESIGN.md](DESIGN.md)** for the architecture and roadmap.
 
+## Install & use
+
+Beisl ships bundled with SpritzWine (or build it standalone — it works with any wine).
+From the extracted tree:
+
+```sh
+beisl install          # copies beisl onto your PATH (~/.local/bin) + adds "Beisl Setup" to the menu
+beisl-setup            # (or the menu entry) — check prerequisites: perf, symbols, permissions
+```
+
+Then add Beisl to a game's launch options — **Steam → Properties → Launch Options**:
+
+```
+beisl %command%
+```
+
+Play, then close the game; the trace lands in `~/.local/share/beisl/traces/`. Works the
+same way as `mangohud %command%`, and with any Proton/Wine — not just SpritzWine.
+`beisl uninstall` removes it.
+
 ## Status
 
-Early scaffold (**v0**). The wrapper sets up the environment and runs the game today;
-`perf` capture, symbol resolution, the artifact export, the GUI and the MCP server
-are stubbed with their design pinned in DESIGN.md.
+Early (**v0**). The libcosmic setup page and the preflight/install plumbing work today;
+the wrapper sets up the environment and launches the game, while `perf` capture, symbol
+resolution, the artifact export and the MCP server are stubbed with their design pinned in
+DESIGN.md.
 
 ## Build
 

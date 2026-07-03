@@ -15,6 +15,7 @@ use std::process::ExitCode;
 
 mod check;
 mod cue;
+mod install;
 mod mangohud;
 mod perf;
 mod run;
@@ -22,13 +23,14 @@ mod run;
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
 
-    // `beisl --check` runs the setup preflight and exits (the GUI binds to the same
-    // `preflight` crate; this is its headless face).
-    if matches!(
-        args.first().map(String::as_str),
-        Some("--check" | "--preflight" | "doctor")
-    ) {
-        return check::run();
+    // Subcommands. `--check` runs the setup preflight (the GUI binds to the same
+    // `preflight` crate; this is its headless face); `install`/`uninstall` put `beisl`
+    // on PATH so it works in launch options.
+    match args.first().map(String::as_str) {
+        Some("--check" | "--preflight" | "doctor") => return check::run(),
+        Some("install") => return install::run(false),
+        Some("uninstall") => return install::run(true),
+        _ => {}
     }
 
     let cmd = match parse_command(&args) {
