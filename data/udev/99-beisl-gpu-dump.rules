@@ -1,0 +1,18 @@
+# Beisl — grant the "render" group read access to GPU crash dumps, so a plain user
+# can auto-capture them without root (see beisl DESIGN.md, the Saints Row case study:
+# the kernel keeps exactly ONE devcoredump, and while it sits unread new hangs record
+# nothing). Installed/removed by beisl-setup via pkexec — never silently.
+#
+# "render" is the standard GPU-access group (udev already gives it the renderD* nodes);
+# a user who traces GPU games is already in it. The dumps contain GPU state of the
+# user's OWN crashed games — no wider exposure than the render node they already have.
+#
+# devcoredump is a dynamic device that APPEARS on a GPU hang (xe, amdgpu, and other
+# drivers). udev MODE/GROUP keys only apply to /dev nodes, not sysfs bin-attributes,
+# so we widen the "data" attribute with RUN+= chgrp/chmod. %p is the device's devpath.
+ACTION=="add", SUBSYSTEM=="devcoredump", RUN+="/bin/sh -c 'chgrp render /sys%p/data 2>/dev/null; chmod g+r /sys%p/data 2>/dev/null'"
+
+# i915 exposes a STATIC per-card "error" node instead of a devcoredump. Widen it when
+# the drm card appears (boot-time coverage is also provided by the tmpfiles entry, for
+# cards already present before this rule loads).
+ACTION=="add|change", SUBSYSTEM=="drm", KERNEL=="card[0-9]*", RUN+="/bin/sh -c 'test -e /sys%p/error && chgrp render /sys%p/error 2>/dev/null && chmod g+r /sys%p/error 2>/dev/null'"
