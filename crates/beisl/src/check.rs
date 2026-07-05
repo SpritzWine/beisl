@@ -6,7 +6,9 @@
 
 use std::process::ExitCode;
 
-use preflight::{all_checks, detect_distro, disk_check, fix_command, gpu_dump_check, Status};
+use preflight::{
+    all_checks, detect_distro, disk_check, fix_command, gpu_dump_check, multi_gpu_check, Status,
+};
 
 pub fn run() -> ExitCode {
     let distro = detect_distro();
@@ -21,6 +23,9 @@ pub fn run() -> ExitCode {
     // The GPU dump-access row is optional and opt-in — shown, but never swept into a
     // blocking fix (it's non-blocking, and the GUI drives its own enable button).
     checks.push(gpu_dump_check());
+    // The multi-GPU/dual-ICD row is optional and informational — its remedy is picking a
+    // pin in the GUI's Advanced section, not a privileged fix, so it never gates readiness.
+    checks.push(multi_gpu_check());
 
     let mut blocking_missing = false;
 

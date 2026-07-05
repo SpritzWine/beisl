@@ -10,10 +10,12 @@
 //! Every check also carries a `why` string — the "we're doing X because Y" line the
 //! setup page shows to make the wait feel like onboarding rather than dead time.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 pub mod config;
-pub use config::{Config, DumpAccessPolicy};
+pub mod gpu;
+pub use config::{Config, DumpAccessPolicy, GpuPin};
 
 /// The lifecycle of a single check, as the setup page renders it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,6 +40,11 @@ pub enum CheckId {
     /// the blocking "set everything up" sweep — its fix is a standing privilege change and
     /// must be its own explicit click (see [`gpu_dump_check`]).
     GpuDumpAccess,
+    /// Optional, informational: more than one GPU (or more than one driver install for the
+    /// same GPU) is visible to Vulkan — the "enumeration roulette" trap from DESIGN.md's
+    /// Saints Row case study. No privileged fix; the remedy is picking a pin in the GUI's
+    /// Advanced section (see [`multi_gpu_check`]).
+    MultiGpu,
 }
 
 /// How to repair a failing check. Turned into a concrete `pkexec` argv by [`fix_command`].
@@ -63,8 +70,10 @@ pub enum Fix {
 pub struct Check {
     pub id: CheckId,
     pub label: &'static str,
-    /// The teaching / entertainment line bound to this step.
-    pub why: &'static str,
+    /// The teaching / entertainment line bound to this step. Usually a `&'static str`
+    /// literal; [`multi_gpu_check`] builds one dynamically (it names the actual GPU count),
+    /// hence `Cow` rather than a bare `&'static str`.
+    pub why: Cow<'static, str>,
     /// A blocking check must pass before a trace can run; non-blocking is advisory.
     pub blocking: bool,
     pub status: Status,
@@ -95,6 +104,7 @@ impl Check {
                 ok_or_fix(can_record)
             }
             CheckId::GpuDumpAccess => dump_access_status(),
+            CheckId::MultiGpu => multi_gpu_status(&gpu::physical_gpus()),
             CheckId::DiskSpace => return, // computed in `disk_check`
         };
     }
@@ -107,7 +117,7 @@ pub fn all_checks() -> Vec<Check> {
         Check {
             id: CheckId::Perf,
             label: "perf",
-            why: "We sample the CPU with perf to see where wine spends its time.",
+            why: "We sample the CPU with perf to see where wine spends its time.".into(),
             blocking: true,
             status: Status::Pending,
             fix: Some(Fix::InstallPackage { role: "perf" }),
@@ -115,7 +125,7 @@ pub fn all_checks() -> Vec<Check> {
         Check {
             id: CheckId::LlvmSymbolizer,
             label: "llvm-symbolizer",
-            why: "Turns raw addresses in the trace into function names.",
+            why: "Turns raw addresses in the trace into function names.".into(),
             blocking: true,
             status: Status::Pending,
             fix: Some(Fix::InstallPackage { role: "llvm" }),
@@ -124,7 +134,7 @@ pub fn all_checks() -> Vec<Check> {
             id: CheckId::PerfParanoid,
             label: "perf can record",
             why: "The kernel restricts profiling by default; we grant perf the CAP_PERFMON \
-                  capability so it can record without weakening the whole system.",
+                  capability so it can record without weakening the whole system.".into(),
             blocking: true,
             status: Status::Pending,
             fix: Some(perf_record_fix()),
@@ -132,7 +142,7 @@ pub fn all_checks() -> Vec<Check> {
         Check {
             id: CheckId::MangoHud,
             label: "MangoHud (optional)",
-            why: "Its frametime log flags the low-perf moments to zoom into. Optional.",
+            why: "Its frametime log flags the low-perf moments to zoom into. Optional.".into(),
             blocking: false,
             status: Status::Pending,
             fix: Some(Fix::InstallPackage { role: "mangohud" }),
@@ -153,7 +163,7 @@ pub fn disk_check(trace_dir: &Path) -> Check {
         id: CheckId::DiskSpace,
         label: "disk space for traces",
         why: "perf traces with call stacks can grow to gigabytes in seconds; we keep \
-              headroom and stop the capture if it runs low.",
+              headroom and stop the capture if it runs low.".into(),
         blocking: false,
         status,
         fix: None,
@@ -183,10 +193,69 @@ pub fn gpu_dump_check() -> Check {
         why: "When your GPU crashes a game, the proof that the GPU — not the game or Wine — \
                was at fault is locked to the system administrator by default. Turn this on and \
                Beisl can save that evidence itself, the moment it happens. The saved dumps only \
-               ever describe your own crashed games' GPU state.",
+               ever describe your own crashed games' GPU state.".into(),
         blocking: false,
         status: dump_access_status(),
         fix: Some(Fix::InstallDumpAccessRule),
+    }
+}
+
+/// The optional, informational "more than one GPU visible to Vulkan" check (task #59 ②).
+/// Kept OUT of [`all_checks`], mirroring [`gpu_dump_check`]: it's advisory, never blocking,
+/// and its remedy — picking a pin — is a plain config write in the GUI's Advanced section,
+/// not a privileged fix, so `fix` is always `None`. The caller adds it like [`disk_check`].
+///
+/// `why` follows Beisl's layered wording: plain diagnosis first, technical detail last —
+/// and unlike the other checks it's genuinely dynamic (it names the actual GPU count and
+/// the detected vendor:device ids), which is why [`Check::why`] is a `Cow` rather than a
+/// bare `&'static str`.
+pub fn multi_gpu_check() -> Check {
+    let gpus = gpu::physical_gpus();
+    let count = gpu::hardware_gpu_count(&gpus);
+    Check {
+        id: CheckId::MultiGpu,
+        label: "GPU selection (optional)",
+        why: multi_gpu_why(count, &gpus).into(),
+        blocking: false,
+        status: multi_gpu_status(&gpus),
+        fix: None,
+    }
+}
+
+fn multi_gpu_status(gpus: &[gpu::PhysicalGpu]) -> Status {
+    if gpu::hardware_gpu_count(gpus) <= 1 {
+        Status::Ok
+    } else {
+        Status::NeedsFix
+    }
+}
+
+fn multi_gpu_why(count: usize, gpus: &[gpu::PhysicalGpu]) -> String {
+    if count <= 1 {
+        "Only one GPU is visible to Vulkan here, so there's nothing to pin — a trace always \
+         lands on it."
+            .to_string()
+    } else {
+        let detail = gpus
+            .iter()
+            .filter_map(|g| {
+                let v = g.vendor_id.as_deref()?;
+                let d = g.device_id.as_deref().unwrap_or("????");
+                Some(format!(
+                    "{} {}:{}",
+                    gpu::vendor_name(v),
+                    v.trim_start_matches("0x"),
+                    d.trim_start_matches("0x")
+                ))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "{count} GPUs are visible — traces and A/B comparisons can silently land on the \
+             wrong one; pin the GPU you mean to test for reliable comparisons. (Detected: \
+             {detail}. Pin sets VK_DRIVER_FILES and, where we can resolve it, \
+             MESA_VK_DEVICE_SELECT — in the Advanced section.)"
+        )
     }
 }
 

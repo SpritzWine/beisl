@@ -46,6 +46,11 @@ pub struct Session {
     /// still-pending dump is captured without any further hand-off.
     #[serde(default)]
     pub dump_capture_offer: bool,
+    /// Human label of the pinned GPU (`preflight::config::GpuPin::name`), if the wrapper
+    /// launched with a pin configured — so the session window can show "GPU: <name>
+    /// (pinned)". `None` when no pin is configured (the common case).
+    #[serde(default)]
+    pub gpu_pin: Option<String>,
 }
 
 impl Session {

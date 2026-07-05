@@ -41,6 +41,19 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
     for (k, v) in &envs {
         child.env(k, v);
     }
+
+    // Force Vulkan enumeration onto a specific GPU, if the user pinned one (task #59 ②) —
+    // countering the "enumeration roulette" trap from DESIGN.md's Saints Row case study,
+    // where two Vulkan-visible drivers silently invalidated an A/B. Plain config, no
+    // privilege involved.
+    let cfg = preflight::Config::load();
+    if let Some(pin) = &cfg.gpu_pin {
+        for (k, v) in gpu_pin_envs(pin) {
+            log.line(&format!("gpu pin: {k}={v}"));
+            child.env(k, v);
+        }
+    }
+
     mangohud::configure(&mut child, &run_dir); // frametime side-channel + toggle hotkey
 
     let mut recorder = perf::Recorder::new(&run_dir);
@@ -55,6 +68,7 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
         hotkey: TOGGLE_KEY.to_string(),
         state: State::Starting,
         warnings: preflight_warnings(),
+        gpu_pin: cfg.gpu_pin.as_ref().map(|p| p.name.clone()),
         ..Default::default()
     };
     let _ = sess.write(&run_dir);
@@ -184,6 +198,18 @@ fn drain_gpu_events(watch: &mut gpu::GpuWatch, log: &mut Log, sess: &mut Session
     }
 }
 
+/// The child-process env vars a GPU pin translates to: `VK_DRIVER_FILES` (the pin's ICD
+/// manifest paths, colon-joined — the format Vulkan's loader expects) and, only when we
+/// could resolve it, `MESA_VK_DEVICE_SELECT`. Split out from `trace` so it's testable
+/// without spawning a real process.
+fn gpu_pin_envs(pin: &preflight::GpuPin) -> Vec<(String, String)> {
+    let mut envs = vec![("VK_DRIVER_FILES".to_string(), pin.icd_paths.join(":"))];
+    if let Some(sel) = &pin.device_select {
+        envs.push(("MESA_VK_DEVICE_SELECT".to_string(), sel.clone()));
+    }
+    envs
+}
+
 /// Peel leading `VAR=value` tokens (Steam/user env assignments) off the front of the
 /// command, returning them plus the remaining program + args. Stops at the first token
 /// that isn't an assignment, so a normal `reaper …` command is left untouched.
@@ -308,4 +334,62 @@ pub(crate) fn data_root() -> PathBuf {
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     PathBuf::from(home).join(".local/share/beisl")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use preflight::GpuPin;
+
+    #[test]
+    fn gpu_pin_envs_joins_icd_paths_and_sets_device_select() {
+        let pin = GpuPin {
+            name: "Intel — intel_icd (/usr/share/vulkan/icd.d)".into(),
+            icd_paths: vec![
+                "/usr/share/vulkan/icd.d/intel_icd.x86_64.json".into(),
+                "/usr/share/vulkan/icd.d/intel_icd.i686.json".into(),
+            ],
+            device_select: Some("8086:56a0!".into()),
+        };
+        let envs = gpu_pin_envs(&pin);
+        assert_eq!(
+            envs,
+            vec![
+                (
+                    "VK_DRIVER_FILES".to_string(),
+                    "/usr/share/vulkan/icd.d/intel_icd.x86_64.json:\
+                     /usr/share/vulkan/icd.d/intel_icd.i686.json"
+                        .to_string()
+                ),
+                ("MESA_VK_DEVICE_SELECT".to_string(), "8086:56a0!".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn gpu_pin_envs_omits_device_select_when_unresolved() {
+        let pin = GpuPin {
+            name: "nouveau_icd (/usr/share/vulkan/icd.d)".into(),
+            icd_paths: vec!["/usr/share/vulkan/icd.d/nouveau_icd.x86_64.json".into()],
+            device_select: None,
+        };
+        let envs = gpu_pin_envs(&pin);
+        assert_eq!(envs.len(), 1);
+        assert_eq!(envs[0].0, "VK_DRIVER_FILES");
+    }
+
+    /// A configured pin must always survive into the session's human-readable label
+    /// (`session::Session::gpu_pin`), the same field the session window shows. This locks
+    /// down the mapping `trace()` does inline (`cfg.gpu_pin.as_ref().map(|p| p.name...)`).
+    #[test]
+    fn session_gpu_pin_label_mirrors_the_configured_pins_name() {
+        let pin = GpuPin {
+            name: "Intel — intel_icd (/usr/share/vulkan/icd.d)".into(),
+            icd_paths: vec!["/a.json".into()],
+            device_select: None,
+        };
+        let cfg = preflight::Config { gpu_pin: Some(pin.clone()), ..Default::default() };
+        let label = cfg.gpu_pin.as_ref().map(|p| p.name.clone());
+        assert_eq!(label.as_deref(), Some(pin.name.as_str()));
+    }
 }
