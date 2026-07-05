@@ -142,20 +142,41 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
 }
 
 /// Surface GPU-hang captures/warnings live: into the log and the session window.
+///
+/// User-facing wording is layered (DESIGN + Florian's spec): plain diagnosis first ("your
+/// GPU, not the game or Wine"), the offer to help gather evidence second, the technical
+/// detail (card, filename, reboot advice) last.
 fn drain_gpu_events(watch: &mut gpu::GpuWatch, log: &mut Log, sess: &mut Session, run_dir: &Path) {
     for ev in watch.poll() {
         match ev {
             gpu::Event::Captured { card, dest } => {
                 log.line(&format!("gpu: devcoredump on {card} captured -> {}", dest.display()));
+                let file = dest
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
                 sess.warnings.push(format!(
-                    "GPU hang on {card}! Dump saved to {}. The GPU was reset — results from here on are suspect; reboot before the next comparison run.",
-                    dest.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+                    "Something went wrong and your GPU was the cause — not the game's code and \
+                     not Wine. Beisl saved the crash evidence for you ({file}). \
+                     Heads-up: the GPU had to be reset, so reboot before your next comparison \
+                     run — results until then can't be trusted. (GPU: {card})"
                 ));
             }
             gpu::Event::Unreadable { card, node } => {
                 log.line(&format!("gpu: devcoredump pending on {card} but root-only ({})", node.display()));
+                // Offer the one-click enable only under the warn-only policy.
+                let offer = preflight::Config::load().dump_access_policy
+                    == preflight::DumpAccessPolicy::WarnOnly;
+                sess.dump_capture_offer = offer;
+                let bridge = if offer {
+                    "Want to help get this fixed? Turn on crash-dump capture and Beisl will save \
+                     the evidence — this crash's dump can still be rescued."
+                } else {
+                    "Beisl couldn't read the crash dump this time."
+                };
                 sess.warnings.push(format!(
-                    "GPU hang on {card}! The dump is root-only — save it now, the kernel holds only ONE: {}",
+                    "Something went wrong and your GPU was the cause — not the game's code and \
+                     not Wine. {bridge} To grab it by hand instead: {} (GPU: {card})",
                     gpu::sudo_capture_hint(&node, run_dir, &card)
                 ));
             }

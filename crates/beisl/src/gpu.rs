@@ -32,8 +32,13 @@ pub enum Event {
 pub struct GpuWatch {
     base: PathBuf,
     run_dir: PathBuf,
-    /// Nodes already captured or warned about — one event per node per session.
-    handled: HashSet<PathBuf>,
+    /// Nodes we've captured + freed — done, never revisit.
+    captured: HashSet<PathBuf>,
+    /// Nodes we've already emitted an [`Event::Unreadable`] for — warn once, but KEEP
+    /// re-attempting the read. So if the user enables auto-capture mid-session (the udev
+    /// rule + a reload land while the game runs, and the xe dump survives until read), the
+    /// very next poll succeeds and captures the still-pending dump instead of losing it.
+    warned: HashSet<PathBuf>,
     captures: u32,
 }
 
@@ -47,7 +52,8 @@ impl GpuWatch {
         GpuWatch {
             base: base.to_path_buf(),
             run_dir: run_dir.to_path_buf(),
-            handled: HashSet::new(),
+            captured: HashSet::new(),
+            warned: HashSet::new(),
             captures: 0,
         }
     }
@@ -57,7 +63,7 @@ impl GpuWatch {
         let mut events = Vec::new();
         for card in self.cards() {
             let node = self.base.join(&card).join("device/devcoredump/data");
-            if !node.exists() || self.handled.contains(&node) {
+            if !node.exists() || self.captured.contains(&node) {
                 continue;
             }
             match std::fs::read(&node) {
@@ -69,13 +75,16 @@ impl GpuWatch {
                     if std::fs::write(&dest, &data).is_ok() {
                         // Free the slot so the NEXT hang can record (xe keeps one).
                         let _ = std::fs::write(&node, "1");
-                        self.handled.insert(node);
+                        self.captured.insert(node);
                         events.push(Event::Captured { card, dest });
                     }
                 }
                 Err(e) if e.kind() == ErrorKind::PermissionDenied => {
-                    self.handled.insert(node.clone());
-                    events.push(Event::Unreadable { card, node });
+                    // Warn once, but do NOT give up: keep re-reading each poll so enabling
+                    // auto-capture mid-session rescues this still-pending dump.
+                    if self.warned.insert(node.clone()) {
+                        events.push(Event::Unreadable { card, node });
+                    }
                 }
                 Err(_) => {} /* transient (node vanished mid-read); retry next poll */
             }
@@ -185,6 +194,37 @@ mod tests {
         let mut w = GpuWatch::with_base(&base, &run);
         assert!(w.poll().is_empty());
         assert_eq!(w.cards(), vec!["card0".to_string()]);
+    }
+
+    #[test]
+    fn unreadable_dump_is_retried_and_captured_after_access_is_granted() {
+        // Root bypasses file perms, so this can only assert the retry on a non-root run.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let (tmp, base) = fake_sysfs(&["card1"], &[]);
+        let node = base.join("card1/device/devcoredump/data");
+        // Make the pending dump unreadable (simulates the default root-only node).
+        chmod(&node, 0o000);
+        let run = tmp.path().join("run");
+        std::fs::create_dir_all(&run).unwrap();
+
+        let mut w = GpuWatch::with_base(&base, &run);
+        // First poll: one Unreadable warning…
+        let ev = w.poll();
+        assert!(matches!(ev.as_slice(), [Event::Unreadable { .. }]));
+        // …and it isn't spammed on the next poll while still unreadable.
+        assert!(w.poll().is_empty());
+
+        // User enables auto-capture mid-session → node becomes readable → next poll captures.
+        chmod(&node, 0o644);
+        let ev = w.poll();
+        assert!(matches!(ev.as_slice(), [Event::Captured { .. }]));
+    }
+
+    fn chmod(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
     }
 
     #[test]

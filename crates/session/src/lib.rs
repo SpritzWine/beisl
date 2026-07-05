@@ -40,6 +40,12 @@ pub struct Session {
     pub message: String,
     /// Reader -> writer: the window asked to stop the trace.
     pub stop_requested: bool,
+    /// Writer -> reader: a GPU crash left a dump we could NOT read, and the policy is
+    /// warn-only — so the window should offer a one-click "Enable auto-capture". The
+    /// wrapper keeps re-attempting the read every poll, so once the rule is installed the
+    /// still-pending dump is captured without any further hand-off.
+    #[serde(default)]
+    pub dump_capture_offer: bool,
 }
 
 impl Session {
