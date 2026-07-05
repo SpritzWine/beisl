@@ -5,6 +5,7 @@
 //! `stop_requested`, which the wrapper picks up. Mirrors the setup page's Application shape.
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cosmic::app::{Core, Task};
@@ -12,14 +13,26 @@ use cosmic::iced::{Length, Subscription};
 use cosmic::widget;
 use cosmic::{Application, Element};
 
+use preflight::{detect_distro, fix_command, Config, DumpAccessPolicy, Fix};
 use session::{Session, State};
 
 #[derive(Debug, Clone)]
 pub enum Msg {
     Tick,
     Stop,
+    /// The live "your GPU crashed — help gather evidence" offer: install the access rule
+    /// now (one polkit prompt). The wrapper is still polling the pending dump, so once the
+    /// rule lands its next read captures it — no reverse channel needed for the retry.
+    EnableDumpCapture,
     OpenFolder,
     Close,
+}
+
+/// Tracks the background `pkexec` install so the polkit prompt doesn't block the UI.
+#[derive(Default)]
+struct Enable {
+    finished: bool,
+    error: Option<String>,
 }
 
 pub struct SessionApp {
@@ -27,6 +40,9 @@ pub struct SessionApp {
     dir: PathBuf,
     session: Session,
     have: bool,
+    config: Config,
+    enabling: Option<Arc<Mutex<Enable>>>,
+    enable_note: Option<String>,
 }
 
 impl Application for SessionApp {
@@ -48,7 +64,18 @@ impl Application for SessionApp {
         let read = Session::read(&dir);
         let have = read.is_some();
         let session = read.unwrap_or_default();
-        (Self { core, dir, session, have }, Task::none())
+        (
+            Self {
+                core,
+                dir,
+                session,
+                have,
+                config: Config::load(),
+                enabling: None,
+                enable_note: None,
+            },
+            Task::none(),
+        )
     }
 
     fn update(&mut self, message: Self::Message) -> Task<Self::Message> {
@@ -57,6 +84,35 @@ impl Application for SessionApp {
                 if let Some(s) = Session::read(&self.dir) {
                     self.session = s;
                     self.have = true;
+                }
+                if let Some(w) = &self.enabling {
+                    let (finished, error) = {
+                        let e = w.lock().unwrap();
+                        (e.finished, e.error.clone())
+                    };
+                    if finished {
+                        self.enabling = None;
+                        if let Some(err) = error {
+                            self.enable_note = Some(format!("Couldn't enable capture: {err}"));
+                        } else {
+                            // Persist intent + tell the user; the wrapper's watcher will
+                            // capture the still-pending dump on its next poll.
+                            self.config.dump_access_policy = DumpAccessPolicy::RuleInstalled;
+                            let _ = self.config.save();
+                            self.enable_note = Some(
+                                "Capture enabled — saving this crash's dump now.".to_string(),
+                            );
+                        }
+                    }
+                }
+            }
+            Msg::EnableDumpCapture => {
+                if self.enabling.is_none() {
+                    let cmd = fix_command(&Fix::InstallDumpAccessRule, detect_distro());
+                    if !cmd.is_empty() {
+                        self.enable_note = Some("Enabling capture…".to_string());
+                        self.enabling = Some(spawn_enable(cmd));
+                    }
                 }
             }
             Msg::Stop => {
@@ -116,6 +172,22 @@ impl Application for SessionApp {
             }
         }
 
+        // The live "help gather evidence" affordance: only under the warn-only policy, and
+        // only once a crash has left a dump we couldn't read (the wrapper sets the flag).
+        // The headline diagnosis is already in the warning text above; this is the action.
+        if s.dump_capture_offer
+            && self.config.dump_access_policy == DumpAccessPolicy::WarnOnly
+        {
+            let mut b = widget::button::suggested("Enable auto-capture");
+            if self.enabling.is_none() {
+                b = b.on_press(Msg::EnableDumpCapture);
+            }
+            col = col.push(b);
+        }
+        if let Some(note) = &self.enable_note {
+            col = col.push(widget::text::caption(note.clone()));
+        }
+
         if !self.have {
             col = col.push(widget::text::caption("(waiting for the session to start…)"));
         }
@@ -147,6 +219,27 @@ impl Application for SessionApp {
             .height(Length::Fill)
             .into()
     }
+}
+
+/// Run the (single) `pkexec …` install argv on a background thread so the polkit prompt
+/// doesn't block the event loop.
+fn spawn_enable(cmd: Vec<String>) -> Arc<Mutex<Enable>> {
+    let state = Arc::new(Mutex::new(Enable::default()));
+    let s2 = state.clone();
+    std::thread::spawn(move || {
+        let result = std::process::Command::new(&cmd[0]).args(&cmd[1..]).output();
+        let mut e = s2.lock().unwrap();
+        match result {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => {
+                let msg = String::from_utf8_lossy(&out.stderr);
+                e.error = Some(msg.lines().last().unwrap_or("failed").to_string());
+            }
+            Err(err) => e.error = Some(err.to_string()),
+        }
+        e.finished = true;
+    });
+    state
 }
 
 fn mmss(secs: u64) -> String {

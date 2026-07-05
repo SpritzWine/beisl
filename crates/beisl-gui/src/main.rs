@@ -18,7 +18,10 @@ use cosmic::iced::{Length, Subscription};
 use cosmic::widget;
 use cosmic::{Application, Element};
 
-use preflight::{all_checks, detect_distro, disk_check, fix_command, Check, Distro, Status};
+use preflight::{
+    all_checks, detect_distro, disk_check, fix_command, gpu_dump_check, Check, CheckId, Config,
+    Distro, DumpAccessPolicy, Fix, Status,
+};
 
 mod window; // the live session window (`--session`)
 
@@ -86,6 +89,14 @@ fn spawn_fixer(cmds: Vec<Vec<String>>) -> Arc<Mutex<Shared>> {
 enum Message {
     Recheck,
     FixAll,
+    /// The optional GPU dump-access row's OWN button — a standing privilege change, always
+    /// its own explicit click, never folded into `FixAll`.
+    EnableDumpCapture,
+    /// Advanced: remove the installed rule.
+    RemoveDumpRule,
+    /// Advanced: pick the persisted policy (intent only — no privilege runs here).
+    SetPolicy(DumpAccessPolicy),
+    ToggleAdvanced,
     Tick,
     Close,
 }
@@ -96,6 +107,11 @@ struct AppModel {
     trace_dir: PathBuf,
     checks: Vec<Check>,
     worker: Option<Arc<Mutex<Shared>>>,
+    /// Separate worker for the opt-in dump-access install/remove, so it can never ride
+    /// along with the blocking `FixAll` sweep. Carries the policy to persist on success.
+    dump_worker: Option<(Arc<Mutex<Shared>>, DumpAccessPolicy)>,
+    config: Config,
+    show_advanced: bool,
     log: Vec<String>,
     error: Option<String>,
     tick: u64,
@@ -119,14 +135,18 @@ impl AppModel {
             c.detect();
         }
         checks.push(disk_check(trace_dir));
+        // The optional, opt-in GPU dump-access row. Kept separate so it never joins the
+        // blocking "set everything up" sweep (see `pending_fixes`).
+        checks.push(gpu_dump_check());
         checks
     }
 
     fn running(&self) -> bool {
-        self.worker.is_some()
+        self.worker.is_some() || self.dump_worker.is_some()
     }
 
-    /// All *blocking* checks satisfied → the user can trace.
+    /// All *blocking* checks satisfied → the user can trace. (The optional GPU-dump row is
+    /// non-blocking, so it never gates readiness.)
     fn ready(&self) -> bool {
         self.checks
             .iter()
@@ -134,14 +154,44 @@ impl AppModel {
             .all(|c| c.status == Status::Ok)
     }
 
-    /// The pkexec commands for every fixable check that still needs setup.
+    /// The pkexec commands for every fixable check that still needs setup — EXCLUDING the
+    /// GPU dump-access row, whose standing privilege is only ever applied by its own button.
     fn pending_fixes(&self) -> Vec<Vec<String>> {
         self.checks
             .iter()
-            .filter(|c| c.status == Status::NeedsFix)
+            .filter(|c| c.status == Status::NeedsFix && c.id != CheckId::GpuDumpAccess)
             .filter_map(|c| c.fix.as_ref().map(|f| fix_command(f, self.distro)))
             .filter(|cmd| !cmd.is_empty())
             .collect()
+    }
+
+    fn gpu_dump_status(&self) -> Status {
+        self.checks
+            .iter()
+            .find(|c| c.id == CheckId::GpuDumpAccess)
+            .map(|c| c.status.clone())
+            .unwrap_or(Status::NeedsFix)
+    }
+
+    /// Start the dump-access install (or remove) on the dedicated worker, persisting the
+    /// given policy once it succeeds. One polkit prompt; guarded by `running()`.
+    fn spawn_dump(&mut self, fix: Fix, becomes: DumpAccessPolicy) {
+        if self.running() {
+            return;
+        }
+        let cmd = fix_command(&fix, self.distro);
+        if cmd.is_empty() {
+            return;
+        }
+        self.log.clear();
+        self.error = None;
+        // Reflect "working…" on the row.
+        for c in self.checks.iter_mut() {
+            if c.id == CheckId::GpuDumpAccess {
+                c.status = Status::Fixing;
+            }
+        }
+        self.dump_worker = Some((spawn_fixer(vec![cmd]), becomes));
     }
 }
 
@@ -169,6 +219,9 @@ impl Application for AppModel {
             trace_dir,
             checks,
             worker: None,
+            dump_worker: None,
+            config: Config::load(),
+            show_advanced: false,
             log: Vec::new(),
             error: None,
             tick: 0,
@@ -200,6 +253,21 @@ impl Application for AppModel {
                     }
                 }
             }
+            Message::EnableDumpCapture => {
+                self.spawn_dump(Fix::InstallDumpAccessRule, DumpAccessPolicy::RuleInstalled);
+            }
+            Message::RemoveDumpRule => {
+                self.spawn_dump(Fix::RemoveDumpAccessRule, DumpAccessPolicy::WarnOnly);
+            }
+            Message::SetPolicy(p) => {
+                // Intent only — persist the preference; the privileged install/remove stays
+                // behind the explicit Enable / Remove buttons.
+                if !self.running() {
+                    self.config.dump_access_policy = p;
+                    let _ = self.config.save();
+                }
+            }
+            Message::ToggleAdvanced => self.show_advanced = !self.show_advanced,
             Message::Tick => {
                 self.tick += 1;
                 if self.tick % 24 == 0 {
@@ -214,6 +282,23 @@ impl Application for AppModel {
                     if finished {
                         self.worker = None;
                         self.error = error;
+                        self.checks = Self::detect_all(&self.trace_dir);
+                    }
+                }
+                if let Some((w, becomes)) = self.dump_worker.clone() {
+                    let (log, finished, error) = {
+                        let s = w.lock().unwrap();
+                        (s.log.clone(), s.finished, s.error.clone())
+                    };
+                    self.log = log;
+                    if finished {
+                        self.dump_worker = None;
+                        self.error = error.clone();
+                        // Persist the new policy only if the privileged step actually worked.
+                        if error.is_none() {
+                            self.config.dump_access_policy = becomes;
+                            let _ = self.config.save();
+                        }
                         self.checks = Self::detect_all(&self.trace_dir);
                     }
                 }
@@ -248,13 +333,28 @@ impl Application for AppModel {
         for c in &self.checks {
             let is_ok = c.status == Status::Ok;
             // Read-only checkbox (no on_toggle) = the status indicator.
-            let row = widget::Row::new()
+            let mut row = widget::Row::new()
                 .spacing(12)
                 .push(widget::checkbox(is_ok).label(c.label))
-                .push(widget::Space::new().width(Length::Fill))
-                .push(widget::text::caption(status_word(c)));
+                .push(widget::Space::new().width(Length::Fill));
+
+            // The optional GPU dump-access row carries its OWN Enable button — a standing
+            // privilege change, deliberately kept out of "Set everything up".
+            if c.id == CheckId::GpuDumpAccess && !is_ok {
+                let mut btn = widget::button::standard("Enable");
+                if !self.running() {
+                    btn = btn.on_press(Message::EnableDumpCapture);
+                }
+                row = row.push(btn);
+            } else {
+                row = row.push(widget::text::caption(status_word(c)));
+            }
             content = content.push(row).push(widget::text::caption(c.why));
         }
+
+        // Advanced (opt-in details): collapsed by default. No expander widget at this
+        // libcosmic rev, so a plain toggle-shown section (the brief allows this).
+        content = content.push(self.advanced_section());
 
         // While fixing, show the command log (rides along in the same scroll region).
         if self.running() || !self.log.is_empty() {
@@ -290,6 +390,58 @@ impl Application for AppModel {
 }
 
 impl AppModel {
+    /// The collapsed "Advanced" block: a toggle header, and when open, the GPU dump-access
+    /// policy radios + a "Remove rule" button. The radios record intent only; the actual
+    /// privileged install/remove are always the explicit Enable / Remove buttons.
+    fn advanced_section(&self) -> Element<'_, Message> {
+        let arrow = if self.show_advanced { "▾" } else { "▸" };
+        let header = widget::button::text(format!("{arrow} Advanced"))
+            .on_press(Message::ToggleAdvanced);
+
+        let mut col = widget::Column::new().spacing(8).push(header);
+        if !self.show_advanced {
+            return col.into();
+        }
+
+        let policy = self.config.dump_access_policy;
+        col = col
+            .push(widget::text::body("GPU crash-dump capture"))
+            .push(widget::text::caption(
+                "When a game crashes your GPU, this decides whether Beisl can save the \
+                 evidence itself or just points you at a manual command. The dumps only ever \
+                 describe your own crashed games.",
+            ))
+            .push(widget::radio(
+                widget::text::body("Warn only — no system change (default)"),
+                DumpAccessPolicy::WarnOnly,
+                Some(policy),
+                Message::SetPolicy,
+            ))
+            .push(widget::radio(
+                widget::text::body("Auto-capture — install the access rule (recommended)"),
+                DumpAccessPolicy::RuleInstalled,
+                Some(policy),
+                Message::SetPolicy,
+            ));
+
+        // The privileged actions, each its own labelled button.
+        let mut actions = widget::Row::new().spacing(8);
+        if self.gpu_dump_status() != Status::Ok {
+            let mut enable = widget::button::suggested("Enable auto-capture");
+            if !self.running() {
+                enable = enable.on_press(Message::EnableDumpCapture);
+            }
+            actions = actions.push(enable);
+        }
+        let mut remove = widget::button::destructive("Remove rule");
+        if !self.running() {
+            remove = remove.on_press(Message::RemoveDumpRule);
+        }
+        actions = actions.push(remove);
+
+        col.push(actions).into()
+    }
+
     fn footer(&self) -> Element<'_, Message> {
         let mut row = widget::Row::new().spacing(8);
 
