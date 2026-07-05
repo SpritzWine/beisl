@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use session::{Session, State};
 
 use crate::mangohud::TOGGLE_KEY;
-use crate::{cue, mangohud, perf};
+use crate::{cue, gpu, mangohud, perf};
 
 /// Run `cmd` under tracing; returns the game's exit code.
 pub fn trace(cmd: &[String]) -> io::Result<i32> {
@@ -44,6 +44,9 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
     mangohud::configure(&mut child, &run_dir); // frametime side-channel + toggle hotkey
 
     let mut recorder = perf::Recorder::new(&run_dir);
+    // Watch for GPU hangs: xe keeps exactly ONE devcoredump, so capture-and-free
+    // during the session or the next hang records nothing (see DESIGN.md case study).
+    let mut gpuwatch = gpu::GpuWatch::new(&run_dir);
 
     // Publish the initial state so the window has something to show immediately.
     let mut sess = Session {
@@ -98,6 +101,8 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
                 recorder.stop();
                 cue::play(cue::Cue::RecordStop);
             }
+            // A hang often coincides with the game dying — one last look.
+            drain_gpu_events(&mut gpuwatch, &mut log, &mut sess, &run_dir);
             sess.state = State::Done;
             sess.elapsed_secs = start.elapsed().as_secs();
             sess.trace_bytes = trace_size(&run_dir);
@@ -113,6 +118,7 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
 
         sess.elapsed_secs = start.elapsed().as_secs();
         sess.trace_bytes = trace_size(&run_dir);
+        drain_gpu_events(&mut gpuwatch, &mut log, &mut sess, &run_dir);
 
         // The window can ask us to stop the trace while the game keeps running. We must
         // keep living until the game exits (Steam waits on the launch-options process),
@@ -132,6 +138,28 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
         }
         let _ = sess.write(&run_dir);
         std::thread::sleep(Duration::from_millis(800));
+    }
+}
+
+/// Surface GPU-hang captures/warnings live: into the log and the session window.
+fn drain_gpu_events(watch: &mut gpu::GpuWatch, log: &mut Log, sess: &mut Session, run_dir: &Path) {
+    for ev in watch.poll() {
+        match ev {
+            gpu::Event::Captured { card, dest } => {
+                log.line(&format!("gpu: devcoredump on {card} captured -> {}", dest.display()));
+                sess.warnings.push(format!(
+                    "GPU hang on {card}! Dump saved to {}. The GPU was reset — results from here on are suspect; reboot before the next comparison run.",
+                    dest.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+                ));
+            }
+            gpu::Event::Unreadable { card, node } => {
+                log.line(&format!("gpu: devcoredump pending on {card} but root-only ({})", node.display()));
+                sess.warnings.push(format!(
+                    "GPU hang on {card}! The dump is root-only — save it now, the kernel holds only ONE: {}",
+                    gpu::sudo_capture_hint(&node, run_dir, &card)
+                ));
+            }
+        }
     }
 }
 
