@@ -12,6 +12,9 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod config;
+pub use config::{Config, DumpAccessPolicy};
+
 /// The lifecycle of a single check, as the setup page renders it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -31,6 +34,10 @@ pub enum CheckId {
     PerfParanoid,
     MangoHud,
     DiskSpace,
+    /// Optional, opt-in: read access to GPU crash dumps for auto-capture. NEVER part of
+    /// the blocking "set everything up" sweep — its fix is a standing privilege change and
+    /// must be its own explicit click (see [`gpu_dump_check`]).
+    GpuDumpAccess,
 }
 
 /// How to repair a failing check. Turned into a concrete `pkexec` argv by [`fix_command`].
@@ -44,6 +51,12 @@ pub enum Fix {
     /// user-owned. Preferred where `perf` is a real ELF binary; on Debian's wrapper
     /// script it doesn't stick, so [`perf_record_fix`] picks `Sysctl` there instead.
     SetcapPerfmon,
+    /// Install the udev rule + tmpfiles entry that grant the `render` group read access
+    /// to GPU crash dumps (devcoredump `data` + i915 `error`). One `pkexec` shell writes
+    /// both files and reloads udev/tmpfiles — a single polkit prompt. Opt-in only.
+    InstallDumpAccessRule,
+    /// Remove the same two files and reload udev.
+    RemoveDumpAccessRule,
 }
 
 #[derive(Clone, Debug)]
@@ -81,6 +94,7 @@ impl Check {
                     || matches!(read_paranoid(), Some(v) if v <= PARANOID_MAX);
                 ok_or_fix(can_record)
             }
+            CheckId::GpuDumpAccess => dump_access_status(),
             CheckId::DiskSpace => return, // computed in `disk_check`
         };
     }
@@ -144,6 +158,85 @@ pub fn disk_check(trace_dir: &Path) -> Check {
         status,
         fix: None,
     }
+}
+
+/// Where the installed rule + tmpfiles files live once applied.
+pub const DUMP_RULE_PATH: &str = "/etc/udev/rules.d/99-beisl-gpu-dump.rules";
+pub const DUMP_TMPFILES_PATH: &str = "/etc/tmpfiles.d/beisl-gpu-dump.conf";
+
+/// The shipped rule + tmpfiles bodies, embedded at build time from the repo's `data/`
+/// tree so the binary is self-contained (no runtime asset-path discovery) and the files
+/// in the repo stay the single source of truth. Written verbatim by [`fix_command`].
+const DUMP_RULE_BODY: &str = include_str!("../../../data/udev/99-beisl-gpu-dump.rules");
+const DUMP_TMPFILES_BODY: &str = include_str!("../../../data/tmpfiles/beisl-gpu-dump.conf");
+
+/// The optional, opt-in "GPU crash-dump capture" check. Kept OUT of [`all_checks`] so the
+/// blocking "set everything up" sweep never installs a standing privilege; the caller adds
+/// it separately (like [`disk_check`]) and drives its fix from its own labelled button.
+///
+/// The `why` follows Beisl's layered wording: plain diagnosis first, the offer to help
+/// second, the technical detail last.
+pub fn gpu_dump_check() -> Check {
+    Check {
+        id: CheckId::GpuDumpAccess,
+        label: "GPU crash-dump capture (optional)",
+        why: "When your GPU crashes a game, the proof that the GPU — not the game or Wine — \
+               was at fault is locked to the system administrator by default. Turn this on and \
+               Beisl can save that evidence itself, the moment it happens. The saved dumps only \
+               ever describe your own crashed games' GPU state.",
+        blocking: false,
+        status: dump_access_status(),
+        fix: Some(Fix::InstallDumpAccessRule),
+    }
+}
+
+/// `Ok` once the rule file is installed AND any GPU error node we can actually see is
+/// readable; otherwise `NeedsFix` (rendered as "optional"). Detection is filesystem truth,
+/// independent of the persisted [`DumpAccessPolicy`] — the policy is the user's *intent*,
+/// this is the *reality*.
+fn dump_access_status() -> Status {
+    if dump_rule_installed() && dump_nodes_readable() {
+        Status::Ok
+    } else {
+        Status::NeedsFix
+    }
+}
+
+/// Is the udev rule file present? (Cheap proxy for "the rule was installed".)
+pub fn dump_rule_installed() -> bool {
+    Path::new(DUMP_RULE_PATH).exists()
+}
+
+/// Best-effort: every GPU error node that currently *exists* is readable by us. The i915
+/// `error` node is a persistent sysfs attr we can probe directly; devcoredump `data` only
+/// exists during an actual hang, so its absence is not a failure. Returns true when there
+/// is nothing to check (no hang, non-i915 GPU) — the rule still covers the dynamic case.
+fn dump_nodes_readable() -> bool {
+    let drm = Path::new("/sys/class/drm");
+    let entries = match std::fs::read_dir(drm) {
+        Ok(e) => e,
+        Err(_) => return true, // no DRM sysfs (unusual) — nothing to gate on
+    };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        // Card dirs proper (`card0`, `card1`), not connectors (`card0-DP-1`).
+        if !name
+            .strip_prefix("card")
+            .is_some_and(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()))
+        {
+            continue;
+        }
+        let node = drm.join(&name).join("error");
+        if node.exists() && !readable(&node) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Can we open this path for reading right now?
+fn readable(path: &Path) -> bool {
+    std::fs::File::open(path).is_ok()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -210,6 +303,18 @@ pub fn fix_command(fix: &Fix, distro: Distro) -> Vec<String> {
             ],
             None => vec![],
         },
+        Fix::InstallDumpAccessRule => vec![
+            "pkexec".into(),
+            "sh".into(),
+            "-c".into(),
+            dump_install_script(),
+        ],
+        Fix::RemoveDumpAccessRule => vec![
+            "pkexec".into(),
+            "sh".into(),
+            "-c".into(),
+            dump_remove_script(),
+        ],
         Fix::InstallPackage { role } => {
             let pkgs = package_for(role, distro);
             if pkgs.is_empty() {
@@ -227,6 +332,36 @@ pub fn fix_command(fix: &Fix, distro: Distro) -> Vec<String> {
             cmd
         }
     }
+}
+
+/// The body of the single elevated shell that installs the dump-access rule: write both
+/// embedded files, then reload udev and apply tmpfiles so it takes effect immediately
+/// (an already-pending devcoredump survives on xe until read, so this can rescue the
+/// current dump too). `-e` aborts on the first failure so a half-install can't linger.
+fn dump_install_script() -> String {
+    format!(
+        "set -e\n\
+         cat > '{rule}' <<'BEISL_RULE_EOF'\n{rule_body}BEISL_RULE_EOF\n\
+         cat > '{tmpf}' <<'BEISL_TMPF_EOF'\n{tmpf_body}BEISL_TMPF_EOF\n\
+         chmod 0644 '{rule}' '{tmpf}'\n\
+         udevadm control --reload-rules\n\
+         udevadm trigger --subsystem-match=drm --subsystem-match=devcoredump\n\
+         systemd-tmpfiles --create '{tmpf}'\n",
+        rule = DUMP_RULE_PATH,
+        tmpf = DUMP_TMPFILES_PATH,
+        rule_body = DUMP_RULE_BODY,
+        tmpf_body = DUMP_TMPFILES_BODY,
+    )
+}
+
+/// The body of the elevated shell that removes the rule + tmpfiles entry and reloads udev.
+/// (The sysfs perms it set persist until the next boot/rebind; we don't undo them live.)
+fn dump_remove_script() -> String {
+    format!(
+        "rm -f '{rule}' '{tmpf}'\nudevadm control --reload-rules\n",
+        rule = DUMP_RULE_PATH,
+        tmpf = DUMP_TMPFILES_PATH,
+    )
 }
 
 /// Prefer CAP_PERFMON (surgical) where `perf` is a real ELF binary; on a wrapper script
@@ -366,6 +501,38 @@ mod tests {
     fn disk_free_reads_a_real_number() {
         // The temp dir always exists; free space should parse to some value.
         assert!(disk_free_bytes(&std::env::temp_dir()).is_some());
+    }
+
+    #[test]
+    fn dump_access_fix_is_one_pkexec_shell() {
+        let cmd = fix_command(&Fix::InstallDumpAccessRule, Distro::Fedora);
+        assert_eq!(cmd[0], "pkexec");
+        assert_eq!(cmd[1], "sh");
+        assert_eq!(cmd[2], "-c");
+        let script = &cmd[3];
+        // Writes both files, reloads udev, applies tmpfiles — all in one elevation.
+        assert!(script.contains(DUMP_RULE_PATH));
+        assert!(script.contains(DUMP_TMPFILES_PATH));
+        assert!(script.contains("udevadm control --reload-rules"));
+        assert!(script.contains("systemd-tmpfiles --create"));
+        // The embedded rule body rode along verbatim.
+        assert!(script.contains("SUBSYSTEM==\"devcoredump\""));
+
+        let rm = fix_command(&Fix::RemoveDumpAccessRule, Distro::Fedora);
+        assert_eq!(rm[0], "pkexec");
+        assert!(rm[3].contains("rm -f"));
+        assert!(rm[3].contains(DUMP_RULE_PATH));
+    }
+
+    #[test]
+    fn gpu_dump_check_is_optional_and_out_of_the_blocking_sweep() {
+        let c = gpu_dump_check();
+        assert_eq!(c.id, CheckId::GpuDumpAccess);
+        assert!(!c.blocking);
+        assert!(matches!(c.fix, Some(Fix::InstallDumpAccessRule)));
+        // Crucially NOT in all_checks() — the "set everything up" sweep must never install
+        // a standing privilege on its own.
+        assert!(all_checks().iter().all(|c| c.id != CheckId::GpuDumpAccess));
     }
 
     #[test]
