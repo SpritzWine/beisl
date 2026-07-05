@@ -50,6 +50,20 @@ DESIGN.md.
 cargo build --release   # host-side tool; needs a recent stable Rust
 ```
 
+The GUI is a separate workspace (`crates/beisl-gui`, heavy libcosmic/wgpu tree — kept out
+of the main lockfile on purpose):
+
+```sh
+cd crates/beisl-gui && cargo build --release
+```
+
+**A note on git dependencies:** the main workspace is crates.io-only. `beisl-gui` pulls
+~48 git dependencies — all of them the [libcosmic](https://github.com/pop-os/libcosmic)
+stack, which System76 does not publish to crates.io yet (the whole COSMIC ecosystem ships
+as rev-pinned git, including their forks of `winit` etc.). We pin an exact revision and
+`Cargo.lock` pins every transitive commit, so builds are reproducible; the pin matches the
+SpritzWine installer's. Worth migrating when COSMIC lands on crates.io.
+
 ## License
 
 Copyright © 2026 Florian Schaupp.
