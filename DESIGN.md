@@ -205,6 +205,61 @@ Entry points, easy → portable:
 Owning the compat tool is what lets our own users skip the scary launch-option step
 entirely; the wrapper is the universal fallback for everyone else.
 
+## Case study: the Saints Row GPU hang (2026-07-05)
+
+What a wrong-layer diagnosis costs, measured on our own kitchen table. Saints Row
+(2022) with ray tracing on an Arc A770 (anv, xe KMD) produced hard GPU hangs — xe
+"Timedout job", devcoredump, engine reset. Everything about it *looked* like a Mesa
+bug: a fresh anv BVH-encoder commit was a plausible suspect, a real encoding
+inconsistency was even found nearby, and a full afternoon went into commit
+bisection (revert + surgical patch, both rebuilt and installed), decoding three
+devcoredumps with `aubinator_error_decode` down to the exact stalled `PIPE_CONTROL`
+and the spinning BVH-build kernels, and a Fedora-Mesa vs git-Mesa A/B. Result:
+*every* driver hung identically. The next discriminator took two minutes:
+relaunching on the **same driver** under a different runtime (Proton-CachyOS
+instead of Prater) — clean. For the rest of the afternoon the culprit looked like
+our layer, not the driver's — until reboot-disciplined retesting overturned that
+verdict too: the "clean" runtime had been session luck on a GPU whose state was
+degraded by the day's accumulated engine resets, and once every configuration was
+retested from a fresh boot, **everything** hung with the identical signature — on
+both the xe and i915 kernel drivers, under Valve's wine and ours, with every sync
+mechanism. Final verdict: a driver-class bug after all (anv's GRL/BVH build
+spinning on the game's raced per-frame skinning data), reported upstream as a
+comment on mesa#11557 with the cross-KMD dump pair.
+
+Lessons, each of which should become a Beisl behavior:
+
+- **The layer-swap A/B is the killer diagnosis move.** "Same game, same driver,
+  different runtime" (and its inverse) settled in minutes what forensics couldn't in
+  hours. The v2 A/B view should treat *correctness outcomes* (hang / no hang, device
+  loss) as first-class results next to frametimes, with the swapped layer stamped in
+  the artifact.
+- **GPU hangs need capture discipline.** The xe driver retains exactly **one**
+  devcoredump; while it sits unread, new hangs record nothing. The wrapper should
+  watch dmesg/devcoredump during a session and auto-capture + clear + attach dumps
+  to the artifact (v0/v1 material).
+- **Preflight must catch environment traps.** Two Mesa installs (system + /usr/local)
+  expose the same GPU as two Vulkan devices — which driver a game gets is enumeration
+  roulette that invalidates any A/B. Detect dual ICDs, warn, and offer
+  `VK_DRIVER_FILES` pinning in the setup page.
+- **Record identity, not just samples.** The hung process was only visible as the
+  kernel's 15-char comm `-game_ignores_f…` (the game's own thread name — the engine
+  admitting it ignores fences). Artifacts should carry full cmdline, runtime
+  name/version, and vkd3d-proton/DXVK versions so attribution never rests on a
+  truncated string.
+- **One hang per boot.** Repeated GPU engine resets can leave the driver/GPU in a
+  degraded state that silently flips subsequent test outcomes — half a day of A/B
+  attributions were voided by exactly this. Beisl should stamp "GPU resets since
+  boot" into every artifact and flag any A/B comparison recorded on a dirty state.
+
+Resolution (2026-07-05, same day): the SpritzWine-side "open item" dissolved — with
+reboot discipline and a cross-KMD retest (xe *and* i915, identical stalled-
+`PIPE_CONTROL` signature), the hang proved wine-independent and kernel-driver-
+independent: an anv GRL/BVH class bug (mesa#11557 cluster), triggered by the game's
+raced per-frame skinning uploads, unfixable game-side (Volition is gone). Filed
+upstream as a comment on mesa#11557 with the dump pair; evidence archived at
+`/media/Data/xe-dump/` (xe devcoredumps + i915 error state + Mesa issue draft).
+
 ## The flywheel (why it's worth building)
 
 A creator who hits a stutter exports a **symbolicated, spike-annotated trace** and
@@ -221,3 +276,6 @@ hot-path roadmap. Creators generate exactly the profiling data the roadmap needs
   "Record performance" toggle.
 - **v2 (polish):** in-game indicator via MangoHud overlay / libnotify; flamegraph;
   A/B compare view (SpritzWine vs Proton, side by side, tiers labeled).
+- **Case-study-driven additions (2026-07-05, see above):** devcoredump watcher in the
+  wrapper (v0/v1); dual-ICD detection + `VK_DRIVER_FILES` pinning in preflight (v1);
+  hang/device-loss as first-class A/B outcomes (v2).
