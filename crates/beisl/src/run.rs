@@ -42,7 +42,7 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
         child.env(k, v);
     }
 
-    // Force Vulkan enumeration onto a specific GPU, if the user pinned one (task #59 ②) —
+    // Force Vulkan enumeration onto a specific GPU, if the user pinned one —
     // countering the "enumeration roulette" trap from DESIGN.md's Saints Row case study,
     // where two Vulkan-visible drivers silently invalidated an A/B. Plain config, no
     // privilege involved.

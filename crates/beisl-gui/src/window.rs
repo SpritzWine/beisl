@@ -158,6 +158,12 @@ impl Application for SessionApp {
             .push(widget::text::caption(format!("Hotkey: {}", s.hotkey)))
             .push(widget::text::caption(format!("Output: {}", s.trace_dir)));
 
+        // The wrapper stamps the pinned GPU's label when a pin is configured, so an A/B
+        // viewer never has to guess which GPU a trace ran on.
+        if let Some(name) = &s.gpu_pin {
+            col = col.push(widget::text::caption(format!("GPU: {name} (pinned)")));
+        }
+
         if !s.message.is_empty() {
             col = col.push(widget::text::body(s.message.clone()));
         }

@@ -1,4 +1,4 @@
-//! Dual-ICD / multi-GPU detection (task #59 ②) — the "enumeration roulette" trap from
+//! Dual-ICD / multi-GPU detection — the "enumeration roulette" trap from
 //! DESIGN.md's Saints Row case study: with more than one Vulkan-capable GPU (or more than
 //! one driver install serving the *same* GPU, e.g. a system Mesa and a `/usr/local` build),
 //! which device a game actually gets is unstable across runs, silently invalidating any

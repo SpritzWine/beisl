@@ -18,9 +18,10 @@ use cosmic::iced::{Length, Subscription};
 use cosmic::widget;
 use cosmic::{Application, Element};
 
+use preflight::gpu::GpuPinCandidate;
 use preflight::{
-    all_checks, detect_distro, disk_check, fix_command, gpu_dump_check, Check, CheckId, Config,
-    Distro, DumpAccessPolicy, Fix, Status,
+    all_checks, detect_distro, disk_check, fix_command, gpu_dump_check, multi_gpu_check, Check,
+    CheckId, Config, Distro, DumpAccessPolicy, Fix, GpuPin, Status,
 };
 
 mod window; // the live session window (`--session`)
@@ -96,6 +97,9 @@ enum Message {
     RemoveDumpRule,
     /// Advanced: pick the persisted policy (intent only — no privilege runs here).
     SetPolicy(DumpAccessPolicy),
+    /// Advanced: pick (or clear) the GPU pin. `None` = "Don't pin"; `Some(i)` indexes
+    /// `AppModel::gpu_candidates`. Always a plain config write — no privilege anywhere.
+    SetGpuPin(Option<usize>),
     ToggleAdvanced,
     Tick,
     Close,
@@ -111,6 +115,8 @@ struct AppModel {
     /// along with the blocking `FixAll` sweep. Carries the policy to persist on success.
     dump_worker: Option<(Arc<Mutex<Shared>>, DumpAccessPolicy)>,
     config: Config,
+    /// Detected GPU pin candidates for the Advanced picker (recomputed alongside `checks`).
+    gpu_candidates: Vec<GpuPinCandidate>,
     show_advanced: bool,
     log: Vec<String>,
     error: Option<String>,
@@ -138,6 +144,9 @@ impl AppModel {
         // The optional, opt-in GPU dump-access row. Kept separate so it never joins the
         // blocking "set everything up" sweep (see `pending_fixes`).
         checks.push(gpu_dump_check());
+        // The optional, informational multi-GPU/dual-ICD row — its remedy is a config pick
+        // in Advanced, not a privileged fix, so it never joins the sweep either.
+        checks.push(multi_gpu_check());
         checks
     }
 
@@ -171,6 +180,14 @@ impl AppModel {
             .find(|c| c.id == CheckId::GpuDumpAccess)
             .map(|c| c.status.clone())
             .unwrap_or(Status::NeedsFix)
+    }
+
+    /// The currently configured pin's index into `gpu_candidates`, matched by name — `None`
+    /// both when nothing is pinned and when a previously-pinned candidate is no longer
+    /// detected (e.g. the driver was uninstalled since).
+    fn selected_gpu_pin(&self) -> Option<usize> {
+        let pin = self.config.gpu_pin.as_ref()?;
+        self.gpu_candidates.iter().position(|c| c.name == pin.name)
     }
 
     /// Start the dump-access install (or remove) on the dedicated worker, persisting the
@@ -221,6 +238,7 @@ impl Application for AppModel {
             worker: None,
             dump_worker: None,
             config: Config::load(),
+            gpu_candidates: preflight::gpu::detect_candidates(),
             show_advanced: false,
             log: Vec::new(),
             error: None,
@@ -235,6 +253,7 @@ impl Application for AppModel {
             Message::Recheck => {
                 if !self.running() {
                     self.checks = Self::detect_all(&self.trace_dir);
+                    self.gpu_candidates = preflight::gpu::detect_candidates();
                 }
             }
             Message::FixAll => {
@@ -264,6 +283,17 @@ impl Application for AppModel {
                 // behind the explicit Enable / Remove buttons.
                 if !self.running() {
                     self.config.dump_access_policy = p;
+                    let _ = self.config.save();
+                }
+            }
+            Message::SetGpuPin(sel) => {
+                // Plain config write — no privilege anywhere in this path.
+                if !self.running() {
+                    self.config.gpu_pin = sel.and_then(|i| self.gpu_candidates.get(i)).map(|c| GpuPin {
+                        name: c.name.clone(),
+                        icd_paths: c.icd_paths.clone(),
+                        device_select: c.device_select.clone(),
+                    });
                     let _ = self.config.save();
                 }
             }
@@ -349,7 +379,7 @@ impl Application for AppModel {
             } else {
                 row = row.push(widget::text::caption(status_word(c)));
             }
-            content = content.push(row).push(widget::text::caption(c.why));
+            content = content.push(row).push(widget::text::caption(c.why.clone().into_owned()));
         }
 
         // Advanced (opt-in details): collapsed by default. No expander widget at this
@@ -438,8 +468,46 @@ impl AppModel {
             remove = remove.on_press(Message::RemoveDumpRule);
         }
         actions = actions.push(remove);
+        col = col.push(actions);
 
-        col.push(actions).into()
+        col.push(self.gpu_pin_picker()).into()
+    }
+
+    /// The GPU pin picker: "Don't pin (default)" plus one radio per detected candidate —
+    /// disambiguated driver installs included (see `preflight::gpu::build_candidates`).
+    /// Selecting persists straight to config; there is no privileged step to run.
+    fn gpu_pin_picker(&self) -> Element<'_, Message> {
+        let mut col = widget::Column::new()
+            .spacing(8)
+            .push(widget::text::body("GPU selection"))
+            .push(widget::text::caption(
+                "Force which GPU a trace runs on, so an A/B comparison can't silently land on \
+                 a different one. Sets VK_DRIVER_FILES (and MESA_VK_DEVICE_SELECT when we can \
+                 resolve the exact card) for the traced game only.",
+            ));
+
+        let selected = self.selected_gpu_pin();
+        col = col.push(widget::radio(
+            widget::text::body("Don't pin (default)"),
+            None::<usize>,
+            Some(selected),
+            Message::SetGpuPin,
+        ));
+
+        if self.gpu_candidates.is_empty() {
+            col = col.push(widget::text::caption("No additional GPUs detected to pin."));
+        } else {
+            for (i, cand) in self.gpu_candidates.iter().enumerate() {
+                col = col.push(widget::radio(
+                    widget::text::body(cand.name.clone()),
+                    Some(i),
+                    Some(selected),
+                    Message::SetGpuPin,
+                ));
+            }
+        }
+
+        col.into()
     }
 
     fn footer(&self) -> Element<'_, Message> {

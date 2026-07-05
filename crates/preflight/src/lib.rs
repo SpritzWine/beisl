@@ -200,7 +200,7 @@ pub fn gpu_dump_check() -> Check {
     }
 }
 
-/// The optional, informational "more than one GPU visible to Vulkan" check (task #59 ②).
+/// The optional, informational "more than one GPU visible to Vulkan" check.
 /// Kept OUT of [`all_checks`], mirroring [`gpu_dump_check`]: it's advisory, never blocking,
 /// and its remedy — picking a pin — is a plain config write in the GUI's Advanced section,
 /// not a privileged fix, so `fix` is always `None`. The caller adds it like [`disk_check`].
