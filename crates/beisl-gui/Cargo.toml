@@ -20,6 +20,13 @@ path = "src/main.rs"
 [dependencies]
 preflight = { path = "../preflight" }
 session = { path = "../session" }
+# The results view binds to the exact same artifact the CLI produces — one analysis code
+# path, two front-ends (the window does no analysis of its own; it renders `TraceArtifact`
+# and runs `TraceArtifact::build` for the "Analyze" action). Pulls in symbol-resolver +
+# serde_json, both light; the heavy tree here is still only libcosmic.
+artifact = { path = "../artifact" }
+plotters-backend = "0.3"
+plotters = { version = "0.3", default-features = false, features = ["all_series", "all_elements"] }
 
 [dependencies.libcosmic]
 git = "https://github.com/pop-os/libcosmic.git"
