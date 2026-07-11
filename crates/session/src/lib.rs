@@ -52,6 +52,13 @@ pub struct Session {
     /// (pinned)". `None` when no pin is configured (the common case).
     #[serde(default)]
     pub gpu_pin: Option<String>,
+    /// Writer -> reader: a clean-exit trace was left un-analyzed (the default
+    /// `clean-run-analysis = keep` — the wrapper kept it in place without resolving), so
+    /// the window should present the "Analyze" / "Discard" ask by default. The raw
+    /// `perf.data` is still in the trace dir; analysis is `artifact::TraceArtifact::build`
+    /// (what `beisl symbols` runs). Crashes are auto-analyzed and never set this.
+    #[serde(default)]
+    pub analysis_offer: bool,
 }
 
 impl Session {

@@ -5,11 +5,17 @@ version = 4
 [[package]]
 name = "artifact"
 version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "symbol-resolver",
+]
 
 [[package]]
 name = "beisl"
 version = "0.0.1"
 dependencies = [
+ "artifact",
  "libc",
  "preflight",
  "session",

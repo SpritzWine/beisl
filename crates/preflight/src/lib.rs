@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 pub mod config;
 pub mod debuginfo;
 pub mod gpu;
-pub use config::{Config, DumpAccessPolicy, GpuPin};
+pub use config::{CleanRunAnalysis, Config, DumpAccessPolicy, GpuPin};
 
 /// The lifecycle of a single check, as the setup page renders it.
 #[derive(Clone, Debug, PartialEq, Eq)]
