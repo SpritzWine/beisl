@@ -295,7 +295,9 @@
         <b>The headless verdict</b>
         <code>beisl symbols &lt;run-dir&gt;</code> — the same layer split as a text bar,
         plus <code>artifact.json</code> and <code>report.txt</code> you can hand to
-        anyone. Or to a machine: an MCP server is on the roadmap.
+        anyone. Or to a machine: the bundled <code>beisl-mcp</code> server lets an AI
+        client list your runs and read every artifact, report and log — read-only,
+        stdio-only, inert until you wire it into a client.
       </div>
       <div class="surface">
         <b>The session window</b>
@@ -320,11 +322,13 @@
         <li><span class="ctx">SpritzWine</span> <span>a “Record performance” toggle in the control panel — no launch options at all</span></li>
       </ul>
       <p class="status-note">
-        Beisl is young — a working v0 engine with the GUI results view landing in v1.
-        The <code>Exports</code> symbol tier is built and proven on real captures;
-        <code>Full</code>-tier symbols and the MCP server are en route. Source, issues
-        and releases: <a href="https://codeberg.org/SpritzWine/beisl" rel="external">codeberg.org/SpritzWine/beisl</a>
-        <em>(placeholder — point at the real repo)</em>.
+        Beisl is young, but the pipeline runs end to end: the v1 surface is shipped —
+        results view, trace library (browse, analyze, export, delete past runs), and
+        the MCP server. The <code>Exports</code> symbol tier is proven on real
+        captures; <code>Full</code>-tier symbols are en route. Grab the tarball from
+        <a href="https://codeberg.org/SpritzWine/beisl/releases" rel="external">releases</a>,
+        or source and issues at
+        <a href="https://codeberg.org/SpritzWine/beisl" rel="external">codeberg.org/SpritzWine/beisl</a>.
       </p>
     </div>
     <div class="codeblock">
