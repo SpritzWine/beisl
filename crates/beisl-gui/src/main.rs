@@ -27,7 +27,8 @@ use cosmic::{Application, Element};
 use preflight::gpu::GpuPinCandidate;
 use preflight::{
     all_checks, detect_distro, disk_check, driver_debuginfo_check, fix_command, gpu_dump_check,
-    multi_gpu_check, Check, CheckId, Config, Distro, DumpAccessPolicy, Fix, GpuPin, Status,
+    mangohud_hotkey_check, multi_gpu_check, Check, CheckId, Config, Distro, DumpAccessPolicy, Fix,
+    GpuPin, Status,
 };
 
 mod chart; // frametime timeline (plotters, drawn on cosmic's Canvas)
@@ -224,6 +225,8 @@ impl AppModel {
         // The optional, informational driver debug-symbols row — remedy is a manual,
         // distro-specific install named in the why (fix is None, so no sweep).
         checks.push(driver_debuginfo_check());
+        // Advisory: the MangoHud #2053 hotkey crash — a workaround in the why, no fix.
+        checks.push(mangohud_hotkey_check());
         checks
     }
 

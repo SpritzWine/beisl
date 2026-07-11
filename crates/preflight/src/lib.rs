@@ -47,6 +47,11 @@ pub enum CheckId {
     /// the blocking "set everything up" sweep — its fix is a standing privilege change and
     /// must be its own explicit click (see [`gpu_dump_check`]).
     GpuDumpAccess,
+    /// Optional, informational: the installed MangoHud version crashes the game when
+    /// the frametime log is stopped while the HUD is visible (upstream #2053) — the
+    /// remedy is a workaround (hide the HUD first) or a MangoHud update, never a
+    /// privileged fix (see [`mangohud_hotkey_check`]).
+    MangoHudHotkey,
     /// Optional, informational: more than one GPU (or more than one driver install for the
     /// same GPU) is visible to Vulkan — the "enumeration roulette" trap from DESIGN.md's
     /// Saints Row case study. No privileged fix; the remedy is picking a pin in the GUI's
@@ -137,6 +142,10 @@ impl Check {
             CheckId::MultiGpu => multi_gpu_status(&gpu::physical_gpus()),
             CheckId::KernelSymbols => ok_or_fix(kernel_symbols_visible()),
             CheckId::DriverDebuginfo => driver_debuginfo_status(),
+            CheckId::MangoHudHotkey => match mangohud_version().as_deref() {
+                Some(v) if mangohud_hotkey_affected(v) => Status::NeedsFix,
+                _ => Status::Ok,
+            },
             CheckId::DiskSpace => return, // computed in `disk_check`
         };
     }
@@ -301,6 +310,71 @@ pub fn driver_debuginfo_check() -> Check {
             Status::NeedsFix
         },
         fix: None,
+    }
+}
+
+/// The optional, informational MangoHud hotkey advisory. Kept OUT of [`all_checks`]
+/// like [`multi_gpu_check`]: advisory, never blocking, `fix` stays `None` — the remedy
+/// is a workaround or an upstream update, and beisl must not pretend it can fix
+/// someone else's crash.
+///
+/// The bug (MangoHud #2053, still open as of 2026-07-12): stopping the frametime log
+/// while the HUD is visible fails an ImGui assert *inside the game process* — the
+/// layer aborts and takes the game with it. Beisl's pause/resume hotkey is exactly
+/// that stop, so users deserve the warning before they learn it mid-session (a real
+/// The Settlers run died to this during v1 review).
+pub fn mangohud_hotkey_check() -> Check {
+    let version = mangohud_version();
+    Check {
+        id: CheckId::MangoHudHotkey,
+        label: "MangoHud hotkey safety (optional)",
+        why: mangohud_hotkey_why(version.as_deref()).into(),
+        blocking: false,
+        status: match version.as_deref() {
+            Some(v) if mangohud_hotkey_affected(v) => Status::NeedsFix,
+            // Unknown version or no CLI: don't cry wolf — the plain MangoHud check
+            // already covers absence.
+            _ => Status::Ok,
+        },
+        fix: None,
+    }
+}
+
+fn mangohud_version() -> Option<String> {
+    let out = std::process::Command::new("mangohud")
+        .arg("--version")
+        .output()
+        .ok()?;
+    let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!v.is_empty()).then_some(v)
+}
+
+/// Affected while upstream #2053 is unfixed — which, as of 2026-07-12, is EVERY
+/// release (the issue reproduces on latest git). So: any parseable version warns.
+/// When a fixed MangoHud ships, put the real bound here (e.g. `< (0, 9)`) — presuming
+/// an unreleased version fixes an open bug would make the check go silently green on
+/// exactly the crash it exists to warn about.
+fn mangohud_hotkey_affected(version: &str) -> bool {
+    let v = version.trim_start_matches('v');
+    let mut parts = v.split(['.', '-']).filter_map(|p| p.parse::<u32>().ok());
+    // Unparseable (git builds, noise): don't alarm — the why still names the bug.
+    matches!((parts.next(), parts.next()), (Some(_), Some(_)))
+}
+
+fn mangohud_hotkey_why(version: Option<&str>) -> String {
+    match version {
+        Some(v) if mangohud_hotkey_affected(v) => format!(
+            "Your MangoHud ({v}) can crash the game when the frametime log is stopped \
+             while the HUD is on screen (MangoHud bug #2053) — and the pause/resume \
+             hotkey does exactly that. Until a fixed MangoHud ships: hide the HUD \
+             before using the hotkey, or leave the log running (it costs almost \
+             nothing)."
+        ),
+        _ => "Couldn't determine your MangoHud version. A known, still-open MangoHud \
+              crash (bug #2053) kills the game when the frametime log is stopped while \
+              the HUD is visible — if unsure, hide the HUD before using the pause \
+              hotkey."
+            .to_string(),
     }
 }
 
@@ -832,5 +906,26 @@ mod tests {
         let ok = driver_debuginfo_why(&[], Distro::Fedora);
         assert!(ok.contains("No missing debug symbols detected"));
         assert!(!ok.contains("debuginfo-install"));
+    }
+
+    #[test]
+    fn mangohud_hotkey_version_gate() {
+        // Upstream #2053 is unfixed: every parseable version warns — including ones
+        // newer than today's, because presuming an unreleased fix is the worse error.
+        assert!(mangohud_hotkey_affected("v0.8.2"));
+        assert!(mangohud_hotkey_affected("0.8.0"));
+        assert!(mangohud_hotkey_affected("v0.7.1"));
+        assert!(mangohud_hotkey_affected("v0.9.0"));
+        assert!(mangohud_hotkey_affected("1.0.0"));
+        assert!(mangohud_hotkey_affected("v0.8.3-rc1"));
+        // Noise must not alarm.
+        assert!(!mangohud_hotkey_affected("git-33c2c7dd"));
+        assert!(!mangohud_hotkey_affected(""));
+    }
+
+    #[test]
+    fn mangohud_hotkey_why_names_the_bug_when_affected() {
+        assert!(mangohud_hotkey_why(Some("v0.8.2")).contains("#2053"));
+        assert!(mangohud_hotkey_why(None).contains("#2053"));
     }
 }

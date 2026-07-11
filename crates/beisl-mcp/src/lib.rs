@@ -171,6 +171,7 @@ impl Server {
         checks.push(preflight::gpu_dump_check());
         checks.push(preflight::multi_gpu_check());
         checks.push(preflight::driver_debuginfo_check());
+        checks.push(preflight::mangohud_hotkey_check());
 
         let rows: Vec<Value> = checks
             .iter()

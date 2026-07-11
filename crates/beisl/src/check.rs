@@ -9,7 +9,7 @@ use std::process::ExitCode;
 use crate::out::out;
 use preflight::{
     all_checks, detect_distro, disk_check, driver_debuginfo_check, fix_command, gpu_dump_check,
-    multi_gpu_check, Status,
+    mangohud_hotkey_check, multi_gpu_check, Status,
 };
 
 pub fn run() -> ExitCode {
@@ -31,6 +31,8 @@ pub fn run() -> ExitCode {
     // The driver debug-symbols row is optional and informational — the remedy is a
     // manual, distro-specific install named in the why, never a one-click fix.
     checks.push(driver_debuginfo_check());
+    // Advisory: the MangoHud #2053 hotkey crash — warned about, never "fixed" by us.
+    checks.push(mangohud_hotkey_check());
 
     let mut blocking_missing = false;
 
