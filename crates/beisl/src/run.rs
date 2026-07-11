@@ -444,8 +444,11 @@ fn write_report(run_dir: &Path, game: &str, duration_s: u64, log: &mut Log) -> O
             return None;
         }
     };
-    let _ = art.write_json(&run_dir.join("artifact.json"));
-    let _ = std::fs::write(run_dir.join("report.txt"), art.render_report());
+    let _ = art.write_json(&run_dir.join(session::library::ARTIFACT_FILE));
+    let _ = std::fs::write(
+        run_dir.join(session::library::REPORT_FILE),
+        art.render_report(),
+    );
     let headline = art.headline();
     log.line(&format!("post-run: {headline}"));
     Some(headline)
@@ -542,13 +545,9 @@ fn new_run_dir() -> io::Result<PathBuf> {
 }
 
 pub(crate) fn data_root() -> PathBuf {
-    if let Ok(x) = std::env::var("XDG_DATA_HOME") {
-        if !x.is_empty() {
-            return PathBuf::from(x).join("beisl");
-        }
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".local/share/beisl")
+    // One XDG resolution for writer and readers: the session crate owns it now — its
+    // library module lists the very dirs this side creates, so the two must agree.
+    session::library::data_root()
 }
 
 #[cfg(test)]

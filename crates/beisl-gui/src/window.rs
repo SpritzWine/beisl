@@ -69,6 +69,9 @@ pub struct SessionApp {
     enable_note: Option<String>,
     /// The resolved trace, once `artifact.json` exists (crash auto-analyzed, or Analyze ran).
     artifact: Option<TraceArtifact>,
+    /// `perf.data` still on disk — the gate for offering analysis on a finished run
+    /// (without it there is nothing to resolve, however the run ended).
+    raw_present: bool,
     analyzing: Option<Arc<Mutex<Analyze>>>,
     analyze_note: Option<String>,
     /// Discard is destructive (removes the run dir), so it takes a confirm click.
@@ -123,6 +126,7 @@ impl Application for SessionApp {
         let have = read.is_some();
         let session = read.unwrap_or_default();
         let artifact = load_artifact(&dir);
+        let raw_present = dir.join("perf.data").is_file();
         let title = window_title(artifact.is_some(), session.analysis_offer, session.state);
         let mut core = core;
         core.set_header_title(title.clone());
@@ -136,6 +140,7 @@ impl Application for SessionApp {
                 enabling: None,
                 enable_note: None,
                 artifact,
+                raw_present,
                 analyzing: None,
                 analyze_note: None,
                 confirm_discard: false,
@@ -172,6 +177,7 @@ impl Application for SessionApp {
                 // small file, and only until it's loaded.
                 if self.artifact.is_none() && (self.session.analysis_offer || self.is_finished()) {
                     self.artifact = load_artifact(&self.dir);
+                    self.raw_present = self.dir.join("perf.data").is_file();
                 }
                 self.poll_enable();
                 self.poll_analyze();
@@ -198,9 +204,11 @@ impl Application for SessionApp {
             Msg::Discard => self.confirm_discard = true,
             Msg::CancelDiscard => self.confirm_discard = false,
             Msg::ConfirmDiscard => {
-                // The user chose to throw the trace away; remove the whole run dir, then
-                // close (there's nothing left for this window to show).
-                let _ = std::fs::remove_dir_all(&self.dir);
+                // The user chose to throw the trace away; remove the run dir, then close
+                // (there's nothing left for this window to show). Through delete_run, the
+                // one deletion boundary: anything that isn't a run-* dir under the traces
+                // root (say, a dev dir handed to --session) is refused, not deleted.
+                let _ = session::library::delete_run(&session::library::default_root(), &self.dir);
                 std::process::exit(0);
             }
             Msg::Stop => {
@@ -229,7 +237,10 @@ impl Application for SessionApp {
         // shows the ask; anything else is the live view.
         let (content, buttons) = if let Some(a) = &self.artifact {
             (self.results_content(a), self.results_buttons())
-        } else if self.session.analysis_offer {
+        } else if self.session.analysis_offer || self.stale_unanalyzed() {
+            // The second arm is the trace library's analyze-on-demand: an old run
+            // whose ask was never answered (or whose analysis never happened) still
+            // deserves the same Analyze/Discard choice, as long as perf.data exists.
             (self.ask_content(), self.ask_buttons())
         } else {
             (self.live_content(), self.live_buttons())
@@ -261,6 +272,13 @@ impl Application for SessionApp {
 impl SessionApp {
     fn is_finished(&self) -> bool {
         matches!(self.session.state, State::Done | State::Error)
+    }
+
+    /// A finished run that was never analyzed but still has its raw trace: the
+    /// library's analyze-on-demand case (the wrapper only sets `analysis_offer` on a
+    /// kept clean exit; runs whose analysis failed or never ran end up here).
+    fn stale_unanalyzed(&self) -> bool {
+        self.is_finished() && self.artifact.is_none() && self.raw_present
     }
 
     /// Poll the background dump-access install (mirrors the setup app's worker pattern).
@@ -403,7 +421,11 @@ impl SessionApp {
         let mut col = widget::Column::new()
             .spacing(10)
             .push(widget::text::title3(title))
-            .push(widget::text::body("Clean run — not analyzed yet"))
+            .push(widget::text::body(if self.session.analysis_offer {
+                "Clean run — not analyzed yet"
+            } else {
+                "Finished run — not analyzed yet"
+            }))
             .push(widget::text::caption(
                 "The trace was kept as-is. Analyze it to see which layer of the stack ate the \
                  frame and where it hitched, or discard it to reclaim the disk.",
@@ -619,7 +641,7 @@ impl SessionApp {
 /// too new to fully understand still loads (unknown fields are ignored, missing ones
 /// default) — the results view flags that case rather than refusing to render.
 fn load_artifact(dir: &Path) -> Option<TraceArtifact> {
-    TraceArtifact::read_json(&dir.join("artifact.json")).ok()
+    TraceArtifact::read_json(&dir.join(session::library::ARTIFACT_FILE)).ok()
 }
 
 /// Run `TraceArtifact::build` (resolve `perf.data` + fold in the CSV) on a background
@@ -629,7 +651,7 @@ fn spawn_analyze(dir: PathBuf, game: String, duration_s: f64) -> Arc<Mutex<Analy
     let s2 = state.clone();
     std::thread::spawn(move || {
         let result = TraceArtifact::build(&dir, &game, duration_s)
-            .and_then(|a| a.write_json(&dir.join("artifact.json")));
+            .and_then(|a| a.write_json(&dir.join(session::library::ARTIFACT_FILE)));
         let mut a = s2.lock().unwrap();
         if let Err(e) = result {
             a.error = Some(e.to_string());

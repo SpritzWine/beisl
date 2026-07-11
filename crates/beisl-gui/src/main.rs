@@ -31,6 +31,7 @@ use preflight::{
 };
 
 mod chart; // frametime timeline (plotters, drawn on cosmic's Canvas)
+mod traces; // the trace library page (its own Elm-style component)
 mod window; // the live session window (`--session`)
 
 /// Onboarding tips, cycled while the user waits.
@@ -103,6 +104,11 @@ fn spawn_fixer(cmds: Vec<Vec<String>>) -> Arc<Mutex<Shared>> {
 enum Page {
     Install,
     Checks,
+    /// The trace library: past runs on disk. Each run opens in the session window it
+    /// already had while recording (`beisl-setup --session <dir>`) — the ask, the
+    /// results view, and live/error states all come for free by reusing that window
+    /// instead of re-embedding its surfaces here (DESIGN.md: "reusing that same view").
+    Traces,
 }
 
 #[derive(Debug, Clone)]
@@ -124,6 +130,11 @@ enum Message {
     /// `AppModel::gpu_candidates`. Always a plain config write — no privilege anywhere.
     SetGpuPin(Option<usize>),
     ToggleAdvanced,
+    /// Show the trace library (rescans on every entry — cheap, and a run finished
+    /// since the last look should simply be there).
+    ShowTraces,
+    /// Everything inside the library page (see `traces::Msg`); only `Back` is ours.
+    Traces(traces::Msg),
     Tick,
     Close,
 }
@@ -153,6 +164,8 @@ struct AppModel {
     config: Config,
     /// Detected GPU pin candidates for the Advanced picker (recomputed alongside `checks`).
     gpu_candidates: Vec<GpuPinCandidate>,
+    /// The trace library page (state + view + actions live in `traces.rs`).
+    traces: traces::TracesTab,
     show_advanced: bool,
     log: Vec<String>,
     error: Option<String>,
@@ -314,6 +327,7 @@ impl Application for AppModel {
             dump_worker: None,
             config: Config::load(),
             gpu_candidates: preflight::gpu::detect_candidates(),
+            traces: traces::TracesTab::default(),
             show_advanced: false,
             log: Vec::new(),
             error: None,
@@ -398,6 +412,16 @@ impl Application for AppModel {
                 }
             }
             Message::ToggleAdvanced => self.show_advanced = !self.show_advanced,
+            Message::ShowTraces => {
+                self.traces.refresh();
+                self.page = Page::Traces;
+            }
+            // Navigation is the parent's business; the rest is the page's own. Back
+            // routes through ShowChecks so leaving the library behaves exactly like
+            // every other way of reaching the checklist (clears stale error/log,
+            // re-detects — and stays blocked while a fixer runs).
+            Message::Traces(traces::Msg::Back) => return self.update(Message::ShowChecks),
+            Message::Traces(m) => self.traces.update(m),
             Message::Tick => {
                 self.tick += 1;
                 // Set the taskbar/overview title once the window exists (not possible in init).
@@ -463,6 +487,7 @@ impl Application for AppModel {
         let page = match self.page {
             Page::Install => self.install_page(),
             Page::Checks => self.checks_page(),
+            Page::Traces => self.traces.view().map(Message::Traces),
         };
         widget::container(page)
             .padding(28)
@@ -702,6 +727,7 @@ impl AppModel {
 
         if self.ready() {
             row = row
+                .push(widget::button::text("Traces").on_press(Message::ShowTraces))
                 .push(widget::Space::new().width(Length::Fill))
                 .push(widget::button::suggested("Done").on_press(Message::Close));
             return row.into();
@@ -718,6 +744,7 @@ impl AppModel {
         }
 
         row.push(widget::button::text("Close").on_press(Message::Close))
+            .push(widget::button::text("Traces").on_press(Message::ShowTraces))
             .push(widget::Space::new().width(Length::Fill))
             .push(recheck)
             .push(fix)
