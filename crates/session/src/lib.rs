@@ -18,6 +18,10 @@ pub enum State {
     Running,
     Recording,
     Stopping,
+    /// "Stop & save": the recorder is stopped and the trace is complete, but the game
+    /// is still running (Steam waits on us, so only the recorder stops). Distinct from
+    /// `Done` so the window can offer analysis without hiding that the game lives on.
+    Saved,
     Done,
     Error,
 }

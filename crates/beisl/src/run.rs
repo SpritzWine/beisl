@@ -243,7 +243,9 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
                     stopped = true;
                     sess.stop_requested = true;
                     sess.trace_bytes = trace_size(&run_dir);
-                    sess.state = State::Done;
+                    // Saved, not Done: the trace is complete but the game lives on —
+                    // the window can offer analysis while still saying so.
+                    sess.state = State::Saved;
                     sess.message = "Stopped — trace saved. Game still running.".to_string();
                 }
             }

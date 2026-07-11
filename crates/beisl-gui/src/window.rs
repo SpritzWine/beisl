@@ -98,6 +98,7 @@ fn window_title(has_artifact: bool, analysis_offer: bool, state: State) -> Strin
             State::Running => "Running",
             State::Recording => "Recording",
             State::Stopping => "Stopping",
+            State::Saved => "Saved",
             State::Done => "Finished",
             State::Error => "Error",
         }
@@ -175,7 +176,11 @@ impl Application for SessionApp {
                 // A crash auto-writes artifact.json before the window even opens; poll for it
                 // (and for one Analyze produces) until we have it. Cheap: one stat+read of a
                 // small file, and only until it's loaded.
-                if self.artifact.is_none() && (self.session.analysis_offer || self.is_finished()) {
+                if self.artifact.is_none()
+                    && (self.session.analysis_offer
+                        || self.is_finished()
+                        || self.session.state == State::Saved)
+                {
                     self.artifact = load_artifact(&self.dir);
                     self.raw_present = self.dir.join("perf.data").is_file();
                 }
@@ -276,9 +281,12 @@ impl SessionApp {
 
     /// A finished run that was never analyzed but still has its raw trace: the
     /// library's analyze-on-demand case (the wrapper only sets `analysis_offer` on a
-    /// kept clean exit; runs whose analysis failed or never ran end up here).
+    /// kept clean exit; runs whose analysis failed or never ran end up here). A
+    /// "Stop & save" mid-game counts too — the recorder is stopped, so the trace is
+    /// as analyzable as it will ever be; the ask just keeps saying the game runs.
     fn stale_unanalyzed(&self) -> bool {
-        self.is_finished() && self.artifact.is_none() && self.raw_present
+        let settled = self.is_finished() || self.session.state == State::Saved;
+        settled && self.artifact.is_none() && self.raw_present
     }
 
     /// Poll the background dump-access install (mirrors the setup app's worker pattern).
@@ -334,6 +342,7 @@ impl SessionApp {
             State::Running => "Game running",
             State::Recording => "● Recording",
             State::Stopping => "Stopping…",
+            State::Saved => "Saved — game still running",
             State::Done => "Finished",
             State::Error => "Error",
         };
@@ -421,11 +430,13 @@ impl SessionApp {
         let mut col = widget::Column::new()
             .spacing(10)
             .push(widget::text::title3(title))
-            .push(widget::text::body(if self.session.analysis_offer {
-                "Clean run — not analyzed yet"
-            } else {
-                "Finished run — not analyzed yet"
-            }))
+            .push(widget::text::body(
+                match (self.session.analysis_offer, self.session.state) {
+                    (true, _) => "Clean run — not analyzed yet",
+                    (false, State::Saved) => "Trace saved — the game is still running",
+                    _ => "Finished run — not analyzed yet",
+                },
+            ))
             .push(widget::text::caption(
                 "The trace was kept as-is. Analyze it to see which layer of the stack ate the \
                  frame and where it hitched, or discard it to reclaim the disk.",
@@ -434,6 +445,15 @@ impl SessionApp {
                 "Trace: {}",
                 human_bytes(self.session.trace_bytes)
             )));
+
+        // A "Stop & save" keeps the session live behind this ask — analysis is safe
+        // (the recorder is stopped), but hang warnings must not disappear with the
+        // live view, so they ride along here.
+        if self.session.state == State::Saved && !self.session.warnings.is_empty() {
+            for w in &self.session.warnings {
+                col = col.push(widget::text::caption(w.clone()));
+            }
+        }
 
         if self.analyzing.is_some() {
             col = col.push(widget::text::body(
