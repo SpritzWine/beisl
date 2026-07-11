@@ -13,6 +13,12 @@
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
+/// The one Beisl version, inherited from `[workspace.package]` in the root Cargo.toml.
+/// beisl-gui is a *separate* cargo workspace (to keep libcosmic's git tree out of the
+/// main lockfile) and so can't inherit the manifest field — it takes the version through
+/// this const instead, via its existing `preflight` path dependency.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub mod config;
 pub mod debuginfo;
 pub mod gpu;

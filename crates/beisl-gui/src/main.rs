@@ -748,6 +748,11 @@ fn main() -> cosmic::iced::Result {
     let mut payload = None;
     while let Some(a) = args.next() {
         match a.as_str() {
+            "--version" => {
+                // The workspace version, carried across the workspace split by preflight.
+                println!("beisl-setup {}", preflight::VERSION);
+                return Ok(());
+            }
             "--session" => {
                 let dir = PathBuf::from(args.next().unwrap_or_default());
                 // Golden-ratio landscape (≈1.618:1): the results view's monospaced function /

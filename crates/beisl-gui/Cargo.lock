@@ -210,7 +210,7 @@ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
 name = "artifact"
-version = "0.0.1"
+version = "0.0.1-alpha.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -486,7 +486,7 @@ dependencies = [
 
 [[package]]
 name = "beisl-gui"
-version = "0.0.1"
+version = "0.0.0"
 dependencies = [
  "artifact",
  "libcosmic",
@@ -3606,7 +3606,7 @@ dependencies = [
 
 [[package]]
 name = "preflight"
-version = "0.0.1"
+version = "0.0.1-alpha.1"
 dependencies = [
  "serde",
  "toml 0.8.23",
@@ -4141,7 +4141,7 @@ dependencies = [
 
 [[package]]
 name = "session"
-version = "0.0.1"
+version = "0.0.1-alpha.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -4405,7 +4405,7 @@ dependencies = [
 
 [[package]]
 name = "symbol-resolver"
-version = "0.0.1"
+version = "0.0.1-alpha.1"
 
 [[package]]
 name = "syn"

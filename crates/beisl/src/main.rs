@@ -30,6 +30,10 @@ fn main() -> ExitCode {
     // `preflight` crate; this is its headless face); `install`/`uninstall` put `beisl`
     // on PATH so it works in launch options; `symbols` resolves a captured trace.
     match args.first().map(String::as_str) {
+        Some("--version") => {
+            println!("beisl {}", preflight::VERSION);
+            return ExitCode::SUCCESS;
+        }
         Some("--check" | "--preflight" | "doctor") => return check::run(),
         Some("install") => return install::run(false),
         Some("uninstall") => return install::run(true),

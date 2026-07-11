@@ -6,8 +6,12 @@
 # the installer, a known-good windowed-app baseline.
 [package]
 name = "beisl-gui"
+# Deliberately not a real version: as a separate workspace this manifest can't inherit
+# `[workspace.package]` from the root Cargo.toml, and a literal here would just drift.
+# The one Beisl version lives in the root manifest; the binary reports it via
+# `preflight::VERSION` (see `beisl-setup --version`).
 authors = ["Florian Schaupp"]
-version = "0.0.1"
+version = "0.0.0"
 edition = "2021"
 description = "Beisl setup + trace GUI (COSMIC look)"
 license = "LGPL-2.1-or-later"
