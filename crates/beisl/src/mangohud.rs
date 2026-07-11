@@ -1,10 +1,10 @@
 //! MangoHud integration — the frametime *side-channel*.
 //!
 //! We do NOT vendor MangoHud. We compose with it: point it at our run directory so
-//! it writes its frametime CSV, and (later) watch that CSV both to detect
-//! low-performance peaks (spikes = bookmarks into the perf trace) and to follow the
-//! user's logging-toggle hotkey. MangoHud draws the in-game overlay; we never become
-//! a Vulkan layer ourselves.
+//! it writes its frametime CSV for the whole session (auto-started, hotkey
+//! pauses/resumes), and (later) watch that CSV to detect low-performance peaks
+//! (spikes = bookmarks into the perf trace). MangoHud draws the in-game overlay; we
+//! never become a Vulkan layer ourselves.
 
 use std::path::Path;
 use std::process::Command;

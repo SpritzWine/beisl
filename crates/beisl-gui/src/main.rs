@@ -34,7 +34,8 @@ mod window; // the live session window (`--session`)
 
 /// Onboarding tips, cycled while the user waits.
 const TIPS: &[&str] = &[
-    "Press your MangoHud logging hotkey (default Shift+F2) to start and stop a trace.",
+    "Frametime logging runs on its own for the whole session — the MangoHud hotkey \
+     (default Shift+F2) pauses and resumes it.",
     "Traces are saved under ~/.local/share/beisl/traces/ — the app lists them for you.",
     "Beisl works with any Proton or Wine, not just SpritzWine — so you can compare them.",
     "If a game runs great, Beisl shows it's the game or GPU, not wine. That's a real answer.",

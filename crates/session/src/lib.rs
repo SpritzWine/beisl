@@ -28,7 +28,8 @@ pub struct Session {
     pub game: String,
     /// Where the trace is written.
     pub trace_dir: String,
-    /// The MangoHud logging hotkey that toggles a capture.
+    /// The MangoHud hotkey that pauses/resumes the frametime log (logging itself is
+    /// always-on — auto-started shortly after launch).
     pub hotkey: String,
     pub state: State,
     pub elapsed_secs: u64,
