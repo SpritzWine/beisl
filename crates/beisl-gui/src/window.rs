@@ -1,18 +1,28 @@
 //! The live session window: `beisl-setup --session <dir>`.
 //!
-//! Polls the wrapper's `session.json` and shows the settings, the recording state, and
-//! "what's wrong" while the game runs. One control flows back — "Stop & save" sets
-//! `stop_requested`, which the wrapper picks up. Mirrors the setup page's Application shape.
+//! Three surfaces over one trace dir, in the order a run moves through them:
+//!
+//! 1. **Live** — while the game runs: settings, recording state, and "what's wrong",
+//!    with one control flowing back ("Stop & save" sets `stop_requested`).
+//! 2. **The ask** — a *kept* clean run the wrapper left un-analyzed (`analysis_offer`,
+//!    no `artifact.json`): "Analyze" (resolve on a background thread) or "Discard".
+//! 3. **The results view** — an `artifact.json` exists (a crash auto-analyzed, or the
+//!    user hit Analyze): the layer split + frametime health + issues.
+//!
+//! The window does *no* analysis itself: surfaces 2→3 run and render `artifact::Trace-
+//! Artifact`, the same code path `beisl symbols` and the crash teardown use. It only
+//! binds to the result, exactly as the setup page binds to `preflight`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use cosmic::app::{Core, Task};
+use cosmic::app::{ApplicationExt, Core, Task};
 use cosmic::iced::{Length, Subscription};
 use cosmic::widget;
 use cosmic::{Application, Element};
 
+use artifact::{TraceArtifact, SCHEMA_VERSION};
 use preflight::{detect_distro, fix_command, Config, DumpAccessPolicy, Fix};
 use session::{Session, State};
 
@@ -24,6 +34,12 @@ pub enum Msg {
     /// now (one polkit prompt). The wrapper is still polling the pending dump, so once the
     /// rule lands its next read captures it — no reverse channel needed for the retry.
     EnableDumpCapture,
+    /// The ask: resolve the kept trace now (background thread), then show the results.
+    Analyze,
+    /// The ask: throw the trace away — a two-step, since it deletes the run dir.
+    Discard,
+    ConfirmDiscard,
+    CancelDiscard,
     OpenFolder,
     Close,
 }
@@ -31,6 +47,14 @@ pub enum Msg {
 /// Tracks the background `pkexec` install so the polkit prompt doesn't block the UI.
 #[derive(Default)]
 struct Enable {
+    finished: bool,
+    error: Option<String>,
+}
+
+/// Tracks the background `TraceArtifact::build` so the ~seconds-long `perf script` resolve
+/// never blocks the event loop (the setup app's worker + `Tick`-poll pattern).
+#[derive(Default)]
+struct Analyze {
     finished: bool,
     error: Option<String>,
 }
@@ -43,6 +67,40 @@ pub struct SessionApp {
     config: Config,
     enabling: Option<Arc<Mutex<Enable>>>,
     enable_note: Option<String>,
+    /// The resolved trace, once `artifact.json` exists (crash auto-analyzed, or Analyze ran).
+    artifact: Option<TraceArtifact>,
+    analyzing: Option<Arc<Mutex<Analyze>>>,
+    analyze_note: Option<String>,
+    /// Discard is destructive (removes the run dir), so it takes a confirm click.
+    confirm_discard: bool,
+    /// The window/taskbar title — "Beisl" alone until we know the game, then "Beisl — <game>".
+    title: String,
+    /// Whether the xdg window title has been pushed yet (only possible once the window
+    /// exists, i.e. on the first Tick, not in `init`).
+    title_pushed: bool,
+}
+
+/// The window title: the product name, then what the window is currently *doing* — the live
+/// state while a game runs, or which surface it's showing afterwards. The current activity
+/// reads better in a taskbar than a raw launcher exe name (`upc.exe`), and it never repeats
+/// the game name the results view already shows.
+fn window_title(has_artifact: bool, analysis_offer: bool, state: State) -> String {
+    let activity = if has_artifact {
+        "Results"
+    } else if analysis_offer {
+        "Clean run"
+    } else {
+        match state {
+            State::Starting => "Starting",
+            State::Running => "Running",
+            State::Recording => "Recording",
+            State::Stopping => "Stopping",
+            State::Done => "Finished",
+            State::Error => "Error",
+        }
+    };
+    // Lowercase "beisl" always — the wordmark is never title-cased (it's a label, not prose).
+    format!("beisl ∷ {activity}")
 }
 
 impl Application for SessionApp {
@@ -64,6 +122,10 @@ impl Application for SessionApp {
         let read = Session::read(&dir);
         let have = read.is_some();
         let session = read.unwrap_or_default();
+        let artifact = load_artifact(&dir);
+        let title = window_title(artifact.is_some(), session.analysis_offer, session.state);
+        let mut core = core;
+        core.set_header_title(title.clone());
         (
             Self {
                 core,
@@ -73,6 +135,12 @@ impl Application for SessionApp {
                 config: Config::load(),
                 enabling: None,
                 enable_note: None,
+                artifact,
+                analyzing: None,
+                analyze_note: None,
+                confirm_discard: false,
+                title,
+                title_pushed: false,
             },
             Task::none(),
         )
@@ -85,25 +153,28 @@ impl Application for SessionApp {
                     self.session = s;
                     self.have = true;
                 }
-                if let Some(w) = &self.enabling {
-                    let (finished, error) = {
-                        let e = w.lock().unwrap();
-                        (e.finished, e.error.clone())
-                    };
-                    if finished {
-                        self.enabling = None;
-                        if let Some(err) = error {
-                            self.enable_note = Some(format!("Couldn't enable capture: {err}"));
-                        } else {
-                            // Persist intent + tell the user; the wrapper's watcher will
-                            // capture the still-pending dump on its next poll.
-                            self.config.dump_access_policy = DumpAccessPolicy::RuleInstalled;
-                            let _ = self.config.save();
-                            self.enable_note =
-                                Some("Capture enabled — saving this crash's dump now.".to_string());
-                        }
-                    }
+                // Push the title once the window exists, and refresh it as the activity
+                // changes (live state → the ask → results). The xdg title (taskbar/overview)
+                // can only be set once the window is up, so it happens here, not in `init`.
+                let title = window_title(
+                    self.artifact.is_some(),
+                    self.session.analysis_offer,
+                    self.session.state,
+                );
+                if title != self.title || !self.title_pushed {
+                    self.title = title.clone();
+                    self.title_pushed = true;
+                    self.set_header_title(title.clone());
+                    let _ = self.set_window_title(title);
                 }
+                // A crash auto-writes artifact.json before the window even opens; poll for it
+                // (and for one Analyze produces) until we have it. Cheap: one stat+read of a
+                // small file, and only until it's loaded.
+                if self.artifact.is_none() && (self.session.analysis_offer || self.is_finished()) {
+                    self.artifact = load_artifact(&self.dir);
+                }
+                self.poll_enable();
+                self.poll_analyze();
             }
             Msg::EnableDumpCapture => {
                 if self.enabling.is_none() {
@@ -113,6 +184,24 @@ impl Application for SessionApp {
                         self.enabling = Some(spawn_enable(cmd));
                     }
                 }
+            }
+            Msg::Analyze => {
+                if self.analyzing.is_none() && self.artifact.is_none() {
+                    self.analyze_note = Some("Analyzing the trace…".to_string());
+                    self.analyzing = Some(spawn_analyze(
+                        self.dir.clone(),
+                        self.session.game.clone(),
+                        self.session.elapsed_secs as f64,
+                    ));
+                }
+            }
+            Msg::Discard => self.confirm_discard = true,
+            Msg::CancelDiscard => self.confirm_discard = false,
+            Msg::ConfirmDiscard => {
+                // The user chose to throw the trace away; remove the whole run dir, then
+                // close (there's nothing left for this window to show).
+                let _ = std::fs::remove_dir_all(&self.dir);
+                std::process::exit(0);
             }
             Msg::Stop => {
                 if let Some(mut s) = Session::read(&self.dir) {
@@ -136,6 +225,91 @@ impl Application for SessionApp {
     }
 
     fn view(&self) -> Element<'_, Self::Message> {
+        // Pick the surface: a resolved trace shows results; a kept-but-un-analyzed clean run
+        // shows the ask; anything else is the live view.
+        let (content, buttons) = if let Some(a) = &self.artifact {
+            (self.results_content(a), self.results_buttons())
+        } else if self.session.analysis_offer {
+            (self.ask_content(), self.ask_buttons())
+        } else {
+            (self.live_content(), self.live_buttons())
+        };
+
+        // Content scrolls; the buttons stay pinned and visible at the bottom. A little right
+        // padding inside the scroll region keeps full-width charts off the scrollbar. The
+        // product name lives in the header/title bar (set via `set_header_title`), so the
+        // content doesn't repeat it.
+        let page = widget::Column::new()
+            .spacing(10)
+            .push(
+                widget::scrollable(
+                    widget::container(content).padding(cosmic::iced::Padding::from([0, 14, 0, 0])),
+                )
+                .width(Length::Fill)
+                .height(Length::Fill),
+            )
+            .push(buttons);
+
+        widget::container(page)
+            .padding(24)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    }
+}
+
+impl SessionApp {
+    fn is_finished(&self) -> bool {
+        matches!(self.session.state, State::Done | State::Error)
+    }
+
+    /// Poll the background dump-access install (mirrors the setup app's worker pattern).
+    fn poll_enable(&mut self) {
+        if let Some(w) = &self.enabling {
+            let (finished, error) = {
+                let e = w.lock().unwrap();
+                (e.finished, e.error.clone())
+            };
+            if finished {
+                self.enabling = None;
+                if let Some(err) = error {
+                    self.enable_note = Some(format!("Couldn't enable capture: {err}"));
+                } else {
+                    // Persist intent + tell the user; the wrapper's watcher will capture the
+                    // still-pending dump on its next poll.
+                    self.config.dump_access_policy = DumpAccessPolicy::RuleInstalled;
+                    let _ = self.config.save();
+                    self.enable_note =
+                        Some("Capture enabled — saving this crash's dump now.".to_string());
+                }
+            }
+        }
+    }
+
+    /// Poll the background Analyze; on success the artifact is now on disk, so load it and
+    /// flip to the results view.
+    fn poll_analyze(&mut self) {
+        if let Some(w) = &self.analyzing {
+            let (finished, error) = {
+                let a = w.lock().unwrap();
+                (a.finished, a.error.clone())
+            };
+            if finished {
+                self.analyzing = None;
+                match error {
+                    Some(err) => self.analyze_note = Some(format!("Couldn't analyze: {err}")),
+                    None => {
+                        self.artifact = load_artifact(&self.dir);
+                        self.analyze_note = None;
+                    }
+                }
+            }
+        }
+    }
+
+    // -- Surface 1: live -----------------------------------------------------------------
+
+    fn live_content(&self) -> Element<'_, Msg> {
         let s = &self.session;
         let badge = match s.state {
             State::Starting => "Starting…",
@@ -200,34 +374,260 @@ impl Application for SessionApp {
         if !self.have {
             col = col.push(widget::text::caption("(waiting for the session to start…)"));
         }
+        col.into()
+    }
 
-        // "Stop & save" only exists while a capture is actually running, so show it only
-        // then rather than as a permanently-disabled control.
+    fn live_buttons(&self) -> Element<'_, Msg> {
+        // "Stop & save" only exists while a capture is actually running, so show it only then
+        // rather than as a permanently-disabled control.
         let mut buttons = widget::Row::new()
             .spacing(8)
             .push(widget::button::text("Open folder").on_press(Msg::OpenFolder))
             .push(widget::Space::new().width(Length::Fill));
-        if s.state == State::Recording {
+        if self.session.state == State::Recording {
             buttons = buttons.push(widget::button::standard("Stop & save").on_press(Msg::Stop));
         }
-        let buttons = buttons.push(widget::button::suggested("Close").on_press(Msg::Close));
-
-        // Content scrolls; the buttons stay pinned and visible at the bottom.
-        let page = widget::Column::new()
-            .spacing(10)
-            .push(
-                widget::scrollable(col)
-                    .width(Length::Fill)
-                    .height(Length::Fill),
-            )
-            .push(buttons);
-
-        widget::container(page)
-            .padding(24)
-            .width(Length::Fill)
-            .height(Length::Fill)
+        buttons
+            .push(widget::button::suggested("Close").on_press(Msg::Close))
             .into()
     }
+
+    // -- Surface 2: the ask --------------------------------------------------------------
+
+    fn ask_content(&self) -> Element<'_, Msg> {
+        let title = if self.session.game.is_empty() {
+            "Clean run".to_string()
+        } else {
+            self.session.game.clone()
+        };
+        let mut col = widget::Column::new()
+            .spacing(10)
+            .push(widget::text::title3(title))
+            .push(widget::text::body("Clean run — not analyzed yet"))
+            .push(widget::text::caption(
+                "The trace was kept as-is. Analyze it to see which layer of the stack ate the \
+                 frame and where it hitched, or discard it to reclaim the disk.",
+            ))
+            .push(widget::text::caption(format!(
+                "Trace: {}",
+                human_bytes(self.session.trace_bytes)
+            )));
+
+        if self.analyzing.is_some() {
+            col = col.push(widget::text::body(
+                "Analyzing the trace… (this takes a few seconds)",
+            ));
+        }
+        if let Some(note) = &self.analyze_note {
+            col = col.push(widget::text::caption(note.clone()));
+        }
+        if self.confirm_discard {
+            col = col.push(widget::text::body(
+                "Discard this trace? This permanently deletes the run directory.",
+            ));
+        }
+        col.into()
+    }
+
+    fn ask_buttons(&self) -> Element<'_, Msg> {
+        // The confirm step replaces the normal buttons so the destructive action is a
+        // deliberate second click, never a stray one.
+        if self.confirm_discard {
+            return widget::Row::new()
+                .spacing(8)
+                .push(widget::button::standard("Cancel").on_press(Msg::CancelDiscard))
+                .push(widget::Space::new().width(Length::Fill))
+                .push(widget::button::destructive("Delete trace").on_press(Msg::ConfirmDiscard))
+                .into();
+        }
+
+        let busy = self.analyzing.is_some();
+        let mut analyze = widget::button::suggested("Analyze");
+        let mut discard = widget::button::destructive("Discard");
+        if !busy {
+            analyze = analyze.on_press(Msg::Analyze);
+            discard = discard.on_press(Msg::Discard);
+        }
+        widget::Row::new()
+            .spacing(8)
+            .push(widget::button::text("Open folder").on_press(Msg::OpenFolder))
+            .push(widget::Space::new().width(Length::Fill))
+            .push(discard)
+            .push(analyze)
+            .into()
+    }
+
+    // -- Surface 3: the results view -----------------------------------------------------
+
+    fn results_content(&self, a: &TraceArtifact) -> Element<'_, Msg> {
+        let mut col = widget::Column::new().spacing(10);
+
+        // A trace from a newer schema than we understand: say so plainly rather than render a
+        // half-read view. (Older/defaulted fields still load — that's the serde-default path.)
+        if a.schema_version > SCHEMA_VERSION {
+            col = col.push(widget::text::body(format!(
+                "This trace was written by a newer Beisl (schema {} > {}). Update to read it \
+                 fully; showing what this version understands.",
+                a.schema_version, SCHEMA_VERSION
+            )));
+        }
+
+        // 1. Header — game · wine · tier, with the Exports caveat inline.
+        col = col
+            .push(widget::text::title3(a.game.clone()))
+            .push(widget::text::caption(format!(
+                "wine: {}   ·   fidelity: {}   ·   {:.0}s",
+                a.wine_flavor, a.diagnostics.fidelity, a.duration_s
+            )));
+        if a.diagnostics.fidelity == "Exports" {
+            col = col.push(widget::text::caption(
+                "Exports tier — PE symbols are nearest-export: A/B-comparable, not full.",
+            ));
+        }
+
+        // 2. Frametime health + spikes.
+        col = col.push(widget::text::title4("Frametimes"));
+        if let Some(f) = &a.frame_stats {
+            col = col.push(widget::text::body(format!(
+                "avg {:.0} fps   ·   1% low {:.1} ms   ·   worst {:.1} ms",
+                f.avg_fps, f.p99_frametime_ms, f.worst_frametime_ms
+            )));
+            // The timeline chart (plotters, drawn on Canvas) with the worst spikes marked.
+            if !a.timeline.is_empty() {
+                let points = a.timeline.iter().map(|&(t, ms)| (t, ms as f64)).collect();
+                let spikes = a
+                    .spikes
+                    .iter()
+                    .map(|s| (s.t_seconds, s.frametime_ms as f64))
+                    .collect();
+                col = col.push(crate::chart::FrametimeChart::new(points, spikes).view::<Msg>());
+            }
+            if !a.spikes.is_empty() {
+                col = col.push(widget::text::caption("Worst hitches:"));
+                for s in &a.spikes {
+                    col = col.push(widget::text::caption(format!(
+                        "   {:.0} ms at {:.1}s",
+                        s.frametime_ms, s.t_seconds
+                    )));
+                }
+            }
+        } else {
+            col = col.push(widget::text::caption(
+                "No MangoHud frametime log for this run.",
+            ));
+        }
+
+        // 3. The culprit — the layer split (who ate the frame), normalized over attributed
+        //    samples, each layer with its own symbol coverage.
+        col = col.push(widget::text::title4("Who ate the frame"));
+        if a.layers.is_empty() {
+            col = col.push(widget::text::caption("No CPU samples to attribute."));
+        } else {
+            col = col.push(widget::text::caption(format!(
+                "CPU by layer — of {:.0}% of samples we could place:",
+                a.attributed_pct
+            )));
+            // The colored stacked bar (GPU driver segment tinted by vendor), then the precise
+            // per-layer legend below it.
+            let segments = a
+                .layers
+                .iter()
+                .map(|l| (l.pct, crate::chart::layer_color(&l.layer, &a.gpu_vendor)))
+                .collect();
+            col = col.push(crate::chart::LayerBar::new(segments).view::<Msg>());
+            // Legend: a color swatch matching the bar segment, then the precise numbers.
+            for l in &a.layers {
+                let row = widget::Row::new()
+                    .spacing(8)
+                    .align_y(cosmic::iced::Alignment::Center)
+                    .push(crate::chart::swatch::<Msg>(crate::chart::layer_color(
+                        &l.layer,
+                        &a.gpu_vendor,
+                    )))
+                    .push(widget::text::monotext(format!(
+                        "{:<11} {:4.1}%   {:>3.0}% named",
+                        l.layer, l.pct, l.symbol_pct
+                    )));
+                col = col.push(row);
+            }
+            let gap = 100.0 - a.attributed_pct;
+            if gap >= 0.5 {
+                col = col.push(widget::text::caption(format!(
+                    "{gap:.0}% of samples were unmapped — could belong to any layer, \
+                     graphics/driver included.",
+                )));
+            }
+        }
+
+        // Top hot functions within the layers (the ones we could name). Same header level and
+        // monospaced, column-aligned rows as Issues below, so the two read as one family.
+        if !a.hot_symbols.is_empty() {
+            col = col.push(widget::text::title4("Hottest functions"));
+            col = col.push(widget::text::caption(
+                "Self time across all layers — the functions we could name.",
+            ));
+            for h in a.hot_symbols.iter().take(8) {
+                col = col.push(widget::text::monotext(format!(
+                    "{:>5.1}%  {:<26}  {}",
+                    h.pct, h.module, h.symbol
+                )));
+            }
+        }
+
+        // 4. Issues — anonymous hot modules tied to their fix. The same signal the preflight
+        //    debuginfo checks predict, now confirmed against the real trace.
+        if !a.diagnostics.anonymous_modules.is_empty() {
+            col = col.push(widget::text::title4("Issues"));
+            col = col.push(widget::text::caption(
+                "Hot modules we couldn't see inside — install the fix to name them:",
+            ));
+            for (module, pct) in &a.diagnostics.anonymous_modules {
+                let hint = if module.to_ascii_lowercase().ends_with(".dll") {
+                    "needs the Full tier (retained-DWARF wine build)"
+                } else {
+                    "install its debuginfo package"
+                };
+                col = col.push(widget::text::monotext(format!(
+                    "{pct:>5.1}%  {module:<26}  {hint}"
+                )));
+            }
+        }
+
+        col.into()
+    }
+
+    fn results_buttons(&self) -> Element<'_, Msg> {
+        widget::Row::new()
+            .spacing(8)
+            .push(widget::button::text("Open folder").on_press(Msg::OpenFolder))
+            .push(widget::Space::new().width(Length::Fill))
+            .push(widget::button::suggested("Close").on_press(Msg::Close))
+            .into()
+    }
+}
+
+/// Read `artifact.json` from a trace dir, or `None` if it's missing/unparseable. A schema
+/// too new to fully understand still loads (unknown fields are ignored, missing ones
+/// default) — the results view flags that case rather than refusing to render.
+fn load_artifact(dir: &Path) -> Option<TraceArtifact> {
+    TraceArtifact::read_json(&dir.join("artifact.json")).ok()
+}
+
+/// Run `TraceArtifact::build` (resolve `perf.data` + fold in the CSV) on a background
+/// thread, writing `artifact.json` on success. The UI polls the returned handle each Tick.
+fn spawn_analyze(dir: PathBuf, game: String, duration_s: f64) -> Arc<Mutex<Analyze>> {
+    let state = Arc::new(Mutex::new(Analyze::default()));
+    let s2 = state.clone();
+    std::thread::spawn(move || {
+        let result = TraceArtifact::build(&dir, &game, duration_s)
+            .and_then(|a| a.write_json(&dir.join("artifact.json")));
+        let mut a = s2.lock().unwrap();
+        if let Err(e) = result {
+            a.error = Some(e.to_string());
+        }
+        a.finished = true;
+    });
+    state
 }
 
 /// Run the (single) `pkexec …` install argv on a background thread so the polkit prompt

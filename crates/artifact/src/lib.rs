@@ -81,11 +81,21 @@ pub struct TraceArtifact {
     pub game: String,
     /// e.g. `SpritzWine-Prater`, `Proton - Experimental`, or `unknown`.
     pub wine_flavor: String,
+    /// GPU vendor of the card that ran (`intel`/`amd`/`nvidia`/`qualcomm`), for vendor-colored
+    /// UI. Empty string when undetected. Defaulted so pre-vendor artifacts still load.
+    #[serde(default)]
+    pub gpu_vendor: String,
     pub duration_s: f64,
     /// Present when a MangoHud CSV was logged; absent otherwise.
     pub frame_stats: Option<FrameStats>,
     /// Worst frametime spikes, worst first (bookmarks into the timeline).
     pub spikes: Vec<Spike>,
+    /// A downsampled frametime timeline for the chart — `(t_seconds, frametime_ms)`, capped
+    /// at a few hundred points (max-per-bucket, so hitches survive the downsample) to keep
+    /// the artifact small. Empty when no MangoHud CSV was logged. Defaulted so pre-timeline
+    /// artifacts still load.
+    #[serde(default)]
+    pub timeline: Vec<(f64, f32)>,
     /// The layer split — where CPU went across the stack (kernel/driver/dxvk/wine/game),
     /// biggest first. This is what the headline "who ate the frame" bar renders. The shares
     /// are over the *attributed* samples only (see `attributed_pct`), not the whole trace:
@@ -118,11 +128,18 @@ impl TraceArtifact {
     /// (the session); the wine flavor is inferred during resolution.
     pub fn build(run_dir: &Path, game: &str, duration_s: f64) -> io::Result<Self> {
         let res = symbol_resolver::resolve_perf_data(&run_dir.join("perf.data"))?;
-        let (frame_stats, spikes) = find_csv(run_dir)
+        let (frame_stats, spikes, timeline) = find_csv(run_dir)
             .and_then(|csv| frames_from_csv(&csv))
-            .map(|(stats, spikes)| (Some(stats), spikes))
-            .unwrap_or((None, Vec::new()));
-        Ok(Self::from_parts(game, duration_s, res, frame_stats, spikes))
+            .map(|(stats, spikes, timeline)| (Some(stats), spikes, timeline))
+            .unwrap_or((None, Vec::new(), Vec::new()));
+        Ok(Self::from_parts(
+            game,
+            duration_s,
+            res,
+            frame_stats,
+            spikes,
+            timeline,
+        ))
     }
 
     fn from_parts(
@@ -131,6 +148,7 @@ impl TraceArtifact {
         res: Resolution,
         frame_stats: Option<FrameStats>,
         spikes: Vec<Spike>,
+        timeline: Vec<(f64, f32)>,
     ) -> Self {
         let total = res.diagnostics.total_samples.max(1) as f32;
         // ALL resolved functions, not just wine `.dll`s: a native game's ELF code, the
@@ -192,9 +210,11 @@ impl TraceArtifact {
             schema_version: SCHEMA_VERSION,
             game: game.to_string(),
             wine_flavor: res.wine_flavor.unwrap_or_else(|| "unknown".to_string()),
+            gpu_vendor: res.gpu_vendor.unwrap_or_default(),
             duration_s,
             frame_stats,
             spikes,
+            timeline,
             layers,
             attributed_pct,
             hot_symbols,
@@ -212,6 +232,14 @@ impl TraceArtifact {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         std::fs::write(path, json)
+    }
+
+    /// Read a previously written `artifact.json`. Keeps deserialization inside this crate so
+    /// consumers (the GUI, later the trace library) bind to the type without pulling serde
+    /// themselves — the same reason `write_json` lives here.
+    pub fn read_json(path: &Path) -> io::Result<Self> {
+        let data = std::fs::read(path)?;
+        serde_json::from_slice(&data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
     /// A one-line headline for the session window / log: the hottest wine function and tier.
@@ -337,13 +365,17 @@ fn find_csv(run_dir: &Path) -> Option<std::path::PathBuf> {
         .find(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("csv")))
 }
 
+/// What [`frames_from_csv`] yields: session stats, the worst spikes, and the downsampled
+/// timeline for the chart.
+type CsvFrames = (FrameStats, Vec<Spike>, Vec<(f64, f32)>);
+
 /// Parse a MangoHud frametime CSV into stats + worst spikes.
 ///
 /// Layout (verified): two system-info header lines, then a data-header line whose columns
 /// name `frametime` (ms) among others, then data rows. We build the timeline from the
 /// running sum of frametimes rather than the absolute-clock `elapsed` column, so it's
 /// robust to that column's units.
-fn frames_from_csv(path: &Path) -> Option<(FrameStats, Vec<Spike>)> {
+fn frames_from_csv(path: &Path) -> Option<CsvFrames> {
     let text = std::fs::read_to_string(path).ok()?;
     let mut lines = text.lines();
     // Skip the two system-info lines; the third line is the data header.
@@ -387,9 +419,9 @@ fn frames_from_csv(path: &Path) -> Option<(FrameStats, Vec<Spike>)> {
     // visible-stutter 33 ms (below ~30 fps). Report the worst few, worst first.
     let threshold = (median * 2.0).max(33.0);
     let mut spikes: Vec<Spike> = timeline
-        .into_iter()
-        .filter(|&(_, ms)| ms >= threshold)
-        .map(|(t_seconds, frametime_ms)| Spike {
+        .iter()
+        .filter(|&&(_, ms)| ms >= threshold)
+        .map(|&(t_seconds, frametime_ms)| Spike {
             t_seconds,
             frametime_ms,
         })
@@ -407,7 +439,26 @@ fn frames_from_csv(path: &Path) -> Option<(FrameStats, Vec<Spike>)> {
             logged_seconds,
         },
         spikes,
+        downsample(&timeline),
     ))
+}
+
+/// Cap the timeline at [`TIMELINE_POINTS`] for the chart. Buckets take the *max* frametime
+/// (not the mean) so a hitch inside a bucket still shows as a peak instead of averaging away.
+const TIMELINE_POINTS: usize = 240;
+fn downsample(timeline: &[(f64, f32)]) -> Vec<(f64, f32)> {
+    if timeline.len() <= TIMELINE_POINTS {
+        return timeline.to_vec();
+    }
+    let bucket = timeline.len().div_ceil(TIMELINE_POINTS);
+    timeline
+        .chunks(bucket)
+        .map(|c| {
+            let t = c[0].0;
+            let ms = c.iter().map(|&(_, m)| m).fold(0.0_f32, f32::max);
+            (t, ms)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -426,7 +477,8 @@ mod tests {
         // Two info lines, a data header, then frames: three ~16 ms then one 50 ms hitch.
         let csv = "os,cpu\nSteam,Ryzen\nfps,frametime,elapsed\n\
                    60,16.0,1\n60,16.0,2\n60,16.0,3\n20,50.0,4\n";
-        let (stats, spikes) = frames_from_csv(&write_csv("spike", csv)).unwrap();
+        let (stats, spikes, timeline) = frames_from_csv(&write_csv("spike", csv)).unwrap();
+        assert_eq!(timeline.len(), 4); // short run: not downsampled
         assert_eq!(stats.frames, 4);
         assert_eq!(stats.worst_frametime_ms, 50.0);
         assert_eq!(spikes.len(), 1);
@@ -442,7 +494,7 @@ mod tests {
     #[test]
     fn a_smooth_run_has_no_spikes() {
         let csv = "os,cpu\nSteam,Ryzen\nfps,frametime,elapsed\n60,16.0,1\n60,16.5,2\n60,16.2,3\n";
-        let (stats, spikes) = frames_from_csv(&write_csv("smooth", csv)).unwrap();
+        let (stats, spikes, _timeline) = frames_from_csv(&write_csv("smooth", csv)).unwrap();
         assert!(spikes.is_empty());
         assert!(stats.avg_fps > 55.0 && stats.avg_fps < 65.0);
     }
@@ -453,9 +505,11 @@ mod tests {
             schema_version: SCHEMA_VERSION,
             game: "Test".into(),
             wine_flavor: "example-wine-build".into(),
+            gpu_vendor: "amd".into(),
             duration_s: 42.0,
             frame_stats: None,
             spikes: vec![],
+            timeline: vec![],
             layers: vec![
                 LayerShare {
                     layer: "wine".into(),
@@ -515,8 +569,9 @@ mod tests {
                 tally(Layer::Other, 40, 0),
             ],
             wine_flavor: None,
+            gpu_vendor: None,
         };
-        let a = TraceArtifact::from_parts("G", 1.0, res, None, vec![]);
+        let a = TraceArtifact::from_parts("G", 1.0, res, None, vec![], vec![]);
         // The gap is disclosed as coverage, never as a peer layer.
         assert_eq!(a.attributed_pct, 60.0);
         assert!(a.layers.iter().all(|l| l.layer != "other"));
@@ -540,6 +595,40 @@ mod tests {
         assert!(a.render_report().contains("of 60% attributed"));
         assert!(a.render_report().contains("named"));
         assert!(a.render_report().contains("unmapped"));
+    }
+
+    #[test]
+    fn write_then_read_json_round_trips() {
+        let a = TraceArtifact {
+            schema_version: SCHEMA_VERSION,
+            game: "RoundTrip".into(),
+            wine_flavor: "example-wine-build".into(),
+            gpu_vendor: "amd".into(),
+            duration_s: 12.0,
+            frame_stats: None,
+            spikes: vec![],
+            timeline: vec![],
+            layers: vec![LayerShare {
+                layer: "game".into(),
+                pct: 100.0,
+                symbol_pct: 50.0,
+            }],
+            attributed_pct: 88.0,
+            hot_symbols: vec![],
+            diagnostics: Diagnostics {
+                fidelity: "Exports".into(),
+                total_samples: 10,
+                unresolved_pct: 0.0,
+                anonymous_modules: vec![],
+            },
+        };
+        let p = std::env::temp_dir().join(format!("beisl-art-{}.json", std::process::id()));
+        a.write_json(&p).unwrap();
+        let back = TraceArtifact::read_json(&p).unwrap();
+        assert_eq!(back.game, "RoundTrip");
+        assert_eq!(back.attributed_pct, 88.0);
+        assert_eq!(back.layers[0].symbol_pct, 50.0);
+        std::fs::remove_file(&p).ok();
     }
 
     /// An artifact written before the `layers` field must still deserialize (schema stayed

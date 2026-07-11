@@ -236,6 +236,30 @@ pub struct Resolution {
     /// Best-effort wine build identifier from a PE module's path (`SpritzWine-Prater`,
     /// `Proton - Experimental`, …) — the artifact's `wine_flavor`. `None` if no wine PE.
     pub wine_flavor: Option<String>,
+    /// Best-effort GPU vendor of the card that ran, from the driver-layer DSOs seen
+    /// (`intel`/`amd`/`nvidia`/`qualcomm`) — the one with the most samples. Drives
+    /// vendor-colored UI (Intel blue, AMD red, Nvidia green, …). `None` if no driver sample
+    /// identified a vendor.
+    pub gpu_vendor: Option<String>,
+}
+
+/// Best-effort GPU vendor from a driver DSO basename — the Mesa ICDs/DRI and the vendor
+/// blobs all carry the vendor in their name, wherever the tree puts them. Used only for the
+/// driver *layer* (see [`classify_layer`]); returns a stable lowercase tag.
+pub fn gpu_vendor(dso: &str) -> Option<&'static str> {
+    let l = dso.to_ascii_lowercase();
+    let base = l.rsplit('/').next().unwrap_or(&l);
+    if base.contains("intel") || base.contains("iris") || base.contains("_anv") {
+        Some("intel")
+    } else if base.contains("radeon") || base.contains("amdgpu") || base.contains("amdvlk") {
+        Some("amd") // radeonsi / radv / amdvlk all match
+    } else if base.contains("nvidia") || base.contains("nouveau") || base.contains("nvk") {
+        Some("nvidia")
+    } else if base.contains("freedreno") || base.contains("turnip") || base.contains("adreno") {
+        Some("qualcomm")
+    } else {
+        None
+    }
 }
 
 /// Resolve every sample in `perf_data` to a wine symbol, via `perf script`.
@@ -267,6 +291,8 @@ pub fn resolve_perf_data(perf_data: &Path) -> io::Result<Resolution> {
     let mut unresolved: u64 = 0;
     // Per layer: (samples, named) — the named count is the layer's symbol coverage.
     let mut layers: HashMap<Layer, (u64, u64)> = HashMap::new();
+    // GPU vendor tally over driver-layer samples, so a mixed system picks the busiest card.
+    let mut gpu_vendors: HashMap<&'static str, u64> = HashMap::new();
     let mut pe_paths: Vec<String> = Vec::new();
 
     use io::BufRead as _;
@@ -292,6 +318,11 @@ pub fn resolve_perf_data(perf_data: &Path) -> io::Result<Resolution> {
         // Every sample lands in exactly one layer, whether or not we can name its function —
         // the split is over the whole trace, not just the resolved symbols.
         let layer = classify_layer(&sample.dso);
+        if layer == Layer::Driver {
+            if let Some(v) = gpu_vendor(&sample.dso) {
+                *gpu_vendors.entry(v).or_insert(0) += 1;
+            }
+        }
 
         // A confident function name for this sample, or None. Both paths aggregate by
         // *name* (offset stripped) so a function's samples coalesce into one hot row.
@@ -375,6 +406,11 @@ pub fn resolve_perf_data(perf_data: &Path) -> io::Result<Resolution> {
             .then((a.layer as u8).cmp(&(b.layer as u8)))
     });
 
+    let gpu_vendor = gpu_vendors
+        .into_iter()
+        .max_by_key(|&(_, n)| n)
+        .map(|(v, _)| v.to_string());
+
     Ok(Resolution {
         diagnostics: Diagnostics {
             tier: detect_tier(&pe_paths),
@@ -384,6 +420,7 @@ pub fn resolve_perf_data(perf_data: &Path) -> io::Result<Resolution> {
         },
         layers,
         wine_flavor: pe_paths.iter().find_map(|p| wine_flavor(p)),
+        gpu_vendor,
         symbols,
     })
 }
@@ -658,6 +695,21 @@ mod tests {
         );
         assert_eq!(classify_layer("/games/Foo/bin/Foo.exe"), Game);
         assert_eq!(classify_layer("/usr/lib/libc.so.6"), Game);
+    }
+
+    #[test]
+    fn gpu_vendor_reads_the_driver_basename() {
+        assert_eq!(gpu_vendor("/usr/lib/libvulkan_intel.so"), Some("intel"));
+        assert_eq!(gpu_vendor("/usr/lib/dri/iris_dri.so"), Some("intel"));
+        assert_eq!(gpu_vendor("/usr/lib/dri/radeonsi_dri.so"), Some("amd"));
+        assert_eq!(gpu_vendor("/usr/lib/libvulkan_radeon.so"), Some("amd"));
+        assert_eq!(gpu_vendor("/usr/lib/libGLX_nvidia.so.0"), Some("nvidia"));
+        assert_eq!(gpu_vendor("/usr/lib/dri/nouveau_dri.so"), Some("nvidia"));
+        assert_eq!(
+            gpu_vendor("/usr/lib/libvulkan_freedreno.so"),
+            Some("qualcomm")
+        );
+        assert_eq!(gpu_vendor("/usr/lib/libc.so.6"), None);
     }
 
     #[test]

@@ -15,11 +15,11 @@
 //! A rotating tip panel turns the setup wait into onboarding (shortcut, where traces land,
 //! that it works with any wine). Mirrors the installer's widget idioms for the pinned rev.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use cosmic::app::{Core, Settings, Task};
+use cosmic::app::{ApplicationExt, Core, Settings, Task};
 use cosmic::iced::{Length, Subscription};
 use cosmic::widget;
 use cosmic::{Application, Element};
@@ -30,6 +30,7 @@ use preflight::{
     multi_gpu_check, Check, CheckId, Config, Distro, DumpAccessPolicy, Fix, GpuPin, Status,
 };
 
+mod chart; // frametime timeline (plotters, drawn on cosmic's Canvas)
 mod window; // the live session window (`--session`)
 
 /// Onboarding tips, cycled while the user waits.
@@ -195,7 +196,7 @@ fn trace_dir() -> PathBuf {
 }
 
 impl AppModel {
-    fn detect_all(trace_dir: &PathBuf) -> Vec<Check> {
+    fn detect_all(trace_dir: &Path) -> Vec<Check> {
         let mut checks = all_checks();
         for c in checks.iter_mut() {
             c.detect();
@@ -293,6 +294,8 @@ impl Application for AppModel {
     fn init(core: Core, flags: Self::Flags) -> (Self, Task<Self::Message>) {
         let trace_dir = trace_dir();
         let checks = Self::detect_all(&trace_dir);
+        let mut core = core;
+        core.set_header_title("beisl setup".to_string());
         let app = AppModel {
             core,
             distro: detect_distro(),
@@ -397,7 +400,11 @@ impl Application for AppModel {
             Message::ToggleAdvanced => self.show_advanced = !self.show_advanced,
             Message::Tick => {
                 self.tick += 1;
-                if self.tick % 24 == 0 {
+                // Set the taskbar/overview title once the window exists (not possible in init).
+                if self.tick == 1 {
+                    let _ = self.set_window_title("beisl setup".to_string());
+                }
+                if self.tick.is_multiple_of(24) {
                     self.tip = (self.tip + 1) % TIPS.len();
                 }
                 if let Some(w) = &self.worker {
@@ -743,7 +750,9 @@ fn main() -> cosmic::iced::Result {
         match a.as_str() {
             "--session" => {
                 let dir = PathBuf::from(args.next().unwrap_or_default());
-                let settings = Settings::default().size(cosmic::iced::Size::new(440.0, 560.0));
+                // Golden-ratio landscape (≈1.618:1): the results view's monospaced function /
+                // issue rows need the width, and the charts read better wide than tall.
+                let settings = Settings::default().size(cosmic::iced::Size::new(880.0, 544.0));
                 return cosmic::app::run::<window::SessionApp>(settings, dir);
             }
             "--payload" => {
