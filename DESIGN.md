@@ -86,10 +86,28 @@ first, the caveats last, in the layered wording the rest of the UI uses:
    preflight `driver debug symbols` / `kernel symbols` checks predict, now confirmed
    against the real trace. This is the "indicate about issues" surface.
 
-**One piece still to add to the artifact for step 3:** the per-DSO → layer classification
-(bucket each module into kernel/driver/JIT/DXVK/wine). The resolver already has the
-per-module counts; this is a classification pass whose rollup the artifact should carry as
-a `layers` field, so the headline bar reads it directly instead of re-deriving.
+**The layer classification (built).** The resolver buckets *every* sample by its DSO into a
+`Layer` (`kernel · driver · dxvk/vkd3d · wine · game`) — keyed on module *kind*, not build
+tree, so it's wine-agnostic (the translation DLLs and driver libs are named the same under any
+wine; wine's own builtins are the PEs under a `/lib/wine/` path). It covers the whole trace,
+so kernel and *unnamed* samples are still placed by their module even when the function can't
+be named. The artifact carries the rollup as a `layers` field and the headline bar reads it
+directly; `beisl symbols` renders it as a text bar ("who ate the frame").
+
+Each layer also carries its own **symbol coverage** (`symbol_pct` — the share of *its* samples
+we could name), so the bar says not just "driver was 18%" but "…and we could name 98% of it"
+vs. a big `game` layer at 22% named. That points the user straight at where fidelity is worth
+buying: a large layer with low coverage is where installing that layer's debuginfo, or the
+`Full` (retained-DWARF) tier for a wine PE, would actually reveal what's inside — the same
+remedy the preflight debuginfo checks predict, now measured against the real trace.
+
+**Coverage, not a fake layer.** Samples perf can't back to any module (`[unknown]`) are a
+*measurement gap*, not a stack layer — so they are **not** shown as a peer bucket. Doing that
+would both shrink the real layers and dress the gap up as an answer, when in truth it could be
+graphics/driver code we merely couldn't place. Instead the layer shares are normalized over
+the *attributed* samples, and the gap is disclosed separately as `attributed_pct` ("of 66%
+attributed … 34% unmapped — could belong to any layer"). The gap is never redistributed into a
+named layer — that would be fabrication.
 
 **Honest gap:** spikes and hot-symbols are shown *side by side*, not correlated — telling
 *which* symbols were hot *during* a given spike needs timestamped samples plus
@@ -397,9 +415,9 @@ hot-path roadmap. Creators generate exactly the profiling data the roadmap needs
   default view for a kept clean run, then the **results view** — layer split (the
   *headline view* culprit
   bar) + frametime spikes + issues, all read from `artifact.json`. Then the **trace
-  library** (list / open / export / delete) reusing that same view. Near-term artifact
-  add for the layer bar: a per-DSO → layer (`kernel/driver/JIT/DXVK/wine`) classification
-  rollup.
+  library** (list / open / export / delete) reusing that same view. (The per-DSO → layer
+  classification rollup the headline bar needs is **built** — the artifact carries a
+  `layers` field; see *Surfacing it*.)
 - **v2 (polish):** in-game indicator via MangoHud overlay / libnotify; flamegraph;
   A/B compare view (SpritzWine vs Proton, side by side, tiers labeled).
 - **Case-study-driven additions (2026-07-05, see above):** devcoredump watcher in the
