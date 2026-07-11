@@ -4,7 +4,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use session::{Session, State};
@@ -54,7 +54,34 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
         }
     }
 
-    mangohud::configure(&mut child, &run_dir); // frametime side-channel + toggle hotkey
+    // Frametime side-channel + toggle hotkey. Also aim MangoHud's GPU sampler at the card
+    // the game actually renders on (the pinned GPU, else the sole GPU) — left to itself
+    // the sampler picks a card independently of Vulkan device selection, and on a
+    // multi-GPU box it happily logs an idle iGPU's stats as the game's.
+    let mango_pci_dev = mangohud::sample_pci_dev(cfg.gpu_pin.as_ref());
+    if let Some(addr) = &mango_pci_dev {
+        log.line(&format!("mangohud: sample GPU pci_dev={addr}"));
+    }
+    mangohud::configure(&mut child, &run_dir, mango_pci_dev.as_deref());
+
+    // Tee the child's stdout+stderr into game.log — Wine/vkd3d/DXVK diagnostics
+    // (err: lines, device-lost messages) land on stderr, and inherited stdio alone is
+    // gone once the launcher window closes. Tee, don't redirect: our own stdio IS the
+    // Lutris log window / Steam console, and a beisl injected into launch options must
+    // not swallow the game's output. Two handles onto the same file; interleaving of
+    // the two streams is acceptable.
+    let game_log = match std::fs::File::create(run_dir.join("game.log")) {
+        Ok(f) => {
+            child.stdout(Stdio::piped());
+            child.stderr(Stdio::piped());
+            Some(f)
+        }
+        Err(e) => {
+            // Inherited stdio stays in place — the game still runs, just uncaptured.
+            log.line(&format!("game.log: couldn't create ({e}) — child output not captured"));
+            None
+        }
+    };
 
     let mut recorder = perf::Recorder::new(&run_dir);
     // Watch for GPU hangs: xe keeps exactly ONE devcoredump, so capture-and-free
@@ -86,6 +113,22 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
         }
     };
     log.line(&format!("launched pid {}", proc.id()));
+
+    // Wire up the tees now that the pipes exist. Detached threads: they end on pipe EOF
+    // (child and any launcher descendants holding it gone), and at latest with us.
+    if let Some(f) = game_log {
+        let err_file = f.try_clone();
+        if let Some(out) = proc.stdout.take() {
+            tee(out, io::stdout(), f);
+        }
+        if let Some(err) = proc.stderr.take() {
+            match err_file {
+                Ok(f) => tee(err, io::stderr(), f),
+                // Clone failed — keep at least the launcher-window side alive.
+                Err(_) => tee_discard_file(err, io::stderr()),
+            }
+        }
+    }
 
     // Open the session window alongside the game (best-effort; headless still works).
     spawn_monitor(&run_dir);
@@ -126,13 +169,28 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
                 "Game exited.".to_string()
             };
             let _ = sess.write(&run_dir);
-            log.line(&format!("game exited: {status}, trace {} bytes", sess.trace_bytes));
+            // With launcher chains (umu-run → launcher → game) this is the *wrapper's*
+            // status — it can be 0 even when the real game process died.
+            log.line(&format!(
+                "launched command exited: {status} (with launcher chains this is the \
+                 wrapper's status, not the game's), trace {} bytes",
+                sess.trace_bytes
+            ));
             return Ok(status.code().unwrap_or(0));
         }
 
         sess.elapsed_secs = start.elapsed().as_secs();
         sess.trace_bytes = trace_size(&run_dir);
         drain_gpu_events(&mut gpuwatch, &mut log, &mut sess, &run_dir);
+
+        // MangoHud names its CSV after the *real* game process; with launcher chains
+        // that beats the argv guess (which names the wrapper, e.g. "upc.exe").
+        if let Some(game) = mangohud_game_name(&run_dir) {
+            if sess.game != game {
+                log.line(&format!("game name from MangoHud csv: {game} (was: {})", sess.game));
+                sess.game = game;
+            }
+        }
 
         // The window can ask us to stop the trace while the game keeps running. We must
         // keep living until the game exits (Steam waits on the launch-options process),
@@ -315,6 +373,69 @@ fn game_name(cmd: &[String]) -> String {
         .unwrap_or_default()
 }
 
+/// Pump `src` into both `term` and `file` until EOF, on a detached thread. Raw chunks,
+/// flushed to the terminal side per read so the game's output reaches the Lutris/Steam
+/// log view as promptly as it would without us in between.
+fn tee<R, W>(mut src: R, mut term: W, mut file: std::fs::File)
+where
+    R: io::Read + Send + 'static,
+    W: io::Write + Send + 'static,
+{
+    use io::Write as _;
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        loop {
+            match src.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let _ = term.write_all(&buf[..n]);
+                    let _ = term.flush();
+                    let _ = file.write_all(&buf[..n]);
+                }
+            }
+        }
+    });
+}
+
+/// [`tee`] without the file sink, for when cloning the game.log handle failed: the
+/// launcher-window pass-through is the part we must never lose.
+fn tee_discard_file<R, W>(mut src: R, mut term: W)
+where
+    R: io::Read + Send + 'static,
+    W: io::Write + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let _ = io::copy(&mut src, &mut term);
+    });
+}
+
+/// The real game's name from a MangoHud frametime CSV in the run dir, if one has
+/// appeared yet. MangoHud writes it mid-session, named after the game process.
+fn mangohud_game_name(run_dir: &Path) -> Option<String> {
+    std::fs::read_dir(run_dir)
+        .ok()?
+        .flatten()
+        .find_map(|e| csv_game_name(&e.file_name().to_string_lossy()))
+}
+
+/// `"Outlaws_2026-07-11_07-15-40.csv"` → `Some("Outlaws")`. The suffix is MangoHud's
+/// `_%Y-%m-%d_%H-%M-%S` timestamp; filenames that don't match are ignored.
+fn csv_game_name(file_name: &str) -> Option<String> {
+    let stem = file_name.strip_suffix(".csv")?;
+    let (rest, time) = stem.rsplit_once('_')?;
+    let (game, date) = rest.rsplit_once('_')?;
+    fn is_stamp(s: &str, lens: &[usize]) -> bool {
+        let parts: Vec<&str> = s.split('-').collect();
+        parts.len() == lens.len()
+            && parts
+                .iter()
+                .zip(lens)
+                .all(|(p, l)| p.len() == *l && p.bytes().all(|c| c.is_ascii_digit()))
+    }
+    (!game.is_empty() && is_stamp(date, &[4, 2, 2]) && is_stamp(time, &[2, 2, 2]))
+        .then(|| game.to_string())
+}
+
 /// `$XDG_DATA_HOME/beisl/traces/run-<unix_ts>/` (falls back to `~/.local/share`).
 fn new_run_dir() -> io::Result<PathBuf> {
     let ts = SystemTime::now()
@@ -376,6 +497,35 @@ mod tests {
         let envs = gpu_pin_envs(&pin);
         assert_eq!(envs.len(), 1);
         assert_eq!(envs[0].0, "VK_DRIVER_FILES");
+    }
+
+    #[test]
+    fn csv_game_name_parses_mangohud_filenames() {
+        assert_eq!(
+            csv_game_name("Outlaws_2026-07-11_07-15-40.csv").as_deref(),
+            Some("Outlaws")
+        );
+        // Underscores in the game name survive — only the timestamp suffix is peeled.
+        assert_eq!(
+            csv_game_name("Blood_West_2026-07-11_07-15-40.csv").as_deref(),
+            Some("Blood_West")
+        );
+    }
+
+    #[test]
+    fn csv_game_name_rejects_non_mangohud_files() {
+        for name in [
+            "perf.data",
+            "beisl.log",
+            "game.log",
+            "notes.csv",                       // no timestamp suffix
+            "Outlaws_2026-07-11.csv",          // date only
+            "_2026-07-11_07-15-40.csv",        // empty game name
+            "Outlaws_2026-7-11_07-15-40.csv",  // malformed date
+            "Outlaws_2026-07-11_07-15-4x.csv", // non-digit in time
+        ] {
+            assert_eq!(csv_game_name(name), None, "{name}");
+        }
     }
 
     /// A configured pin must always survive into the session's human-readable label

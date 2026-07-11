@@ -56,6 +56,9 @@ pub struct PhysicalGpu {
     pub vendor_id: Option<String>,
     /// PCI device id, e.g. `"0x56a0"`.
     pub device_id: Option<String>,
+    /// Full PCI address from the uevent's `PCI_SLOT_NAME`, e.g. `"0000:03:00.0"` — the
+    /// exact string MangoHud's `pci_dev=` config key matches a card by.
+    pub pci_slot: Option<String>,
 }
 
 /// A candidate to pin to, good enough to become a [`crate::config::GpuPin`] as-is.
@@ -164,7 +167,18 @@ pub fn scan_drm(base: &Path) -> Vec<PhysicalGpu> {
             let device_id = std::fs::read_to_string(dev_dir.join("device"))
                 .ok()
                 .map(|s| s.trim().to_string());
-            Some(PhysicalGpu { card, vendor_id, device_id })
+            // The uevent's PCI_SLOT_NAME is the card's full PCI address (`0000:03:00.0`),
+            // kept verbatim (lowercased) because MangoHud's `pci_dev` key string-compares
+            // against exactly this sysfs form.
+            let pci_slot = std::fs::read_to_string(dev_dir.join("uevent"))
+                .ok()
+                .and_then(|t| {
+                    t.lines().find_map(|l| {
+                        l.strip_prefix("PCI_SLOT_NAME=")
+                            .map(|v| v.trim().to_ascii_lowercase())
+                    })
+                });
+            Some(PhysicalGpu { card, vendor_id, device_id, pci_slot })
         })
         .collect()
 }
@@ -183,6 +197,27 @@ pub fn vendor_name(vendor_id: &str) -> &'static str {
         "0x10de" => "NVIDIA",
         _ => "GPU",
     }
+}
+
+/// Resolve a `MESA_VK_DEVICE_SELECT` value (`"8086:56a0"`, optional trailing `!`) back to
+/// the matching physical GPU's PCI address, e.g. `"0000:03:00.0"`. `None` unless exactly
+/// one GPU matches: with twin cards of the same model the selector itself is ambiguous,
+/// and pointing a sampler at the wrong twin is the very mistake callers use this to avoid.
+pub fn pci_slot_for_device_select(gpus: &[PhysicalGpu], device_select: &str) -> Option<String> {
+    let (vendor, device) = device_select.trim_end_matches('!').split_once(':')?;
+    let mut matches = gpus.iter().filter(|g| {
+        pci_id_eq(g.vendor_id.as_deref(), vendor) && pci_id_eq(g.device_id.as_deref(), device)
+    });
+    match (matches.next(), matches.next()) {
+        (Some(only), None) => only.pci_slot.clone(),
+        _ => None,
+    }
+}
+
+/// Case-insensitive PCI id compare between sysfs's `0x8086` form and the bare `8086` form
+/// `MESA_VK_DEVICE_SELECT` values carry.
+fn pci_id_eq(sysfs_id: Option<&str>, bare: &str) -> bool {
+    sysfs_id.is_some_and(|v| v.trim_start_matches("0x").eq_ignore_ascii_case(bare))
 }
 
 /// Which PCI vendor an ICD driver family serves, when we recognise it — used to pair an
@@ -320,11 +355,16 @@ mod tests {
     fn scan_drm_counts_only_cards_with_a_vendor_file() {
         let tmp = TempDir::new("drm");
         let base = tmp.path().join("drm");
-        // A real GPU: vendor + device files.
+        // A real GPU: vendor + device files, plus the uevent with its PCI address.
         std::fs::create_dir_all(base.join("card0/device")).unwrap();
         std::fs::write(base.join("card0/device/vendor"), "0x8086\n").unwrap();
         std::fs::write(base.join("card0/device/device"), "0x56a0\n").unwrap();
-        // A second real GPU.
+        std::fs::write(
+            base.join("card0/device/uevent"),
+            "DRIVER=i915\nPCI_CLASS=30000\nPCI_SLOT_NAME=0000:03:00.0\n",
+        )
+        .unwrap();
+        // A second real GPU — no uevent, so no PCI address.
         std::fs::create_dir_all(base.join("card1/device")).unwrap();
         std::fs::write(base.join("card1/device/vendor"), "0x1002\n").unwrap();
         std::fs::write(base.join("card1/device/device"), "0x73df\n").unwrap();
@@ -339,6 +379,50 @@ mod tests {
         let intel = gpus.iter().find(|g| g.card == "card0").unwrap();
         assert_eq!(intel.vendor_id.as_deref(), Some("0x8086"));
         assert_eq!(intel.device_id.as_deref(), Some("0x56a0"));
+        assert_eq!(intel.pci_slot.as_deref(), Some("0000:03:00.0"));
+        let amd = gpus.iter().find(|g| g.card == "card1").unwrap();
+        assert_eq!(amd.pci_slot, None);
+    }
+
+    fn gpu(card: &str, vendor: &str, device: &str, slot: &str) -> PhysicalGpu {
+        PhysicalGpu {
+            card: card.into(),
+            vendor_id: Some(vendor.into()),
+            device_id: Some(device.into()),
+            pci_slot: Some(slot.into()),
+        }
+    }
+
+    #[test]
+    fn pci_slot_for_device_select_resolves_a_unique_match() {
+        // Mirrors the machine that motivated this: idle AMD iGPU + the Intel Arc the game
+        // actually renders on — the selector must land on the Arc's address.
+        let gpus = vec![
+            gpu("card0", "0x1002", "0x164e", "0000:16:00.0"),
+            gpu("card1", "0x8086", "0x56a0", "0000:03:00.0"),
+        ];
+        assert_eq!(
+            pci_slot_for_device_select(&gpus, "8086:56a0!").as_deref(),
+            Some("0000:03:00.0")
+        );
+        // Without the force-suffix and in different hex case too.
+        assert_eq!(
+            pci_slot_for_device_select(&gpus, "8086:56A0").as_deref(),
+            Some("0000:03:00.0")
+        );
+    }
+
+    #[test]
+    fn pci_slot_for_device_select_refuses_ambiguity_and_misses() {
+        let twins = vec![
+            gpu("card0", "0x1002", "0x73df", "0000:0b:00.0"),
+            gpu("card1", "0x1002", "0x73df", "0000:0c:00.0"),
+        ];
+        // Twin cards: vendor:device can't say which one, so don't guess.
+        assert_eq!(pci_slot_for_device_select(&twins, "1002:73df!"), None);
+        // No matching hardware, or a malformed selector: nothing to resolve.
+        assert_eq!(pci_slot_for_device_select(&twins, "8086:56a0!"), None);
+        assert_eq!(pci_slot_for_device_select(&twins, "not-a-selector"), None);
     }
 
     #[test]
@@ -369,6 +453,7 @@ mod tests {
             card: "card1".into(),
             vendor_id: Some("0x8086".into()),
             device_id: Some("0x56a0".into()),
+            pci_slot: Some("0000:03:00.0".into()),
         }];
 
         let candidates = build_candidates(&manifests, &gpus);
@@ -402,6 +487,7 @@ mod tests {
             card: "card0".into(),
             vendor_id: Some("0x1002".into()),
             device_id: Some("0x164e".into()),
+            pci_slot: Some("0000:16:00.0".into()),
         }];
         assert!(build_candidates(&manifests, &gpus).is_empty());
     }
