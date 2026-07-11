@@ -12,6 +12,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "assets"
+version = "0.0.1-alpha.1"
+
+[[package]]
 name = "beisl"
 version = "0.0.1-alpha.1"
 dependencies = [
@@ -74,6 +78,7 @@ checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 name = "preflight"
 version = "0.0.1-alpha.1"
 dependencies = [
+ "assets",
  "serde",
  "toml",
 ]

@@ -231,11 +231,11 @@ pub fn disk_check(trace_dir: &Path) -> Check {
 pub const DUMP_RULE_PATH: &str = "/etc/udev/rules.d/99-beisl-gpu-dump.rules";
 pub const DUMP_TMPFILES_PATH: &str = "/etc/tmpfiles.d/beisl-gpu-dump.conf";
 
-/// The shipped rule + tmpfiles bodies, embedded at build time from the repo's `data/`
+/// The shipped rule + tmpfiles bodies, embedded at build time via the assets crate
 /// tree so the binary is self-contained (no runtime asset-path discovery) and the files
 /// in the repo stay the single source of truth. Written verbatim by [`fix_command`].
-const DUMP_RULE_BODY: &str = include_str!("../../../data/udev/99-beisl-gpu-dump.rules");
-const DUMP_TMPFILES_BODY: &str = include_str!("../../../data/tmpfiles/beisl-gpu-dump.conf");
+const DUMP_RULE_BODY: &str = assets::gpu_dump::UDEV_RULES;
+const DUMP_TMPFILES_BODY: &str = assets::gpu_dump::TMPFILES_CONF;
 
 /// The optional, opt-in "GPU crash-dump capture" check. Kept OUT of [`all_checks`] so the
 /// blocking "set everything up" sweep never installs a standing privilege; the caller adds

@@ -12,6 +12,8 @@ library, and the MCP server are built; the Full/DWARF symbol tier is still open.
 
 Main workspace (`Cargo.toml`, crates.io deps only, mostly std):
 
+- `crates/assets` — embedded data payloads (brand icons, udev rule, tmpfiles conf);
+  the `data/` files live inside this crate so `include_str!` paths stay short.
 - `crates/beisl` — the wrapper binary; subcommands: trace (default via `%command%`),
   `--check` (aliases `--preflight`, `doctor`), `install`/`uninstall`, `symbols <dir>`
   (resolve a captured trace), `--version`. `run.rs` orchestrates a trace; `mangohud.rs`,

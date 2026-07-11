@@ -1,0 +1,12 @@
+# The embedded payloads (icons, udev rule, tmpfiles conf) and the crate that owns them —
+# so consumers write `assets::icons::APP` instead of climbing `../../../data/…` from
+# wherever their source file happens to sit. The data files live inside this crate,
+# making every include_str! a short, honest relative path.
+[package]
+name = "assets"
+description = "Beisl's embedded data payloads: brand icons, udev rule, tmpfiles conf"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true

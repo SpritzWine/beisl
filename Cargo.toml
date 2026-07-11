@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/assets",          # embedded data payloads (icons, udev/tmpfiles bodies)
     "crates/beisl",           # the wrapper binary (`beisl %command%`)
     "crates/preflight",       # setup checks (perf/llvm/paranoid/mangohud) + pkexec fixes
     "crates/session",         # live session state shared with the session window

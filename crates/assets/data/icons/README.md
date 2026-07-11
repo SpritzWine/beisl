@@ -11,7 +11,7 @@ full concept board lives on the `pages` branch under `reference/`.
 - `beisl-glass-{dark,light}.svg` — the bare glass on nothing, for docs
   and pages that bring their own background.
 
-These are the canonical copies. The `pages` branch carries deliberate
+These are the canonical copies (embedded via the `assets` crate). The `pages` branch carries deliberate
 duplicates (`page/assets/` — a static site must self-host; `reference/marks/`
 — the concept archive): if a mark ever changes, edit here first, then copy
 outward to the pages branch.
