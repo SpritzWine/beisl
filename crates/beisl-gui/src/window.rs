@@ -644,13 +644,35 @@ impl SessionApp {
             }
         }
 
+        if self.confirm_discard {
+            col = col.push(widget::text::body(
+                "Delete this trace? This permanently deletes the run directory.",
+            ));
+        }
+
         col.into()
     }
 
     fn results_buttons(&self) -> Element<'_, Msg> {
+        // The confirm pair replaces the normal buttons so the destructive action is a
+        // deliberate second click — the same idiom as the ask and the library rows.
+        // ConfirmDiscard goes through delete_run (the one deletion boundary) and closes:
+        // a judged-worthless trace leaves through the same door everywhere.
+        if self.confirm_discard {
+            // The pair stays on the left, where the Delete that armed it sits — the
+            // confirming click lands under the pointer instead of across the window
+            // (the ask's confirm is right-aligned for the same reason: its trigger is).
+            return widget::Row::new()
+                .spacing(8)
+                .push(widget::button::standard("Cancel").on_press(Msg::CancelDiscard))
+                .push(widget::button::destructive("Delete trace").on_press(Msg::ConfirmDiscard))
+                .push(widget::Space::new().width(Length::Fill))
+                .into();
+        }
         widget::Row::new()
             .spacing(8)
             .push(widget::button::text("Open folder").on_press(Msg::OpenFolder))
+            .push(widget::button::destructive("Delete").on_press(Msg::Discard))
             .push(widget::Space::new().width(Length::Fill))
             .push(widget::button::suggested("Close").on_press(Msg::Close))
             .into()
