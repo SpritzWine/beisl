@@ -12,9 +12,10 @@ name = "beisl"
 path = "src/main.rs"
 
 # Mostly std-only for now. Deps we'll pull in as the layers land: clap (arg parsing),
-# anyhow (errors), notify (mangohud-log file-watch), symbol-resolver + artifact (once
-# the post-run step is wired).
+# anyhow (errors), notify (mangohud-log file-watch), artifact (once the post-run step
+# is wired).
 [dependencies]
 preflight = { path = "../preflight" }
 session = { path = "../session" }
+artifact = { path = "../artifact" }   # post-run: resolve + merge -> artifact.json + report.txt
 libc = "0.2"        # PR_SET_PDEATHSIG so perf dies with us (no orphaned recorder)

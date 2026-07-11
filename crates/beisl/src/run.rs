@@ -169,7 +169,39 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
             sess.elapsed_secs = start.elapsed().as_secs();
             sess.trace_bytes = trace_size(&run_dir);
             sess.message = if sess.trace_bytes > 0 {
-                "Game exited — trace saved.".to_string()
+                // Decide what the trace is worth: a crash (non-zero code, or a GPU hang the
+                // watcher saw) is always analyzed for forensics; a clean exit follows the
+                // user's `clean-run-analysis` preference so a boring session doesn't burn
+                // seconds resolving and keep tens of MB for nothing.
+                let crashed = status.code() != Some(0) || gpuwatch.hang_seen();
+                match decide_post_run(crashed, cfg.clean_run_analysis) {
+                    PostRun::Analyze => {
+                        let why = if crashed {
+                            "abnormal exit"
+                        } else {
+                            "clean exit"
+                        };
+                        log.line(&format!("post-run: analyzing ({why})"));
+                        match write_report(&run_dir, &sess.game, sess.elapsed_secs, &mut log) {
+                            Some(headline) => format!("Game exited — trace saved. {headline}"),
+                            None => "Game exited — trace saved.".to_string(),
+                        }
+                    }
+                    PostRun::Keep => {
+                        log.line("post-run: clean exit — leaving raw trace in place");
+                        sess.analysis_offer = true;
+                        "Game exited — trace saved (not analyzed). Analyze it any time in \
+                         the window, or run `beisl symbols`."
+                            .to_string()
+                    }
+                    PostRun::Discard => {
+                        let _ = std::fs::remove_file(run_dir.join("perf.data"));
+                        sess.trace_bytes = 0;
+                        log.line("post-run: clean exit — perf trace discarded (per preference)");
+                        "Game exited — clean run, perf trace discarded (per your setting)."
+                            .to_string()
+                    }
+                }
             } else {
                 "Game exited.".to_string()
             };
@@ -371,6 +403,54 @@ fn trace_size(dir: &Path) -> u64 {
         .unwrap_or(0)
 }
 
+/// What to do with a finished trace: [`decide_post_run`] picks it from the exit status
+/// and the user's clean-run preference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PostRun {
+    /// Resolve now and write the report (crash, or the `always` preference).
+    Analyze,
+    /// Leave the raw trace in place, untouched — the default. Analyze later via the window
+    /// or `beisl symbols`; nothing is discarded.
+    Keep,
+    /// Drop the perf trace to reclaim space (clean exit, `discard` preference).
+    Discard,
+}
+
+/// Crash → always analyze (that's the whole point of the tool); clean exit → the user's
+/// preference. `crashed` folds the game's exit code together with a detected GPU hang,
+/// because with launcher chains (umu-run → … → game) the code we see can be 0 even when
+/// the game died — the hang signal catches that.
+fn decide_post_run(crashed: bool, policy: preflight::CleanRunAnalysis) -> PostRun {
+    if crashed {
+        return PostRun::Analyze;
+    }
+    match policy {
+        preflight::CleanRunAnalysis::Always => PostRun::Analyze,
+        preflight::CleanRunAnalysis::Keep => PostRun::Keep,
+        preflight::CleanRunAnalysis::Discard => PostRun::Discard,
+    }
+}
+
+/// Resolve the finished trace and drop `artifact.json` (the exportable, GUI/MCP-ready
+/// merge) + `report.txt` (human-readable) into the run dir. Best-effort — a resolution
+/// failure (no `perf` at analysis time, unreadable data) must never turn a captured trace
+/// into a wrapper error. Returns the one-line headline for the session message.
+fn write_report(run_dir: &Path, game: &str, duration_s: u64, log: &mut Log) -> Option<String> {
+    log.line("post-run: resolving symbols");
+    let art = match artifact::TraceArtifact::build(run_dir, game, duration_s as f64) {
+        Ok(a) => a,
+        Err(e) => {
+            log.line(&format!("post-run: resolution failed ({e})"));
+            return None;
+        }
+    };
+    let _ = art.write_json(&run_dir.join("artifact.json"));
+    let _ = std::fs::write(run_dir.join("report.txt"), art.render_report());
+    let headline = art.headline();
+    log.line(&format!("post-run: {headline}"));
+    Some(headline)
+}
+
 /// Best-effort human name for the game: the last `.exe` argument, else the command's
 /// basename.
 fn game_name(cmd: &[String]) -> String {
@@ -474,11 +554,47 @@ pub(crate) fn data_root() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use preflight::GpuPin;
+    use preflight::{CleanRunAnalysis, GpuPin};
 
     // The Arc A770 from the case-study machine as a MESA_VK_DEVICE_SELECT selector
     // (same fixture naming as the mangohud/preflight test modules).
     const ARC_SELECT: &str = "8086:56a0!";
+
+    #[test]
+    fn a_crash_is_always_analyzed_whatever_the_preference() {
+        for policy in [
+            CleanRunAnalysis::Keep,
+            CleanRunAnalysis::Always,
+            CleanRunAnalysis::Discard,
+        ] {
+            assert_eq!(
+                decide_post_run(true, policy),
+                PostRun::Analyze,
+                "{policy:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_clean_exit_follows_the_preference() {
+        // The default keeps the trace in place — a clean run is never discarded by default.
+        assert_eq!(
+            decide_post_run(false, CleanRunAnalysis::default()),
+            PostRun::Keep
+        );
+        assert_eq!(
+            decide_post_run(false, CleanRunAnalysis::Keep),
+            PostRun::Keep
+        );
+        assert_eq!(
+            decide_post_run(false, CleanRunAnalysis::Always),
+            PostRun::Analyze
+        );
+        assert_eq!(
+            decide_post_run(false, CleanRunAnalysis::Discard),
+            PostRun::Discard
+        );
+    }
 
     #[test]
     fn gpu_pin_envs_joins_icd_paths_and_sets_device_select() {

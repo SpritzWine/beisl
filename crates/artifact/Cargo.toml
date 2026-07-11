@@ -7,6 +7,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# v0 is std-only. Deps we'll add: serde (+ a self-contained container: rusqlite or
-# a versioned binary format) so the GUI + MCP can query without re-parsing perf.data.
+# Self-contained JSON container: human-readable, GUI-parseable, MCP-native, and small
+# because we store the aggregated top symbols (not raw samples). serde is already in the
+# workspace via `session`. A binary/rusqlite container can come later if size demands it.
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+symbol-resolver = { path = "../symbol-resolver" }

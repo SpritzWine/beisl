@@ -58,6 +58,14 @@ impl GpuWatch {
         }
     }
 
+    /// Did a GPU hang show up during this run — whether we captured its dump or only saw
+    /// an unreadable one? Either way a devcoredump appeared, so it's the "why did it crash"
+    /// case that always warrants analysis regardless of the game's (launcher-laundered)
+    /// exit code.
+    pub fn hang_seen(&self) -> bool {
+        !self.captured.is_empty() || !self.warned.is_empty()
+    }
+
     /// Scan for pending devcoredumps; capture-and-free what we can.
     pub fn poll(&mut self) -> Vec<Event> {
         let mut events = Vec::new();

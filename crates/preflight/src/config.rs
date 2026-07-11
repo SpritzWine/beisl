@@ -40,6 +40,28 @@ pub enum DumpAccessPolicy {
     // the enum + UI can grow into it without a config migration.
 }
 
+/// What Beisl does with a trace when the game exits **cleanly** (exit code 0, no GPU
+/// hang). An abnormal exit — non-zero code or a captured hang — is *always* analyzed
+/// regardless of this, because that's the "why did it crash" case the tool exists for;
+/// this preference only governs the boring clean runs, where resolving (~seconds) and
+/// keeping the tens-of-MB `perf.data` for every session would be wasteful.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CleanRunAnalysis {
+    /// Default: leave the raw trace in place, untouched — don't resolve it, don't discard
+    /// it. Analyze it whenever you want with `beisl symbols <run-dir>` or from the window;
+    /// nothing is thrown away.
+    #[default]
+    Keep,
+    /// Pre-selected: analyze clean runs immediately, same as a crash.
+    Always,
+    /// Pre-selected: discard the perf trace on a clean exit. "Clean" is by *outcome* — a
+    /// crash whose exit code a launcher laundered to 0 and that left no GPU dump reads as
+    /// clean and is dropped too, so this is lossier than "keep only crashes"; the default
+    /// `keep` never loses anything.
+    Discard,
+}
+
 /// A pinned GPU: the exact ICD manifests (+ optional device selector) that make Vulkan
 /// enumeration land on one specific card instead of whichever the loader happens to pick
 /// first — the "enumeration roulette" trap from DESIGN.md's Saints Row case study. `None`
@@ -67,6 +89,10 @@ pub struct Config {
     /// The GPU to pin to, if any. `None` (default) = no pinning.
     #[serde(default)]
     pub gpu_pin: Option<GpuPin>,
+    /// What to do with a *clean*-exit trace (a crash is always analyzed). Default: keep
+    /// the raw trace in place.
+    #[serde(default)]
+    pub clean_run_analysis: CleanRunAnalysis,
 }
 
 impl Config {
@@ -133,8 +159,12 @@ mod tests {
             DumpAccessPolicy::WarnOnly
         );
 
+        // Clean-run analysis defaults to `keep` (leave the raw trace in place).
+        assert_eq!(Config::load().clean_run_analysis, CleanRunAnalysis::Keep);
+
         let cfg = Config {
             dump_access_policy: DumpAccessPolicy::RuleInstalled,
+            clean_run_analysis: CleanRunAnalysis::Discard,
             ..Default::default()
         };
         cfg.save().unwrap();
@@ -143,6 +173,7 @@ mod tests {
         // The on-disk form is the kebab-case string, not a bare enum.
         let text = std::fs::read_to_string(Config::path()).unwrap();
         assert!(text.contains("rule-installed"), "got: {text}");
+        assert!(text.contains("discard"), "kebab clean-run value: {text}");
 
         std::fs::remove_dir_all(&tmp).ok();
         unsafe {

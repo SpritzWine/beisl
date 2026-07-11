@@ -21,17 +21,25 @@ mod mangohud;
 mod out;
 mod perf;
 mod run;
+mod symbols;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
 
     // Subcommands. `--check` runs the setup preflight (the GUI binds to the same
     // `preflight` crate; this is its headless face); `install`/`uninstall` put `beisl`
-    // on PATH so it works in launch options.
+    // on PATH so it works in launch options; `symbols` resolves a captured trace.
     match args.first().map(String::as_str) {
         Some("--check" | "--preflight" | "doctor") => return check::run(),
         Some("install") => return install::run(false),
         Some("uninstall") => return install::run(true),
+        Some("symbols") => {
+            let Some(dir) = args.get(1) else {
+                eprintln!("beisl: usage: beisl symbols <trace-run-dir>");
+                return ExitCode::from(2);
+            };
+            return symbols::run(dir);
+        }
         _ => {}
     }
 
