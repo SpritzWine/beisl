@@ -232,7 +232,7 @@ fn pci_id_eq(sysfs_id: Option<&str>, bare: &str) -> bool {
 
 /// Which PCI vendor an ICD driver family serves, when we recognise it — used to pair an
 /// ICD manifest with a physical GPU's vendor id.
-fn family_vendor(family: &str) -> Option<&'static str> {
+pub(crate) fn family_vendor(family: &str) -> Option<&'static str> {
     match family {
         "intel_icd" | "intel_hasvk_icd" => Some("0x8086"),
         "radeon_icd" | "amdgpu_icd" => Some("0x1002"),

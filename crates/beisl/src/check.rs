@@ -7,7 +7,8 @@
 use std::process::ExitCode;
 
 use preflight::{
-    all_checks, detect_distro, disk_check, fix_command, gpu_dump_check, multi_gpu_check, Status,
+    all_checks, detect_distro, disk_check, driver_debuginfo_check, fix_command, gpu_dump_check,
+    multi_gpu_check, Status,
 };
 
 pub fn run() -> ExitCode {
@@ -26,6 +27,9 @@ pub fn run() -> ExitCode {
     // The multi-GPU/dual-ICD row is optional and informational — its remedy is picking a
     // pin in the GUI's Advanced section, not a privileged fix, so it never gates readiness.
     checks.push(multi_gpu_check());
+    // The driver debug-symbols row is optional and informational — the remedy is a
+    // manual, distro-specific install named in the why, never a one-click fix.
+    checks.push(driver_debuginfo_check());
 
     let mut blocking_missing = false;
 

@@ -77,9 +77,8 @@ Still open:
   always-on log after N seconds (we append no duplicate of that key), quietly
   re-truncating CSV coverage for exactly the users most likely to carry a MangoHud
   config.
-- **Driver hotspots are anonymous addresses** (`libvulkan_intel.so` etc.); preflight
-  could hint at installing mesa debuginfo so they get names. (The `kptr_restrict`
-  half of this finding is handled: the advisory "kernel symbols" check probes
-  `/proc/kallsyms` for real addresses and names the manual sysctls in its why —
-  deliberately no auto-fix, so the hardening rollback never joins the one-click
-  sweep.)
+(The driver-hotspots half of the Outlaws follow-ups is handled too: the advisory
+"driver debug symbols" check probes each hardware ICD's build-id against
+`/usr/lib/debug/.build-id/` — debuginfod counts as covered — and names the
+distro-specific install in its why; no auto-fix, mirroring the kernel-symbols
+check's consent stance.)

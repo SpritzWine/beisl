@@ -14,6 +14,7 @@ use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 pub mod config;
+pub mod debuginfo;
 pub mod gpu;
 pub use config::{Config, DumpAccessPolicy, GpuPin};
 
@@ -56,6 +57,15 @@ pub enum CheckId {
     /// everything up" sweep — the same consent line that keeps [`gpu_dump_check`] out of
     /// it. The `why` carries the manual command instead.
     KptrRestrict,
+    /// Optional, informational: the Vulkan driver's debug symbols aren't installed, so
+    /// time spent inside the driver (`libvulkan_intel.so` etc. — often the hottest
+    /// non-game code in a trace) shows as anonymous addresses. Detection probes each
+    /// hardware ICD's library for its GNU build-id and the matching
+    /// `/usr/lib/debug/.build-id/…` file (debuginfod counts as covered — perf fetches
+    /// on demand). No fix: `debuginfo-install`/dbgsym setups are distro-specific
+    /// multi-step affairs, so the `why` carries the hint (see
+    /// [`driver_debuginfo_check`]).
+    DriverDebuginfo,
 }
 
 /// How to repair a failing check. Turned into a concrete `pkexec` argv by [`fix_command`].
@@ -120,6 +130,7 @@ impl Check {
             CheckId::GpuDumpAccess => dump_access_status(),
             CheckId::MultiGpu => multi_gpu_status(&gpu::physical_gpus()),
             CheckId::KptrRestrict => ok_or_fix(kernel_symbols_visible()),
+            CheckId::DriverDebuginfo => driver_debuginfo_status(),
             CheckId::DiskSpace => return, // computed in `disk_check`
         };
     }
@@ -259,6 +270,75 @@ fn multi_gpu_status(gpus: &[gpu::PhysicalGpu]) -> Status {
         Status::Ok
     } else {
         Status::NeedsFix
+    }
+}
+
+/// The optional, informational "driver debug symbols" check. Kept OUT of [`all_checks`],
+/// mirroring [`multi_gpu_check`]: advisory, never blocking, dynamic `why` (it names the
+/// actual driver families and the distro's install hint), and its remedy is a manual,
+/// distro-specific step — `fix` stays `None` so it can never join the one-click sweep.
+/// The caller adds it like [`disk_check`].
+///
+/// Driver time is often the hottest non-game code in a wine trace (the case studies'
+/// `libvulkan_intel.so` hotspots), so anonymous driver samples gut the headline view —
+/// but only the *driver's* names are affected, hence advisory.
+pub fn driver_debuginfo_check() -> Check {
+    let families = debuginfo::unsymbolized_families();
+    Check {
+        id: CheckId::DriverDebuginfo,
+        label: "driver debug symbols (optional)",
+        why: driver_debuginfo_why(&families, detect_distro()).into(),
+        blocking: false,
+        status: if families.is_empty() {
+            Status::Ok
+        } else {
+            Status::NeedsFix
+        },
+        fix: None,
+    }
+}
+
+fn driver_debuginfo_status() -> Status {
+    if debuginfo::unsymbolized_families().is_empty() {
+        Status::Ok
+    } else {
+        Status::NeedsFix
+    }
+}
+
+fn driver_debuginfo_why(families: &[String], distro: Distro) -> String {
+    if families.is_empty() {
+        // Hedged on purpose: this branch also covers setups where nothing was judgeable
+        // (NVIDIA-proprietary boxes — family_vendor can't map nvidia_icd to Mesa debug
+        // packages — or exotic families we can't tie to hardware). Claiming symbols "are
+        // available" there would assert knowledge the probe doesn't have.
+        "No missing debug symbols detected for your GPU driver — where we could check, \
+         driver time in a trace gets real function names (installed debug files, or \
+         fetched on demand via debuginfod)."
+            .to_string()
+    } else {
+        // Only Mesa families can reach this list (the vendor pre-filter drops anything
+        // family_vendor can't map, including the proprietary NVIDIA ICD), so a Mesa
+        // debug-package hint is always applicable here.
+        let hint = match distro {
+            Distro::Fedora => "sudo dnf debuginfo-install mesa-vulkan-drivers",
+            Distro::Debian => {
+                "install mesa-vulkan-drivers-dbgsym (needs the ddebs.ubuntu.com / \
+                 debian-debug repository)"
+            }
+            Distro::Arch => {
+                "export DEBUGINFOD_URLS=https://debuginfod.archlinux.org and perf \
+                 fetches them on demand"
+            }
+            Distro::Suse | Distro::Unknown => "install your distro's Mesa debug-symbol packages",
+        };
+        format!(
+            "Time inside your GPU driver ({}) will show as anonymous addresses — its \
+             debug symbols aren't installed, and driver code is often the hottest \
+             non-game code in a trace. To name it: {hint}. Optional — game and wine \
+             symbols are unaffected.",
+            families.join(", ")
+        )
     }
 }
 
@@ -715,5 +795,36 @@ mod tests {
         let visible = "0000000000000000 A fixed_percpu_data\nffffffff81000000 T _stext\n";
         assert!(kallsyms_shows_addresses(Cursor::new(visible)));
         assert!(!kallsyms_shows_addresses(Cursor::new("")));
+    }
+
+    #[test]
+    fn driver_debuginfo_check_is_advisory_and_out_of_the_sweep() {
+        // Out of all_checks(), like the other dynamic informational rows — and with no
+        // fix, so the GUI's one-click sweep structurally can't touch it.
+        assert!(all_checks()
+            .iter()
+            .all(|c| c.id != CheckId::DriverDebuginfo));
+        let c = driver_debuginfo_check();
+        assert!(
+            !c.blocking,
+            "missing driver symbols must never block a trace"
+        );
+        assert!(c.fix.is_none(), "remedy is manual and distro-specific");
+        assert!(!c.why.is_empty());
+    }
+
+    #[test]
+    fn driver_debuginfo_why_names_families_and_the_distro_hint() {
+        let fams = vec!["intel_icd".to_string(), "radeon_icd".to_string()];
+        let why = driver_debuginfo_why(&fams, Distro::Fedora);
+        assert!(
+            why.contains("intel_icd, radeon_icd"),
+            "must name the drivers: {why}"
+        );
+        assert!(why.contains("debuginfo-install"), "Fedora hint: {why}");
+        // The all-covered branch reassures instead of hinting.
+        let ok = driver_debuginfo_why(&[], Distro::Fedora);
+        assert!(ok.contains("No missing debug symbols detected"));
+        assert!(!ok.contains("debuginfo-install"));
     }
 }

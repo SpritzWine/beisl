@@ -26,8 +26,8 @@ use cosmic::{Application, Element};
 
 use preflight::gpu::GpuPinCandidate;
 use preflight::{
-    all_checks, detect_distro, disk_check, fix_command, gpu_dump_check, multi_gpu_check, Check,
-    CheckId, Config, Distro, DumpAccessPolicy, Fix, GpuPin, Status,
+    all_checks, detect_distro, disk_check, driver_debuginfo_check, fix_command, gpu_dump_check,
+    multi_gpu_check, Check, CheckId, Config, Distro, DumpAccessPolicy, Fix, GpuPin, Status,
 };
 
 mod window; // the live session window (`--session`)
@@ -207,6 +207,9 @@ impl AppModel {
         // The optional, informational multi-GPU/dual-ICD row — its remedy is a config pick
         // in Advanced, not a privileged fix, so it never joins the sweep either.
         checks.push(multi_gpu_check());
+        // The optional, informational driver debug-symbols row — remedy is a manual,
+        // distro-specific install named in the why (fix is None, so no sweep).
+        checks.push(driver_debuginfo_check());
         checks
     }
 
