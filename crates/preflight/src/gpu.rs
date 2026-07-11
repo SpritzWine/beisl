@@ -309,6 +309,17 @@ pub fn build_candidates(manifests: &[IcdManifest], gpus: &[PhysicalGpu]) -> Vec<
 mod tests {
     use super::*;
 
+    // Case-study machine from DESIGN.md: Intel Arc A770 + AMD iGPU (the dual-GPU + dual-ICD
+    // trap where MangoHud's sampler had picked the idle iGPU until the pin aimed it at the Arc).
+    const ARC_VENDOR: &str = "0x8086";
+    const ARC_DEVICE: &str = "0x56a0";
+    const ARC_SLOT: &str = "0000:03:00.0";
+    const IGPU_VENDOR: &str = "0x1002";
+    const IGPU_DEVICE: &str = "0x164e";
+    const IGPU_SLOT: &str = "0000:16:00.0";
+    // The Arc as a MESA_VK_DEVICE_SELECT selector: bare ids (no 0x), force-suffix `!`.
+    const ARC_SELECT: &str = "8086:56a0!";
+
     /// Minimal tempdir (std-only, mirrors `beisl::gpu`'s test helper — no dev-deps here).
     struct TempDir(PathBuf);
     impl TempDir {
@@ -399,11 +410,11 @@ mod tests {
         let base = tmp.path().join("drm");
         // A real GPU: vendor + device files, plus the uevent with its PCI address.
         std::fs::create_dir_all(base.join("card0/device")).unwrap();
-        std::fs::write(base.join("card0/device/vendor"), "0x8086\n").unwrap();
-        std::fs::write(base.join("card0/device/device"), "0x56a0\n").unwrap();
+        std::fs::write(base.join("card0/device/vendor"), format!("{ARC_VENDOR}\n")).unwrap();
+        std::fs::write(base.join("card0/device/device"), format!("{ARC_DEVICE}\n")).unwrap();
         std::fs::write(
             base.join("card0/device/uevent"),
-            "DRIVER=i915\nPCI_CLASS=30000\nPCI_SLOT_NAME=0000:03:00.0\n",
+            format!("DRIVER=i915\nPCI_CLASS=30000\nPCI_SLOT_NAME={ARC_SLOT}\n"),
         )
         .unwrap();
         // A second real GPU — no uevent, so no PCI address.
@@ -419,9 +430,9 @@ mod tests {
         assert_eq!(gpus.len(), 3, "{gpus:?}");
         assert_eq!(hardware_gpu_count(&gpus), 2);
         let intel = gpus.iter().find(|g| g.card == "card0").unwrap();
-        assert_eq!(intel.vendor_id.as_deref(), Some("0x8086"));
-        assert_eq!(intel.device_id.as_deref(), Some("0x56a0"));
-        assert_eq!(intel.pci_slot.as_deref(), Some("0000:03:00.0"));
+        assert_eq!(intel.vendor_id.as_deref(), Some(ARC_VENDOR));
+        assert_eq!(intel.device_id.as_deref(), Some(ARC_DEVICE));
+        assert_eq!(intel.pci_slot.as_deref(), Some(ARC_SLOT));
         let amd = gpus.iter().find(|g| g.card == "card1").unwrap();
         assert_eq!(amd.pci_slot, None);
     }
@@ -440,17 +451,17 @@ mod tests {
         // Mirrors the machine that motivated this: idle AMD iGPU + the Intel Arc the game
         // actually renders on — the selector must land on the Arc's address.
         let gpus = vec![
-            gpu("card0", "0x1002", "0x164e", "0000:16:00.0"),
-            gpu("card1", "0x8086", "0x56a0", "0000:03:00.0"),
+            gpu("card0", IGPU_VENDOR, IGPU_DEVICE, IGPU_SLOT),
+            gpu("card1", ARC_VENDOR, ARC_DEVICE, ARC_SLOT),
         ];
         assert_eq!(
-            pci_slot_for_device_select(&gpus, "8086:56a0!").as_deref(),
-            Some("0000:03:00.0")
+            pci_slot_for_device_select(&gpus, ARC_SELECT).as_deref(),
+            Some(ARC_SLOT)
         );
-        // Without the force-suffix and in different hex case too.
+        // Without the force-suffix and in different hex case too — test case-insensitive matching.
         assert_eq!(
             pci_slot_for_device_select(&gpus, "8086:56A0").as_deref(),
-            Some("0000:03:00.0")
+            Some(ARC_SLOT)
         );
     }
 
@@ -463,7 +474,7 @@ mod tests {
         // Twin cards: vendor:device can't say which one, so don't guess.
         assert_eq!(pci_slot_for_device_select(&twins, "1002:73df!"), None);
         // No matching hardware, or a malformed selector: nothing to resolve.
-        assert_eq!(pci_slot_for_device_select(&twins, "8086:56a0!"), None);
+        assert_eq!(pci_slot_for_device_select(&twins, ARC_SELECT), None);
         assert_eq!(pci_slot_for_device_select(&twins, "not-a-selector"), None);
     }
 
@@ -493,9 +504,9 @@ mod tests {
         ];
         let gpus = vec![PhysicalGpu {
             card: "card1".into(),
-            vendor_id: Some("0x8086".into()),
-            device_id: Some("0x56a0".into()),
-            pci_slot: Some("0000:03:00.0".into()),
+            vendor_id: Some(ARC_VENDOR.into()),
+            device_id: Some(ARC_DEVICE.into()),
+            pci_slot: Some(ARC_SLOT.into()),
         }];
 
         let candidates = build_candidates(&manifests, &gpus);
@@ -506,7 +517,7 @@ mod tests {
             .find(|c| c.name.contains("/usr/share"))
             .expect("system install candidate");
         assert_eq!(system.icd_paths.len(), 2, "system install should pair i686");
-        assert_eq!(system.device_select.as_deref(), Some("8086:56a0!"));
+        assert_eq!(system.device_select.as_deref(), Some(ARC_SELECT));
 
         let local = candidates
             .iter()
@@ -517,7 +528,7 @@ mod tests {
             1,
             "no i686 counterpart was installed locally"
         );
-        assert_eq!(local.device_select.as_deref(), Some("8086:56a0!"));
+        assert_eq!(local.device_select.as_deref(), Some(ARC_SELECT));
     }
 
     #[test]
@@ -531,9 +542,9 @@ mod tests {
         // No NVIDIA GPU present.
         let gpus = vec![PhysicalGpu {
             card: "card0".into(),
-            vendor_id: Some("0x1002".into()),
-            device_id: Some("0x164e".into()),
-            pci_slot: Some("0000:16:00.0".into()),
+            vendor_id: Some(IGPU_VENDOR.into()),
+            device_id: Some(IGPU_DEVICE.into()),
+            pci_slot: Some(IGPU_SLOT.into()),
         }];
         assert!(build_candidates(&manifests, &gpus).is_empty());
     }

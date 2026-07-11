@@ -97,6 +97,17 @@ mod tests {
     // that set/unset it (same pattern as preflight's config tests).
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    // Case-study machine from DESIGN.md: Intel Arc A770 + AMD iGPU (the dual-GPU + dual-ICD
+    // trap where MangoHud's sampler had picked the idle iGPU until the pin aimed it at the Arc).
+    const ARC_VENDOR: &str = "0x8086";
+    const ARC_DEVICE: &str = "0x56a0";
+    const ARC_SLOT: &str = "0000:03:00.0";
+    const IGPU_VENDOR: &str = "0x1002";
+    const IGPU_DEVICE: &str = "0x164e";
+    const IGPU_SLOT: &str = "0000:16:00.0";
+    // The Arc as a MESA_VK_DEVICE_SELECT selector: bare ids (no 0x), force-suffix `!`.
+    const ARC_SELECT: &str = "8086:56a0!";
+
     fn mangohud_config(cmd: &Command) -> String {
         cmd.get_envs()
             .find(|(k, _)| *k == "MANGOHUD_CONFIG")
@@ -114,13 +125,13 @@ mod tests {
         }
 
         let mut cmd = Command::new("true");
-        configure(&mut cmd, Path::new("/tmp/run"), Some("0000:03:00.0"));
+        configure(&mut cmd, Path::new("/tmp/run"), Some(ARC_SLOT));
         let cfg = mangohud_config(&cmd);
         assert_eq!(
             cfg,
             format!(
                 "output_folder=/tmp/run,toggle_logging={TOGGLE_KEY},\
-                 autostart_log={AUTOSTART_LOG_SECS},pci_dev=0000:03:00.0"
+                 autostart_log={AUTOSTART_LOG_SECS},pci_dev={ARC_SLOT}"
             )
         );
 
@@ -141,13 +152,13 @@ mod tests {
         }
 
         let mut cmd = Command::new("true");
-        configure(&mut cmd, Path::new("/tmp/run"), Some("0000:03:00.0"));
+        configure(&mut cmd, Path::new("/tmp/run"), Some(ARC_SLOT));
         let cfg = mangohud_config(&cmd);
         assert!(
             cfg.starts_with("fps_limit=60,"),
             "user config must survive: {cfg}"
         );
-        assert!(cfg.ends_with(",pci_dev=0000:03:00.0"), "got: {cfg}");
+        assert!(cfg.ends_with(&format!(",pci_dev={ARC_SLOT}")), "got: {cfg}");
 
         unsafe {
             std::env::remove_var("MANGOHUD_CONFIG");
@@ -168,31 +179,28 @@ mod tests {
     #[test]
     fn pinned_gpu_wins_over_everything() {
         let gpus = vec![
-            gpu("0x1002", "0x164e", "0000:16:00.0"),
-            gpu("0x8086", "0x56a0", "0000:03:00.0"),
+            gpu(IGPU_VENDOR, IGPU_DEVICE, IGPU_SLOT),
+            gpu(ARC_VENDOR, ARC_DEVICE, ARC_SLOT),
         ];
         let pin = GpuPin {
             name: "Intel — intel_icd (/usr/share/vulkan/icd.d)".into(),
             icd_paths: vec!["/usr/share/vulkan/icd.d/intel_icd.x86_64.json".into()],
-            device_select: Some("8086:56a0!".into()),
+            device_select: Some(ARC_SELECT.into()),
         };
         assert_eq!(
             sample_pci_dev_from(Some(&pin), &gpus).as_deref(),
-            Some("0000:03:00.0")
+            Some(ARC_SLOT)
         );
     }
 
     #[test]
     fn unpinned_defaults_to_the_sole_gpu_and_refuses_to_guess_between_several() {
-        let one = vec![gpu("0x8086", "0x56a0", "0000:03:00.0")];
-        assert_eq!(
-            sample_pci_dev_from(None, &one).as_deref(),
-            Some("0000:03:00.0")
-        );
+        let one = vec![gpu(ARC_VENDOR, ARC_DEVICE, ARC_SLOT)];
+        assert_eq!(sample_pci_dev_from(None, &one).as_deref(), Some(ARC_SLOT));
 
         let two = vec![
-            gpu("0x1002", "0x164e", "0000:16:00.0"),
-            gpu("0x8086", "0x56a0", "0000:03:00.0"),
+            gpu(IGPU_VENDOR, IGPU_DEVICE, IGPU_SLOT),
+            gpu(ARC_VENDOR, ARC_DEVICE, ARC_SLOT),
         ];
         assert_eq!(
             sample_pci_dev_from(None, &two),
@@ -203,7 +211,7 @@ mod tests {
 
     #[test]
     fn unresolvable_pin_still_falls_back_to_the_sole_gpu() {
-        let one = vec![gpu("0x8086", "0x56a0", "0000:03:00.0")];
+        let one = vec![gpu(ARC_VENDOR, ARC_DEVICE, ARC_SLOT)];
         // A stale pin (card since removed/renumbered) whose selector matches nothing.
         let pin = GpuPin {
             name: "NVIDIA — nouveau_icd (/usr/share/vulkan/icd.d)".into(),
@@ -212,7 +220,7 @@ mod tests {
         };
         assert_eq!(
             sample_pci_dev_from(Some(&pin), &one).as_deref(),
-            Some("0000:03:00.0")
+            Some(ARC_SLOT)
         );
         // No selector on the pin at all behaves the same.
         let pin = GpuPin {
@@ -221,7 +229,7 @@ mod tests {
         };
         assert_eq!(
             sample_pci_dev_from(Some(&pin), &one).as_deref(),
-            Some("0000:03:00.0")
+            Some(ARC_SLOT)
         );
     }
 }
