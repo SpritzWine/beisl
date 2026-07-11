@@ -20,6 +20,7 @@ name = "beisl"
 version = "0.0.1-alpha.1"
 dependencies = [
  "artifact",
+ "assets",
  "libc",
  "preflight",
  "session",

@@ -15,6 +15,7 @@ path = "src/main.rs"
 # anyhow (errors), notify (mangohud-log file-watch), artifact (once the post-run step
 # is wired).
 [dependencies]
+assets = { path = "../assets" }
 preflight = { path = "../preflight" }
 session = { path = "../session" }
 artifact = { path = "../artifact" }   # post-run: resolve + merge -> artifact.json + report.txt

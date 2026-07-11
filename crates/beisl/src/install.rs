@@ -12,7 +12,24 @@ use std::process::ExitCode;
 
 use crate::out::out;
 
-const DESKTOP_FILE: &str = "org.spritzwine.beisl-setup.desktop";
+// Must equal the setup app's Wayland APP_ID ("org.spritzwine.Beisl", beisl-gui
+// main.rs) — compositors pair a window to its icon via app_id ↔ desktop-file
+// basename, and a mismatch is a generic gear on the running window.
+const DESKTOP_FILE: &str = "org.spritzwine.Beisl.desktop";
+/// The pre-rename entry name older installs wrote; upgrades and uninstalls sweep it.
+const LEGACY_DESKTOP_FILE: &str = "org.spritzwine.beisl-setup.desktop";
+/// A second, menu-hidden desktop entry for the session window's own APP_ID, so
+/// compositors can pair its windows with the icon and a human name (a window whose
+/// app_id has no desktop file gets a generic gear and the raw id in the taskbar).
+const SESSION_DESKTOP_FILE: &str = "org.spritzwine.BeislSession.desktop";
+
+// Das Glasl — embedded via the assets crate, so `beisl install` works from a bare
+// binary with no assets directory around it.
+const ICON_APP: &str = assets::icons::APP;
+const ICON_SYMBOLIC: &str = assets::icons::SYMBOLIC;
+/// Icon names, per the freedesktop icon spec: the desktop entry's basename.
+const ICON_NAME: &str = "org.spritzwine.Beisl";
+const SESSION_ICON_NAME: &str = "org.spritzwine.BeislSession";
 
 pub fn run(uninstall: bool) -> ExitCode {
     let res = if uninstall {
@@ -96,11 +113,17 @@ fn do_install() -> Result<String, String> {
 
 fn do_uninstall() -> Result<String, String> {
     let mut removed = Vec::new();
+    let icons = home().join(".local/share/icons/hicolor");
     for p in [
         bin_dir().join("beisl"),
         bin_dir().join("beisl-setup"),
         bin_dir().join("beisl-mcp"),
         applications_dir().join(DESKTOP_FILE),
+        applications_dir().join(LEGACY_DESKTOP_FILE),
+        applications_dir().join(SESSION_DESKTOP_FILE),
+        icons.join(format!("scalable/apps/{ICON_NAME}.svg")),
+        icons.join(format!("scalable/apps/{SESSION_ICON_NAME}.svg")),
+        icons.join(format!("symbolic/apps/{ICON_NAME}-symbolic.svg")),
     ] {
         if p.exists() {
             fs::remove_file(&p).map_err(|e| format!("rm {}: {e}", p.display()))?;
@@ -138,12 +161,55 @@ fn write_desktop(exec: &Path) -> Result<(), String> {
          Name=Beisl Setup\n\
          Comment=Check prerequisites for perf tracing\n\
          Exec={}\n\
-         Icon=utilities-system-monitor\n\
+         Icon={icon}\n\
          Terminal=false\n\
          Categories=Utility;System;\n",
-        exec.display()
+        exec.display(),
+        icon = ICON_NAME,
     );
     fs::write(dir.join(DESKTOP_FILE), contents).map_err(|e| format!("write desktop entry: {e}"))?;
+    let _ = fs::remove_file(dir.join(LEGACY_DESKTOP_FILE)); // pre-rename installs
+                                                            // The session window's app_id gets its own (menu-hidden) entry: same artwork,
+                                                            // no Exec anyone should launch by hand — windows land on it via app_id matching.
+    let session = format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name=Beisl Session\n\
+         Exec={} --session %f\n\
+         Icon={}\n\
+         Terminal=false\n\
+         NoDisplay=true\n\
+         Categories=Utility;System;\n",
+        exec.display(),
+        SESSION_ICON_NAME,
+    );
+    fs::write(dir.join(SESSION_DESKTOP_FILE), session)
+        .map_err(|e| format!("write session desktop entry: {e}"))?;
+    write_icons()?;
+    Ok(())
+}
+
+/// Put das Glasl where the icon theme looks for it. Same artwork under both names
+/// (the setup entry's and the session app_id's); the symbolic variant rides along
+/// for shells that prefer it (tray/menu contexts).
+fn write_icons() -> Result<(), String> {
+    let icons = home().join(".local/share/icons/hicolor");
+    let scalable = icons.join("scalable/apps");
+    let symbolic = icons.join("symbolic/apps");
+    for (dir, name, body) in [
+        (&scalable, format!("{ICON_NAME}.svg"), ICON_APP),
+        (&scalable, format!("{SESSION_ICON_NAME}.svg"), ICON_APP),
+        (
+            &symbolic,
+            format!("{ICON_NAME}-symbolic.svg"),
+            ICON_SYMBOLIC,
+        ),
+    ] {
+        fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+        fs::write(dir.join(&name), body).map_err(|e| format!("write icon {name}: {e}"))?;
+    }
+    // Nudge icon-theme caches: the spec keys on the theme dir's mtime.
+    let _ = std::process::Command::new("touch").arg(&icons).status();
     Ok(())
 }
 
@@ -151,4 +217,23 @@ fn on_path(dir: &Path) -> bool {
     std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).any(|d| d == dir))
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_icons_are_svgs() {
+        assert!(ICON_APP.trim_start().starts_with("<svg"));
+        assert!(ICON_SYMBOLIC.trim_start().starts_with("<svg"));
+    }
+
+    #[test]
+    fn icon_names_match_the_desktop_entries() {
+        // The freedesktop icon spec pairs Icon= with the entry basename; drift here
+        // means a generic gear in the app menu.
+        assert_eq!(format!("{ICON_NAME}.desktop"), DESKTOP_FILE);
+        assert_eq!(format!("{SESSION_ICON_NAME}.desktop"), SESSION_DESKTOP_FILE);
+    }
 }
