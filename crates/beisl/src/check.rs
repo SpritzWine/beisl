@@ -6,20 +6,11 @@
 
 use std::process::ExitCode;
 
+use crate::out::out;
 use preflight::{
     all_checks, detect_distro, disk_check, driver_debuginfo_check, fix_command, gpu_dump_check,
     multi_gpu_check, Status,
 };
-
-/// `println!` that shrugs off a closed stdout (`beisl --check | head`): the reader
-/// hanging up mid-listing is not an error worth a panic — std's `println!` aborts with
-/// a broken-pipe panic there. Drop the remaining output, keep the exit code honest.
-macro_rules! out {
-    ($($t:tt)*) => {{
-        use std::io::Write as _;
-        let _ = writeln!(std::io::stdout(), $($t)*);
-    }};
-}
 
 pub fn run() -> ExitCode {
     let distro = detect_distro();

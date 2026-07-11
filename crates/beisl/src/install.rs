@@ -10,6 +10,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use crate::out::out;
+
 const DESKTOP_FILE: &str = "org.spritzwine.beisl-setup.desktop";
 
 pub fn run(uninstall: bool) -> ExitCode {
@@ -20,7 +22,7 @@ pub fn run(uninstall: bool) -> ExitCode {
     };
     match res {
         Ok(msg) => {
-            println!("{msg}");
+            out!("{msg}");
             ExitCode::SUCCESS
         }
         Err(e) => {

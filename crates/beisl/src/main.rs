@@ -18,6 +18,7 @@ mod cue;
 mod gpu;
 mod install;
 mod mangohud;
+mod out;
 mod perf;
 mod run;
 
