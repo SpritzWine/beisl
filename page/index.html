@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>beisl — who ate the frame?</title>
+<meta name="description" content="Beisl is a Linux game performance-tracing tool. One line in your Steam launch options; it samples the whole stack with perf, bookmarks the hitches via MangoHud's frametime log, and hands you the verdict by layer: kernel, GPU driver, game, DXVK — or wine.">
+<link rel="icon" type="image/svg+xml" href="assets/icon-glass-pour.svg">
+<link rel="stylesheet" href="assets/style.css">
+<script>
+/* apply a stored theme before first paint to avoid a flash */
+(function () {
+  try {
+    var t = localStorage.getItem("beisl-theme");
+    if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+  } catch (e) {}
+})();
+</script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap bar">
+    <a class="brand" href="#top" aria-label="beisl — home">
+      <img src="assets/icon-glass-pour.svg" alt="" width="26" height="26">
+      <span class="wordmark">be<span class="i">ı<span class="tick" aria-hidden="true"></span></span>sl</span>
+    </a>
+    <nav aria-label="Site">
+      <a href="#verdict" class="hide-sm">The verdict</a>
+      <a href="#how" class="hide-sm">How it works</a>
+      <a href="#install">Install</a>
+      <a href="https://codeberg.org/SpritzWine/beisl" rel="external">Source</a>
+      <button id="theme-toggle" class="theme-toggle" type="button">Theme: Auto</button>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+
+<!-- ======================= HERO — the dim pub ======================= -->
+<section class="hero" id="top" aria-label="Introduction">
+  <canvas id="hero-trace" aria-hidden="true"></canvas>
+  <div class="wrap">
+    <div class="hero-lockup">
+      <!-- Das Glasl, bare: the drink is the layer bar, the surface is the
+           frametime trace with one hitch spike -->
+      <svg class="glass" viewBox="0 0 48 48" role="img"
+           aria-label="The Beisl glass: a wine glass whose pour is the layer verdict — DXVK violet, game amber, wine red — its surface a frametime trace with one spike.">
+        <defs>
+          <linearGradient id="hero-pour" gradientUnits="userSpaceOnUse" x1="24" y1="10.5" x2="24" y2="27.2">
+            <stop offset="0" stop-color="#8e6fd6"/><stop offset="0.27" stop-color="#8e6fd6"/>
+            <stop offset="0.27" stop-color="#e0a030"/><stop offset="0.57" stop-color="#e0a030"/>
+            <stop offset="0.57" stop-color="#9c2b3b"/><stop offset="1" stop-color="#9c2b3b"/>
+          </linearGradient>
+        </defs>
+        <path d="M14 10.5 L18.6 10.5 L21.4 8.4 L24.2 10.5 L34 10.5 L34 16 C34 22.8 29.9 27.2 24 27.2 C18.1 27.2 14 22.8 14 16 Z" fill="url(#hero-pour)"/>
+        <path d="M14 9 V16 C14 22.8 18.1 27.2 24 27.2 C29.9 27.2 34 22.8 34 16 V9"
+              fill="none" stroke="#f4ede4" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+        <rect x="22.7" y="27" width="2.6" height="8.2" fill="#f4ede4"/>
+        <rect x="16" y="35.2" width="16" height="2.8" rx="1.4" fill="#f4ede4"/>
+      </svg>
+      <div>
+        <h1 class="wordmark">be<span class="i">ı<span class="tick" aria-hidden="true"></span></span>sl</h1>
+        <p class="tagline">Who ate the frame?</p>
+        <p class="lede">
+          Beisl is performance tracing for games on Linux. One line in your launch
+          options; it samples the whole stack with <b>perf</b>, bookmarks the hitches
+          through MangoHud’s frametime log, and hands you the verdict <b>by layer</b>
+          — kernel, GPU driver, the game itself, DXVK, or <b>wine</b>.
+          Any wine. That’s rather the point.
+        </p>
+        <div class="hero-cta">
+          <a class="btn btn-primary" href="#install">Get beisl</a>
+          <a class="btn btn-ghost" href="https://codeberg.org/SpritzWine/beisl" rel="external">Source on Codeberg</a>
+          <code class="hero-cmd"><span class="prompt">Launch options:</span> beisl %command%</code>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= THE VERDICT ======================= -->
+<section id="verdict" aria-labelledby="verdict-h">
+  <div class="wrap">
+    <div class="verdict-head">
+      <p class="kicker">The headline view</p>
+      <h2 id="verdict-h">The whole thesis is one bar.</h2>
+      <p>
+        A trace is thousands of stack samples. Beisl buckets every one of them by the
+        layer its module belongs to and answers the only question a stutter really
+        asks: <em>who ate the frame?</em> Not a flamegraph first — a verdict first,
+        with the receipts one click below. And beside every share, an honest number:
+        how much of that layer it could actually <em>name</em>.
+      </p>
+    </div>
+
+    <div class="card verdict-card">
+      <div class="scenario-row" role="group" aria-label="Example nights">
+        <button class="scenario-btn" type="button" data-scenario="clean" aria-pressed="true">The good pour</button>
+        <button class="scenario-btn" type="button" data-scenario="driver" aria-pressed="false">The driver’s round</button>
+        <button class="scenario-btn" type="button" data-scenario="wine" aria-pressed="false">Wine’s round</button>
+        <span class="spacer"></span>
+        <label class="vendor-field">GPU vendor
+          <select id="vendor-select" aria-label="Colour the driver segment by GPU vendor">
+            <option value="neutral" selected>neutral (teal)</option>
+            <option value="intel">Intel — blue</option>
+            <option value="amd">AMD — red</option>
+            <option value="nvidia">NVIDIA — green</option>
+          </select>
+        </label>
+      </div>
+
+      <div id="layerbar" class="layerbar" role="group"
+           aria-label="Layer split of attributed CPU samples — who ate the frame"></div>
+      <p id="attributed-note" class="attributed-note" aria-live="polite"></p>
+
+      <table class="tab-table">
+        <caption>The tab — every share, itemized</caption>
+        <thead>
+          <tr><th scope="col">Layer</th><th scope="col">Share</th><th scope="col">Symbol coverage</th></tr>
+        </thead>
+        <tbody id="tab-body"></tbody>
+      </table>
+      <p class="cov-hint">A big layer with low coverage is where installing that layer’s
+        debuginfo actually buys you fidelity — the issues panel says which package.</p>
+
+      <p class="verdict-line" aria-live="polite">
+        <span class="who">The regular’s verdict</span>
+        <span id="verdict-text"></span>
+      </p>
+    </div>
+
+    <p class="demo-footnote">
+      “The good pour” is Beisl’s first real capture — Blood West, picked <em>because</em>
+      it runs great: 45% kernel, 32% the game’s own JIT, ~3% DXVK, wine under half a
+      percent. The other two nights and the coverage figures are illustrative. One house
+      rule made this bar possible: brand burgundy never appears in it. The wine segment is
+      the app’s own data red, the driver wears its vendor’s colour —
+      <em>Beislrot frames, layer colours testify.</em>
+    </p>
+  </div>
+</section>
+
+<!-- ======================= SIDE-CHANNEL ======================= -->
+<section aria-labelledby="side-h">
+  <div class="wrap split">
+    <div>
+      <p class="kicker">The side-channel</p>
+      <h2 id="side-h">The hitches, bookmarked.</h2>
+      <p>
+        MangoHud is not the product — it’s the bookmark ribbon. Its frametime log,
+        flushed every frame, timestamps the worst hitches; Beisl turns those
+        timestamps into markers into the <code>perf</code> trace. So instead of
+        staring down a whole-session flamegraph, you jump straight to
+        <em>the five worst hitches and what wine was doing during each</em>.
+      </p>
+      <p class="muted">
+        The frametime log survives up to a crash, and the CSV rides along in the
+        run directory next to <code>perf.data</code>, the logs, and
+        <code>session.json</code>.
+      </p>
+    </div>
+    <figure class="frametime-fig">
+      <svg id="frametime-svg" viewBox="0 0 560 300" role="img"
+           aria-label="A frametime timeline: a steady line around 8 milliseconds with two spikes standing out — 221 milliseconds at 7.1 seconds and 96 milliseconds at 18.4 seconds — each flagged as a bookmark into the perf trace.">
+        <!-- gridlines: 0/60/120/180/240 ms -->
+        <line class="gridline" x1="46" y1="258" x2="548" y2="258"/>
+        <line class="gridline" x1="46" y1="198" x2="548" y2="198" opacity="0.6"/>
+        <line class="gridline" x1="46" y1="138" x2="548" y2="138" opacity="0.6"/>
+        <line class="gridline" x1="46" y1="78"  x2="548" y2="78"  opacity="0.6"/>
+        <line class="gridline" x1="46" y1="18"  x2="548" y2="18"  opacity="0.6"/>
+        <text class="axis-label" x="38" y="262" text-anchor="end">0</text>
+        <text class="axis-label" x="38" y="202" text-anchor="end">60</text>
+        <text class="axis-label" x="38" y="142" text-anchor="end">120</text>
+        <text class="axis-label" x="38" y="82"  text-anchor="end">180</text>
+        <text class="axis-label" x="38" y="22"  text-anchor="end">240 ms</text>
+        <text class="axis-label" x="46"  y="280">0 s</text>
+        <text class="axis-label" x="213" y="280" text-anchor="middle">10</text>
+        <text class="axis-label" x="381" y="280" text-anchor="middle">20</text>
+        <text class="axis-label" x="548" y="280" text-anchor="end">30 s</text>
+        <!-- the trace itself: one series, ink only -->
+        <polyline id="frametime-line" class="trace" points=""/>
+        <!-- bookmarked spikes -->
+        <circle class="spike-mark" cx="164.8" cy="37" r="3.4"/>
+        <text class="spike-flag" x="176" y="40">221 ms · 7.1 s</text>
+        <circle class="spike-mark" cx="353.9" cy="162" r="3.4"/>
+        <text class="spike-flag" x="365" y="165">96 ms · 18.4 s</text>
+      </svg>
+      <figcaption>Frametimes from the MangoHud side-channel; the flagged spikes become
+        jump targets in the analysis. (Illustrative data.)</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- ======================= WINE-AGNOSTIC ======================= -->
+<section aria-labelledby="agnostic-h">
+  <div class="wrap split rev">
+    <div class="card">
+      <table class="tier-table">
+        <caption class="kicker" style="caption-side:top;text-align:left;padding-bottom:12px;">Symbol fidelity, stamped on every trace</caption>
+        <thead>
+          <tr><th scope="col">Tier</th><th scope="col">Wine</th><th scope="col">What you get</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row"><span class="tier-name">Full</span></th>
+            <td>SpritzWine / Prater</td>
+            <td>retained debug info — internal statics, not just exports</td>
+          </tr>
+          <tr>
+            <th scope="row"><span class="tier-name">Exports</span></th>
+            <td>stock Proton, GE — any stripped build</td>
+            <td>module maps ⋈ export tables — exported functions, zero cooperation needed</td>
+          </tr>
+          <tr>
+            <th scope="row"><span class="tier-name">Distro</span></th>
+            <td>system wine</td>
+            <td>your distro’s debuginfo packages — often very good</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div>
+      <p class="kicker">Impartial by construction</p>
+      <h2 id="agnostic-h">Any wine. That’s the point.</h2>
+      <p>
+        The capture path never touches a particular wine: the wrapper, MangoHud and
+        <code>perf</code> sample <em>whatever runs</em> — stock Proton, GE,
+        Lutris-wine, system wine, SpritzWine, even a native Linux game. Which makes
+        Beisl an impartial critic: it can trace the baseline half of an A/B
+        (“same game, same driver, different runtime”) just as happily as the house’s own pour.
+      </p>
+      <p>
+        Symbol fidelity is tiered instead of assumed — and every trace is stamped
+        with its tier, so a comparison never silently reads full symbols against
+        partial ones.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= GOOD RUNS ======================= -->
+<section class="goodrun" aria-labelledby="good-h">
+  <div class="wrap">
+    <p class="kicker" id="good-h">The house stance</p>
+    <blockquote class="quote" cite="https://codeberg.org/SpritzWine/beisl">
+      “Confirming a good game is good is a <em>first-class result</em>, not a null one.”
+    </blockquote>
+    <p class="attrib">
+      Beisl is the honest regular, not a doom tool. It says so with conviction when it
+      <em>wasn’t</em> the wine — which is exactly why you can trust it when it says it was.
+      Good runs are a result too.
+    </p>
+  </div>
+</section>
+
+<!-- ======================= HOW IT WORKS ======================= -->
+<section id="how" aria-labelledby="how-h">
+  <div class="wrap">
+    <p class="kicker">How it works</p>
+    <h2 id="how-h">Launch option in, verdict out.</h2>
+
+    <ol class="steps" style="list-style:none;padding:0;margin-top:34px;">
+      <li class="step card">
+        <h3>Pour</h3>
+        <p>Put <code>beisl %command%</code> in the game’s Steam launch options —
+        or set it as the Lutris wrapper, or run <code>beisl wine game.exe</code>.
+        No game patching, no ptrace: PMU sampling, so even anti-tamper titles
+        tolerate it.</p>
+      </li>
+      <li class="step card">
+        <h3>Play</h3>
+        <p>Beisl sets the table: MangoHud logs frametimes every frame,
+        <code>perf</code> records the stack, and everything — trace, logs, CSV,
+        <code>session.json</code> — lands in a per-run directory under
+        <code>~/.local/share/beisl/traces/</code>.</p>
+      </li>
+      <li class="step card">
+        <h3>The verdict</h3>
+        <p>A crash is analyzed on the spot. A clean run is kept and politely asked
+        about: <em>Analyze</em> or <em>Discard</em> — your trace, your call. Analysis
+        yields the layer bar, the frametime timeline, and the issues panel.</p>
+      </li>
+    </ol>
+
+    <div class="surfaces">
+      <div class="surface">
+        <b>The wrapper</b>
+        <code>beisl %command%</code> · <code>beisl check</code> — the CLI that runs the
+        show and vets your host: perf, symbolizer, paranoid level, MangoHud, GPU quirks
+        like dual ICDs.
+      </div>
+      <div class="surface">
+        <b>The headless verdict</b>
+        <code>beisl symbols &lt;run-dir&gt;</code> — the same layer split as a text bar,
+        plus <code>artifact.json</code> and <code>report.txt</code> you can hand to
+        anyone. Or to a machine: an MCP server is on the roadmap.
+      </div>
+      <div class="surface">
+        <b>The session window</b>
+        <code>beisl-setup</code> — preflight checklist with guided fixes, then the
+        results view: the vendor-coloured layer bar, frametime chart with spike
+        bookmarks, and which debuginfo would sharpen the picture.
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= INSTALL ======================= -->
+<section id="install" aria-labelledby="install-h">
+  <div class="wrap install-grid">
+    <div>
+      <p class="kicker">Quickstart</p>
+      <h2 id="install-h">On tap in two minutes.</h2>
+      <ul class="entry-list">
+        <li><span class="ctx">Steam</span> <span><code>beisl %command%</code> in Launch Options</span></li>
+        <li><span class="ctx">Lutris</span> <span><code>beisl</code> as the wrapper / pre-launch command</span></li>
+        <li><span class="ctx">Bare wine</span> <span><code>beisl wine game.exe</code></span></li>
+        <li><span class="ctx">SpritzWine</span> <span>a “Record performance” toggle in the control panel — no launch options at all</span></li>
+      </ul>
+      <p class="status-note">
+        Beisl is young — a working v0 engine with the GUI results view landing in v1.
+        The <code>Exports</code> symbol tier is built and proven on real captures;
+        <code>Full</code>-tier symbols and the MCP server are en route. Source, issues
+        and releases: <a href="https://codeberg.org/SpritzWine/beisl" rel="external">codeberg.org/SpritzWine/beisl</a>
+        <em>(placeholder — point at the real repo)</em>.
+      </p>
+    </div>
+    <div class="codeblock">
+      <button id="copy-cmd" class="copy-btn" type="button"
+              aria-label="Copy the launch option: beisl percent command percent">Copy</button>
+<pre><code><span class="c"># from an extracted release bundle:</span>
+<span class="cmd">./beisl install</span>   <span class="c"># beisl + beisl-setup onto your PATH</span>
+
+<span class="c"># once: vet the host (perf, llvm, paranoid, MangoHud, GPU)</span>
+<span class="cmd">beisl check</span>
+
+<span class="c"># Steam → your game → Properties… → Launch Options:</span>
+<span class="cmd">beisl <span class="hl">%command%</span></span>
+
+<span class="c"># next launch is traced; each run keeps its own dir:</span>
+<span class="c">#   ~/.local/share/beisl/traces/run-*/</span></code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= FAMILY ======================= -->
+<section class="family" aria-labelledby="family-h">
+  <div class="wrap">
+    <p class="kicker" id="family-h">The house</p>
+    <div class="sibs" aria-label="The Viennese family: SpritzWine, Prater, and Beisl">
+      <span class="other">SpritzWine</span>
+      <span class="dotsep" aria-hidden="true">◆</span>
+      <span class="other">Prater</span>
+      <span class="dotsep" aria-hidden="true">◆</span>
+      <span class="self wordmark" style="font-size:1.15em;">be<span class="i">ı<span class="tick" aria-hidden="true"></span></span>sl</span>
+    </div>
+    <p class="muted" style="margin-top:18px;">
+      Three Viennese siblings: the house pours the wine — and keeps the pub that vets it.
+      Its own builds, everyone else’s too; the regulars don’t play favorites.
+    </p>
+  </div>
+</section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap cols">
+    <img class="coaster" src="assets/icon-coaster-tab.svg" alt="Der Deckel — the Beisl coaster mark: the layer tally, struck through in wine red" width="72" height="72">
+    <div>
+      <span class="wordmark">be<span class="i">ı<span class="tick" aria-hidden="true"></span></span>sl</span>
+      — your frame, itemized.
+      <p class="fine">
+        Free software for Linux. Wine-agnostic by design; opinions strictly data-backed.
+        <a href="https://codeberg.org/SpritzWine/beisl" rel="external">Source</a> ·
+        <a href="https://codeberg.org/SpritzWine/beisl/issues" rel="external">Issues</a> ·
+        <a href="https://codeberg.org/SpritzWine/beisl/releases" rel="external">Releases</a>
+      </p>
+    </div>
+    <span class="easter" lang="de-AT" aria-hidden="true">Na, wer war’s?</span>
+  </div>
+</footer>
+
+<script src="assets/site.js"></script>
+</body>
+</html>

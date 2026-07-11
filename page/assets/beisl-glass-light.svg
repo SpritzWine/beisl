@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
+  <!-- Beisl "Das Glasl" — bare (no tile), for LIGHT grounds. Glass in Wirtshausholz, open top. -->
+  <defs>
+    <linearGradient id="pour" gradientUnits="userSpaceOnUse" x1="24" y1="10.5" x2="24" y2="27.2">
+      <stop offset="0" stop-color="#8e6fd6"/><stop offset="0.27" stop-color="#8e6fd6"/>
+      <stop offset="0.27" stop-color="#e0a030"/><stop offset="0.57" stop-color="#e0a030"/>
+      <stop offset="0.57" stop-color="#9c2b3b"/><stop offset="1" stop-color="#9c2b3b"/>
+    </linearGradient>
+  </defs>
+  <path d="M14 10.5 L18.6 10.5 L21.4 8.4 L24.2 10.5 L34 10.5 L34 16 C34 22.8 29.9 27.2 24 27.2 C18.1 27.2 14 22.8 14 16 Z" fill="url(#pour)"/>
+  <path d="M14 9 V16 C14 22.8 18.1 27.2 24 27.2 C29.9 27.2 34 22.8 34 16 V9"
+        fill="none" stroke="#2b2320" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+  <rect x="22.7" y="27" width="2.6" height="8.2" fill="#2b2320"/>
+  <rect x="16" y="35.2" width="16" height="2.8" rx="1.4" fill="#2b2320"/>
+</svg>

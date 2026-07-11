@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
+  <!-- Beisl app icon — "Der Deckel": the honest tab.
+       In a Beisl the waiter tallies what you consumed in pen strokes on the
+       coaster. Here the tally strokes are the stack's layers (kernel slate,
+       driver teal [vendor-neutral — the icon, like the tool, plays no
+       favorites], game amber, dxvk violet) and the fifth stroke that closes
+       the tally — the one drawn across the others — is wine red: the tab,
+       itemized, verdict included. -->
+  <circle cx="24" cy="24" r="21" fill="#f4ede4"/>
+  <circle cx="24" cy="24" r="19.8" fill="none" stroke="#7a1f33" stroke-width="2.4"/>
+  <circle cx="24" cy="24" r="16" fill="none" stroke="#7a1f33" stroke-width="1.2" opacity="0.45"/>
+  <g stroke-width="3.2" stroke-linecap="round">
+    <line x1="15.8" y1="17" x2="15.8" y2="31" stroke="#5a6777"/>
+    <line x1="21.3" y1="17" x2="21.3" y2="31" stroke="#3a9188"/>
+    <line x1="26.7" y1="17" x2="26.7" y2="31" stroke="#e0a030"/>
+    <line x1="32.2" y1="17" x2="32.2" y2="31" stroke="#8e6fd6"/>
+    <!-- the fifth stroke: wine, struck across the tab -->
+    <line x1="12.6" y1="28.6" x2="35.4" y2="19.4" stroke="#9c2b3b"/>
+  </g>
+</svg>

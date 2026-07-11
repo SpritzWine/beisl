@@ -1,0 +1,11 @@
+# Codeberg Pages custom-domain file (.domains)
+# ---------------------------------------------
+# One domain per line; the FIRST uncommented line is the canonical domain
+# (others 301-redirect to it). DNS must point at Codeberg Pages:
+#   www/subdomain:  CNAME spritzwine.codeberg.page.
+#   apex domain:    ALIAS/ANAME to codeberg.page, or the published A/AAAA records
+#
+# Uncomment and edit when the domain exists — until then this file is inert:
+#
+# beisl.example.org
+# www.beisl.example.org
