@@ -33,8 +33,8 @@ human-editable):
   or anything touching the real `$HOME` — use the verify skill's isolated
   `XDG_*`/scratch-HOME pattern. No pushes to any remote.
 - **Git hygiene.** Direct commits only on `loop/*` branches; `agent-dev`
-  receives merges only; main receives nothing. No history rewriting outside
-  an unmerged `loop/*` branch.
+  receives merges only; main receives only human-approved landings (step 9).
+  No history rewriting outside an unmerged `loop/*` branch.
 - **Build economy.** Worktrees share one target dir so iterations don't
   cold-build: export `CARGO_TARGET_DIR=<main-repo>/.loop/target` in every
   worktree shell. Build `crates/beisl-gui` only when the item touches it
@@ -55,9 +55,9 @@ human-editable):
 
 - Read `.loop/BACKLOG.md`, `.loop/REVIEW-QUEUE.md`, the DESIGN.md Roadmap
   section, and CLAUDE.md "Known shortcomings".
-- **Batch cap:** ≥ 3 unreviewed entries in REVIEW-QUEUE.md → stop the loop
-  (ScheduleWakeup `stop: true` if in /loop) and post the digest (step 9).
-  Human review is the throttle — don't run ahead of it.
+- Review does NOT throttle the loop: it keeps iterating with any number of
+  unreviewed queue entries (Florian's call, 2026-07-11). Human review gates
+  only the landing on main (step 9).
 - **Sync `agent-dev`:** create it at main HEAD if missing. If the queue has
   no unreviewed entries (all merged/discarded by Florian), reset it to main.
   Otherwise, if main gained commits, merge main into agent-dev; a conflict
@@ -141,18 +141,37 @@ Append to `.loop/REVIEW-QUEUE.md`:
 - Merge commit: <hash> — inspect: `git show <hash>`
 ```
 
-### 9. Loop control + human digest
+### 9. Loop control, digest, landing on main
 
-Running under /loop: ScheduleWakeup (~1200 s idle pacing; the same /loop
-prompt) unless a stop condition hit — backlog empty, batch cap reached, or
-two consecutive blocked iterations. **On every stop, and on the `review`
-arg:** post the "what lately was done" digest as the final message — per
-queued item: title, what/why, diffstat, verification evidence, fit verdict,
-flags/dependencies; plus anything `[blocked]` and what the loop learned.
-Batch review then works on `agent-dev`:
+Running under /loop: ScheduleWakeup (~900–1800 s pacing; the same /loop
+prompt) unless a stop condition hit — backlog empty or two consecutive
+blocked iterations. **On every stop, and on the `review` arg:** post the
+"what lately was done" digest as the final message — per queued item: title,
+what/why, diffstat, verification evidence, fit verdict, flags/dependencies;
+plus anything `[blocked]` and what the loop learned.
 
-- take everything: `git merge --no-ff agent-dev` (on main)
-- reject one item first: `git revert -m 1 <merge-commit>` on agent-dev,
-  then merge
-- afterwards mark entries `[reviewed]` (or delete them) — the next
-  iteration's sync step resets agent-dev onto main and continues.
+**Landing on main (the human gate).** Only Florian's approval — in chat or
+by marking queue entries — moves work to main. Whatever the shape, messages
+read like regular development: NO trace-run IDs, loop/reviewer/
+revision-round mechanics, debugging narrative, or `.loop/` references —
+motivation phrased in terms of the problem and design, per the project's
+why-style. Two shapes, by item size:
+
+- **Tiny, or squashes to one atomic commit** (the common case): land it as a
+  single plain commit directly on main — no `land/*` branch, no merge
+  commit; the ceremony would outweigh the change. Small mechanical fallout
+  (fmt of neighboring files) folds in with a message note rather than
+  earning a second commit.
+- **Genuinely multi-commit items** (real reviewable seams — e.g. a
+  wide mechanical rename apart from the behavior change): compose a
+  `land/<slug>` branch from main with those clean commits, then
+  `git merge --no-ff land/<slug>` with a normal feature-headline merge
+  message, so main's first-parent history stays a sequence of feature-sized
+  steps while the detail sits one level down.
+
+The forensic detail stays on the `loop/*` branches and in the queue entries.
+A rejected item is instead `git revert -m 1 <merge-commit>`-ed on agent-dev
+and its branch dropped, with the reason noted in the backlog.
+
+After landing: reset `agent-dev` onto main, delete the landed `land/*` and
+`loop/*` branches, and remove (or mark `[reviewed]`) the queue entries.
