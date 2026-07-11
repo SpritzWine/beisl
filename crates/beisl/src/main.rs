@@ -4,8 +4,9 @@
 //!   (Steam launch option: `beisl %command%`; or one toggle in the SpritzWine panel.)
 //!
 //! It wraps an arbitrary game/command: configures MangoHud to log frametimes as a
-//! side-channel *spike index*, records CPU samples with `perf` scoped to the game's
-//! process tree, and (TODO) merges them into a symbolicated trace artifact.
+//! side-channel *spike index*, records CPU samples with `perf` across the session
+//! (system-wide; cgroup scoping is a roadmap item), and merges them into a symbolicated
+//! trace artifact (artifact.json + report.txt).
 //!
 //! Wine-agnostic by design — SpritzWine/Prater, stock Proton, GE, Lutris-wine,
 //! system wine, or a native Linux game. See DESIGN.md.

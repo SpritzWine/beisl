@@ -8,7 +8,8 @@
 //! lift. Shipped as its own binary so the wrapper stays a wrapper; nothing here runs
 //! unless a user wires `beisl-mcp` into their client's config.
 //!
-//! Tools (all read-only): `list_traces`, `get_artifact`, `get_report`, `get_log`.
+//! Tools (all read-only): `list_traces`, `get_setup_status`, `get_artifact`,
+//! `get_report`, `get_log`, `get_crash_summary`.
 //! Deleting and analyzing stay in the GUI/CLI, where a human confirms them.
 
 use std::io::{self, BufRead, Write};

@@ -19,7 +19,12 @@ See **[DESIGN.md](DESIGN.md)** for the architecture and roadmap.
 
 ## Install & use
 
-Beisl ships bundled with SpritzWine (or build it standalone — it works with any wine).
+Beisl ships bundled with SpritzWine, or grab it standalone from
+[Codeberg releases](https://codeberg.org/SpritzWine/beisl/releases): download
+`beisl-<version>-x86_64.tar.gz` (and `SHA256SUMS` to verify it), extract it, and run
+`./beisl-setup` or `./beisl install` from the extracted tree — same flow as below.
+(Or build it yourself — see **Build**.)
+
 From the extracted tree:
 
 ```sh
@@ -31,7 +36,7 @@ or headless:
 
 ```sh
 ./beisl install        # copies beisl onto your PATH (~/.local/bin) + adds "Beisl Setup" to the menu
-beisl --check          # prerequisite checklist in the terminal
+beisl --check          # prerequisite checklist in the terminal (alias: `beisl doctor`)
 ```
 
 Then add Beisl to a game's launch options — **Steam → Properties → Launch Options**:
@@ -41,15 +46,25 @@ beisl %command%
 ```
 
 Play, then close the game; the trace lands in `~/.local/share/beisl/traces/`. Works the
-same way as `mangohud %command%`, and with any Proton/Wine — not just SpritzWine.
-`beisl uninstall` removes it.
+same way as `mangohud %command%`, and with any Proton/Wine — not just SpritzWine. Mid-game
+you can also hit "Stop & save" in the session window: the recorder stops and the trace is
+saved while the game keeps running, so you don't have to quit to keep a capture.
+`beisl-setup`'s **Traces** page lists every past run (newest first) — open one to see its
+results, reveal its folder, or delete it. `beisl uninstall` removes the install. Every
+binary takes `--version` (`beisl --version`, `beisl-setup --version`, `beisl-mcp --version`).
 
 ## Status
 
-Early (**v0**). The libcosmic setup page and the preflight/install plumbing work today;
-the wrapper sets up the environment and launches the game, while `perf` capture, symbol
-resolution, the artifact export and the MCP server are stubbed with their design pinned in
-DESIGN.md.
+Early (**v0**), but the core pipeline runs end to end: the wrapper sets up the
+environment, launches the game, records `perf` (system-wide for now — scoping the
+capture to just the game's cgroup is a later refinement), and resolves + merges it into
+`artifact.json`/`report.txt` (symbol fidelity depends on what the traced wine build
+carries — a build with debug info retained resolves more than a stripped one). The
+libcosmic setup app covers preflight/install, a trace library (browse past runs,
+analyze/discard, reveal the folder, delete), and the session window (live capture,
+"Stop & save" mid-game, and the results view). `beisl-mcp` serves that same library
+read-only over MCP. See DESIGN.md for the architecture and what's still ahead — an
+in-game overlay indicator, flamegraphs, and an A/B compare view.
 
 ## Build
 
@@ -83,8 +98,18 @@ client's configuration, e.g.:
 { "mcpServers": { "beisl": { "command": "beisl-mcp" } } }
 ```
 
-The client can then list your runs and read each run's analysis artifact, report,
-and logs — "which layer ate the frame in last night's session?" becomes a question
+It exposes six read-only tools:
+
+- `list_traces` — every run, newest first: id, game, start time, duration, analyzed?
+- `get_setup_status` — the preflight checklist (the same checks as `beisl --check`)
+- `get_artifact` — a run's analyzed trace as JSON: frame stats and spikes, the
+  per-layer CPU split (who ate the frame: kernel/driver/dxvk/wine/game), hottest
+  functions, diagnostics
+- `get_report` — the same analysis, human-readable prose
+- `get_log` — the tail of a run's `beisl`, `game`, or `perf` log
+- `get_crash_summary` — pre-chewed crash forensics for a run that "just died"
+
+Put together, "which layer ate the frame in last night's session?" becomes a question
 you can literally ask. Deleting and analyzing stay in the app, where a human
 confirms them.
 

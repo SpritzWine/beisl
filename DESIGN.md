@@ -70,6 +70,9 @@ and flips to the results view. **Discard** deletes the run dir. Because the wrap
 the trace by default, this ask is the normal path for a clean run — the window is where
 "analyze or throw away" is decided, not the launch-options wrapper. A crash never shows
 the ask: it's already analyzed, so the window opens straight on the results.
+*(2026-07-11)* Stop-&-save mid-game gets the same ask, under a **`Saved`** state whose
+caption says the game is still running — a complete trace never masquerades as a
+finished session.
 
 **The results view** (an `artifact.json` exists), top to bottom — the plain diagnosis
 first, the caveats last, in the layered wording the rest of the UI uses:
@@ -114,8 +117,10 @@ named layer — that would be fabrication.
 MangoHud-vs-`perf` clock alignment, a later refinement. v0 answers "what was the worst
 frametime" and "where did CPU go overall" honestly, if separately.
 
-**Reuse:** the identical results view opens from the v1 trace library for any past
-`artifact.json`; A/B compare (two artifacts side by side, tiers labeled) is v2.
+**Reuse (built, 2026-07-11):** the identical results view opens from the trace library —
+the library spawns the session window per run, so an un-analyzed past run lands on the
+same ask (analyze-on-demand); A/B compare (two artifacts side by side, tiers labeled)
+is v2.
 
 ## Wine-agnostic — a hard requirement, not a nice-to-have
 
@@ -181,10 +186,39 @@ crates/beisl            wrapper bin (`beisl %command%`):
    src/symbols.rs         `beisl symbols <run-dir>` — headless face of the analysis
 crates/symbol-resolver  perf.data -> wine symbols (`Exports` tier built; `Full` to come)
 crates/artifact         frametimes ⋈ symbols + diagnostics -> artifact.json + report.txt
---- v1 ---
-crates/beisl-gui        libcosmic control panel + session results view (the product surface)
-crates/beisl-mcp        serve the artifact to Claude
+--- v1 (built, 2026-07-11) ---
+crates/beisl-gui        libcosmic `beisl-setup`: preflight checklist + session window
+                        (the ask + results view) + trace library (the product surface)
+crates/beisl-mcp        `beisl-mcp` — read-only MCP server over the trace library
+                        (see *The MCP server* below)
 ```
+
+### The MCP server (2026-07-11)
+
+The flywheel needs an AI that can *read* the trace, so v1 ships `beisl-mcp` — and its
+design is mostly a list of refusals:
+
+- **A separate, opt-in binary.** The wrapper stays a wrapper for everyone who never
+  uses this. Nothing runs — or listens anywhere; the transport is the process's own
+  stdio, no ports, no sockets — until the user wires `beisl-mcp` into their AI
+  client's config. Inert by default is our consent stance, applied to AI access.
+- **Hand-rolled JSON-RPC 2.0 on `serde_json`, not the official SDK.** The SDK's async
+  runtime exists to schedule many concurrent sockets; this server has exactly one
+  pipe, one client, and microsecond file reads — all weight, no lift. The tipping
+  point is server-push notifications (which is also where rmcp starts earning its
+  keep): the day we want to *tell* the client "a run just finished" instead of being
+  asked, we revisit.
+- **Six tools, all read-only:** `list_traces`, `get_setup_status` (the preflight
+  checklist as advice — fix commands come back as text, never executed here),
+  `get_artifact`, `get_report`, `get_log` (tail-capped: launcher chains spam
+  megabytes and the useful lines cluster at the tail), and `get_crash_summary`
+  (pre-chewed forensics — see the hotkey-crash case study it automates). **Delete
+  and analyze deliberately have no MCP surface**: destroying a user's trace, or
+  spending seconds of CPU on it, stays a human click in the GUI/CLI.
+- **Next, per the vetted user conversations:** a poll-shaped `list_events(since)`
+  first, push maybe after. Spike slicing (`query_spike` — "which symbols were hot
+  *during* this hitch") is the real differentiator, but it needs time-bucketed
+  samples in the artifact first; it's awaiting a design pass, not a weekend.
 
 ### perf scoping
 
@@ -238,6 +272,9 @@ thin view over its state.
 | perf can record | CAP_PERFMON on perf **or** `perf_event_paranoid ≤ 0` | `setcap cap_perfmon+ep perf` (ELF perf) → else `sysctl …=-1` | yes |
 | MangoHud present | `which mangohud` | install `mangohud` | no (optional side-channel) |
 | disk headroom | `df` on the trace dir (≥ 5 GiB) | free space / pick a roomier folder (advisory) | warn |
+
+*This table predates the kernel-symbols, GPU dump-access, multi-GPU, and driver
+debug-symbols rows — `preflight` is the current roster.*
 
 **Status model:** `Pending → Checking → Ok | NeedsFix → Fixing → Ok | Failed`. Fixes that
 need root run through **`pkexec`** (a graphical PolicyKit prompt — no terminal password
@@ -394,6 +431,26 @@ raced per-frame skinning uploads, unfixable game-side (Volition is gone). Filed
 upstream as a comment on mesa#11557 with the dump pair; evidence archived at
 `/media/Data/xe-dump/` (xe devcoredumps + i915 error state + Mesa issue draft).
 
+## Case study: our own layers are suspects too (2026-07-11)
+
+Two incidents from the trace-library review session (The Settlers), both with the same
+moral: the tooling between us and the game can be the culprit.
+
+- **The MangoHud hotkey crash.** Stopping the frametime log via Shift+F2 with the HUD
+  visible aborted the game — an ImGui "cannot have an empty ID" assert *inside the
+  MangoHud layer* (upstream #2053; 0.8.2 affected). The measurement side-channel
+  crashed the thing it was measuring, and the whole story was one assert line buried
+  under hundreds of lines of loader spam in `game.log`. That digging is now a tool:
+  `get_crash_summary` automates exactly the forensics that diagnosed this — the
+  wrapper's verdict lines, the session's warnings, and the error-shaped lines from
+  the log tail.
+- **Version skew froze the window.** A fresh wrapper spawned the *installed*
+  `beisl-setup` from PATH — an older build that didn't know the new `Saved` state, so
+  the window sat frozen at "Recording" while the trace was long saved. `spawn_monitor`
+  now prefers the sibling binary next to the wrapper (same build by construction —
+  one bundle, one dist tree), PATH only as fallback: skew-proofing beats
+  install-preferring.
+
 ## The flywheel (why it's worth building)
 
 A creator who hits a stutter exports a **symbolicated, spike-annotated trace** and
@@ -409,19 +466,22 @@ hot-path roadmap. Creators generate exactly the profiling data the roadmap needs
   frametimes + symbols + diagnostics to `artifact.json`/`report.txt`, and the wrapper's
   post-run **policy** (crash → analyze; clean → offer/always/discard) drives it. `Full`
   tier (retained-DWARF build) and cgroup scoping still open.
-- **v1 (product):** libcosmic GUI + MCP server. Installer integration + the "Record
-  performance" toggle. The GUI's centrepiece is the **session-window analysis UI** (see
-  *Surfacing it: the ask, then the results view*): the Analyze/Discard **ask** as the
-  default view for a kept clean run, then the **results view** — layer split (the
-  *headline view* culprit
-  bar) + frametime spikes + issues, all read from `artifact.json`. Then the **trace
-  library** (list / open / export / delete) reusing that same view. (The per-DSO → layer
-  classification rollup the headline bar needs is **built** — the artifact carries a
-  `layers` field; see *Surfacing it*.)
+- **v1 (product):** libcosmic GUI + MCP server. **Shipped (2026-07-12):** the GUI's
+  centrepiece, the **session-window analysis UI** (see *Surfacing it*), is built — the
+  Analyze/Discard **ask** for a kept clean run (and for a mid-game `Saved` stop), then
+  the **results view**: the layer-split culprit bar + frametime chart, both with hover
+  readouts, + issues, all read from `artifact.json`. The **trace library** (list / open /
+  analyze-on-demand / export / delete) reuses that exact view by spawning the session
+  window per run. And the **MCP server** shipped as its own `beisl-mcp` binary (see *The
+  MCP server*) — six read-only tools, not a stub. Still open from this milestone: the
+  installer's "Record performance" toggle (it lives in the SpritzWine control panel, not
+  this repo) — plus the v0 debts, the `Full`/DWARF tier and cgroup scoping.
 - **v2 (polish):** in-game indicator via MangoHud overlay / libnotify; flamegraph;
   A/B compare view (SpritzWine vs Proton, side by side, tiers labeled).
 - **Case-study-driven additions (2026-07-05, see above):** devcoredump watcher in the
-  wrapper (v0/v1); dual-ICD detection + `VK_DRIVER_FILES` pinning in preflight (v1);
+  wrapper (**built 2026-07-11** — captures + clears dumps live, policy-gated for the
+  root-only case); dual-ICD detection + `VK_DRIVER_FILES` pinning in preflight
+  (**built 2026-07-11** — multi-GPU check + a GPU pin picker in the GUI);
   hang/device-loss as first-class A/B outcomes (v2).
 - **Flatpak (2026-07-11, see Packaging):** prototype the host-side-perf split via
   `flatpak-spawn --host` first, then a `…VulkanLayer.beisl` runtime extension (MVP,

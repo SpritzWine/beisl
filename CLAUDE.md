@@ -13,7 +13,8 @@ library, and the MCP server are built; the Full/DWARF symbol tier is still open.
 Main workspace (`Cargo.toml`, crates.io deps only, mostly std):
 
 - `crates/beisl` — the wrapper binary; subcommands: trace (default via `%command%`),
-  `check`, `install`/`uninstall`. `run.rs` orchestrates a trace; `mangohud.rs`,
+  `--check` (aliases `--preflight`, `doctor`), `install`/`uninstall`, `symbols <dir>`
+  (resolve a captured trace), `--version`. `run.rs` orchestrates a trace; `mangohud.rs`,
   `perf.rs`, `gpu.rs` handle the pieces.
 - `crates/preflight` — UI-agnostic setup checks (perf/llvm/paranoid/mangohud/GPU) +
   persisted config. Detection only; privileged fixes are *described* (`Fix` +
@@ -30,21 +31,23 @@ Main workspace (`Cargo.toml`, crates.io deps only, mostly std):
   workspace: it is its own workspace with its own `Cargo.lock` because libcosmic pulls
   ~48 rev-pinned git deps (wgpu/winit tree). Build it separately, only when touching it.
 
-Dependency direction: `beisl` and `beisl-gui` both depend on `preflight` + `session`;
-nothing depends on `beisl`.
+Dependency direction: `beisl`, `beisl-gui`, and `beisl-mcp` all depend on `preflight` +
+`session`; `beisl` and `beisl-gui` also depend on `artifact` (which itself depends on
+`symbol-resolver`); nothing depends on `beisl`.
 
 ## Commands (verified)
 
 ```sh
 cargo check --workspace          # main workspace, fast (excludes beisl-gui)
-cargo test --workspace           # inline unit tests (preflight, session, beisl)
+cargo test --workspace           # inline unit tests (all main-workspace crates)
 cargo clippy --workspace
 cargo fmt
 cargo check -p beisl             # or -p preflight, -p session, ...
 (cd crates/beisl-gui && cargo check)   # GUI: separate workspace; heavy git deps,
                                        # slow first build — skip unless GUI changed
 make                             # release-build BOTH workspaces + package the bundle
-                                 # tarball (beisl + beisl-setup + README/LICENSE) into dist/
+                                 # tarball (beisl + beisl-mcp + beisl-setup + README/LICENSE)
+                                 # into dist/
 ```
 
 ## Conventions

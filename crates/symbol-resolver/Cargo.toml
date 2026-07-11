@@ -1,6 +1,6 @@
 [package]
 name = "symbol-resolver"
-description = "Resolve perf.data addresses to wine symbols, wine-agnostic with tiered fidelity"
+description = "Resolve perf script samples to wine symbols via PE export tables, wine-agnostic with tiered fidelity and stack-layer classification"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true

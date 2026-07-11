@@ -1,6 +1,6 @@
 [package]
 name = "artifact"
-description = "The Beisl trace artifact: frametime side-channel ⋈ symbolicated perf samples"
+description = "The Beisl trace artifact: frametime side-channel ⋈ symbolicated perf samples, with per-layer CPU shares, a timeline, and a rendered report"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
