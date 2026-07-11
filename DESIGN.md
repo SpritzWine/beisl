@@ -40,6 +40,65 @@ game/driver, not wine or DXVK" obvious — a colorful stacked bar, or at minimum
 table. **Confirming a good game is good is a first-class result, not a null one**; the
 tool should say so with conviction, so a reviewer trusts it when it *does* finger wine.
 
+## Surfacing it: the ask, then the results view
+
+The engine below produces the data; this is how the **session window**
+(`beisl-setup --session <dir>`) turns it into "here's what dragged performance down."
+It builds on two things that already exist: the post-run **policy** (the wrapper decides,
+per outcome, whether to resolve — see below) and the self-describing **`artifact.json`**
+(`artifact::TraceArtifact`: `frame_stats`, `spikes`, `hot_symbols`, `diagnostics`, all
+tier-stamped). The window does *no* analysis logic itself — it binds to the serialized
+artifact, exactly as the setup page binds to `preflight`.
+
+**Post-run policy (built).** Analyzing every session is presumptuous — a clean run
+doesn't warrant the seconds to resolve or the tens of MB kept. So:
+- **Abnormal exit** — non-zero code, *or* a GPU hang the watcher saw (launcher chains can
+  launder the real exit code to 0, so the hang signal catches the "why did it crash"
+  case) — is **always analyzed**; the wrapper writes `artifact.json` + `report.txt` on the
+  spot.
+- **Clean exit** follows the `clean-run-analysis` preference: **`keep`** (default — the
+  wrapper is non-destructive: leave the raw trace in place, resolve nothing, and set
+  `session.analysis_offer`), `always` (resolve now), or `discard` (drop `perf.data`).
+  The default deliberately does *no* automatic work and throws *nothing* away — the
+  decision is the user's, made in the window.
+
+**The ask** (the default GUI surface — window sees `analysis_offer` and no
+`artifact.json`): a plain line ("Clean run — not analyzed yet") + two buttons. **Analyze**
+runs `TraceArtifact::build` on a background thread (the setup app's worker + `Tick`-poll
+pattern — resolve is ~seconds and must never block the event loop), writes the artifact,
+and flips to the results view. **Discard** deletes the run dir. Because the wrapper keeps
+the trace by default, this ask is the normal path for a clean run — the window is where
+"analyze or throw away" is decided, not the launch-options wrapper. A crash never shows
+the ask: it's already analyzed, so the window opens straight on the results.
+
+**The results view** (an `artifact.json` exists), top to bottom — the plain diagnosis
+first, the caveats last, in the layered wording the rest of the UI uses:
+
+1. **Header** — game · wine flavor · fidelity tier, with the `Exports`-tier caveat inline
+   so a partial trace is never read as a full one (the same rule that stamps every trace).
+2. **Frametime health** — avg fps · 1% low · worst, then the worst **spikes** as bookmarks
+   ("221 ms at 7.1s"): where it hitched.
+3. **The culprit** — *The headline view* above, rendered: the **layer split**
+   (kernel · GPU driver · game/JIT · DXVK/vkd3d · **wine**) as a stacked bar, then the top
+   hot symbols within the hot layers. This is the "who ate the frame" answer.
+4. **Issues** — the anonymous hot modules tied to their fix (`libvulkan_intel.so` 17% →
+   install mesa debuginfo; a wine PE → the `Full` tier), i.e. the *same* signals the
+   preflight `driver debug symbols` / `kernel symbols` checks predict, now confirmed
+   against the real trace. This is the "indicate about issues" surface.
+
+**One piece still to add to the artifact for step 3:** the per-DSO → layer classification
+(bucket each module into kernel/driver/JIT/DXVK/wine). The resolver already has the
+per-module counts; this is a classification pass whose rollup the artifact should carry as
+a `layers` field, so the headline bar reads it directly instead of re-deriving.
+
+**Honest gap:** spikes and hot-symbols are shown *side by side*, not correlated — telling
+*which* symbols were hot *during* a given spike needs timestamped samples plus
+MangoHud-vs-`perf` clock alignment, a later refinement. v0 answers "what was the worst
+frametime" and "where did CPU go overall" honestly, if separately.
+
+**Reuse:** the identical results view opens from the v1 trace library for any past
+`artifact.json`; A/B compare (two artifacts side by side, tiers labeled) is v2.
+
 ## Wine-agnostic — a hard requirement, not a nice-to-have
 
 A reviewer's whole point is "SpritzWine **vs** stock Proton," so Beisl must run on
@@ -97,14 +156,15 @@ build-id-keyed lookup to work uniformly.
 
 ```
 crates/beisl            wrapper bin (`beisl %command%`):
-   src/run.rs             orchestrate: env -> spawn game -> manage perf -> (artifact)
+   src/run.rs             orchestrate: env -> spawn game -> manage perf -> post-run policy
    src/mangohud.rs        drive MangoHud (frametime CSV + toggle hotkey); compose, don't vendor
-   src/perf.rs            perf recorder, cgroup-scoped to the game tree
+   src/perf.rs            perf recorder (system-wide; cgroup scoping still to come)
    src/cue.rs             audible feedback (v0 stand-in for the in-game indicator)
-crates/symbol-resolver  perf.data addresses -> wine symbols (the tiers above)   ← THE GATE
-crates/artifact         frametime side-channel ⋈ resolved samples -> one export file
+   src/symbols.rs         `beisl symbols <run-dir>` — headless face of the analysis
+crates/symbol-resolver  perf.data -> wine symbols (`Exports` tier built; `Full` to come)
+crates/artifact         frametimes ⋈ symbols + diagnostics -> artifact.json + report.txt
 --- v1 ---
-crates/beisl-gui        libcosmic control panel + results view (the product surface)
+crates/beisl-gui        libcosmic control panel + session results view (the product surface)
 crates/beisl-mcp        serve the artifact to Claude
 ```
 
@@ -326,10 +386,20 @@ hot-path roadmap. Creators generate exactly the profiling data the roadmap needs
 ## Roadmap
 
 - **v0 (engine):** wrapper + MangoHud env + cgroup-scoped perf + symbol-resolver +
-  raw artifact export + audio cue. Gated on the symbolication spike. No GUI/MCP yet.
-- **v1 (product):** libcosmic GUI (trace library: list / open / export / delete;
-  setup helper; spike → hot-symbols view) + MCP server. Installer integration + the
-  "Record performance" toggle.
+  raw artifact export + audio cue. **Gate cleared (2026-07-11):** the `Exports` tier is
+  built (`perf script` ⋈ PE export tables, proven on real captures), `artifact` merges
+  frametimes + symbols + diagnostics to `artifact.json`/`report.txt`, and the wrapper's
+  post-run **policy** (crash → analyze; clean → offer/always/discard) drives it. `Full`
+  tier (retained-DWARF build) and cgroup scoping still open.
+- **v1 (product):** libcosmic GUI + MCP server. Installer integration + the "Record
+  performance" toggle. The GUI's centrepiece is the **session-window analysis UI** (see
+  *Surfacing it: the ask, then the results view*): the Analyze/Discard **ask** as the
+  default view for a kept clean run, then the **results view** — layer split (the
+  *headline view* culprit
+  bar) + frametime spikes + issues, all read from `artifact.json`. Then the **trace
+  library** (list / open / export / delete) reusing that same view. Near-term artifact
+  add for the layer bar: a per-DSO → layer (`kernel/driver/JIT/DXVK/wine`) classification
+  rollup.
 - **v2 (polish):** in-game indicator via MangoHud overlay / libnotify; flamegraph;
   A/B compare view (SpritzWine vs Proton, side by side, tiers labeled).
 - **Case-study-driven additions (2026-07-05, see above):** devcoredump watcher in the
