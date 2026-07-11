@@ -1,0 +1,110 @@
+# Release pipeline (Codeberg / Forgejo Actions).
+#
+# Trigger: pushing a tag `v*` whose version matches Cargo.toml. Builds both
+# workspaces via `make` (the same dist tarball a local build produces) and
+# attaches it + SHA256SUMS to a Codeberg release for the tag.
+#
+# One-time repo setup on Codeberg:
+#   1. Settings → Units → enable Actions.
+#   2. Settings → Actions → Secrets → add RELEASE_TOKEN: an access token with
+#      repository write scope (user settings → Applications). The automatic
+#      Actions token cannot create releases, hence the explicit secret.
+#
+# Cut a release with:
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Prereleases follow SemVer: a hyphen in the version (v0.1.0-alpha.1, v1.0.0-rc.2,
+# with Cargo.toml carrying the same version) marks the Codeberg release as
+# pre-release automatically — no switch to forget.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    # The GUI workspace builds ~630 crates (libcosmic/wgpu tree) from cold —
+    # far beyond the regular runners' minutes-scale slots. The lazy lane is
+    # low-priority but may run for hours, which is the trade we want for a
+    # tag-rare release build.
+    runs-on: codeberg-medium-lazy
+    # Official Rust image: toolchain + gcc/make preinstalled. The GUI needs no
+    # build-time system libs — winit/xkbcommon load via dlopen at runtime.
+    container:
+      image: docker.io/library/rust:1
+    steps:
+      # No actions at all in this job: the runner executes actions (and their nested
+      # steps) inside the job container, and bare rust:1 has no node — which rules out
+      # actions/checkout and even composite actions nesting a Node step. Everything
+      # here is plain git/make/curl instead.
+      - name: Checkout
+        run: |
+          url="$FORGEJO_SERVER_URL/$FORGEJO_REPOSITORY"
+          git init -q .
+          git fetch -q --depth 1 "$url" "$FORGEJO_SHA" || git fetch -q --depth 1 "$url" "$FORGEJO_REF"
+          git checkout -q FETCH_HEAD
+
+      - name: Tag matches Cargo.toml
+        # The Makefile names the bundle after Cargo.toml's version; a mismatched
+        # tag would publish a tarball that contradicts its release page.
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          if [ "v$version" != "$FORGEJO_REF_NAME" ]; then
+            echo "tag $FORGEJO_REF_NAME does not match Cargo.toml v$version" >&2
+            exit 1
+          fi
+
+      - name: Build and package
+        run: make
+
+      - name: Collect release assets
+        # forgejo-release uploads everything in release-dir; dist/ also holds
+        # the unpacked bundle tree, so stage only the tarball + checksums.
+        run: |
+          mkdir -p dist/release
+          mv dist/beisl-*.tar.gz dist/release/
+          cd dist/release && sha256sum * > SHA256SUMS
+
+      - name: Publish release
+        # Straight Forgejo API, no action: forgejo-release is composite bash, but it
+        # nests an actions/cache step (Node), and the runner prepares nested actions
+        # inside the job container — the same "no node in rust:1" wall as checkout.
+        # Creating a release and attaching assets is two curl calls anyway.
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          set -eu
+          # Token hygiene, verified by crashing this script on purpose in a local
+          # container and grepping for a canary token: the token reaches curl via a
+          # header *file* (never a command line, so no ps/xtrace exposure), -sf keeps
+          # curl from echoing bodies/headers on errors, and the two lines that do
+          # expand the token swallow their own xtrace (the 2>/dev/null) so even a
+          # stray `bash -x` cannot print it.
+          { test -n "${RELEASE_TOKEN:-}"; } 2>/dev/null \
+            || { echo "RELEASE_TOKEN secret is not set" >&2; exit 1; }
+          api="$FORGEJO_SERVER_URL/api/v1/repos/$FORGEJO_REPOSITORY"
+          hdr=$(mktemp)
+          { printf 'Authorization: token %s\n' "$RELEASE_TOKEN" > "$hdr"; } 2>/dev/null
+          # SemVer: a hyphenated version is a prerelease.
+          case "$FORGEJO_REF_NAME" in *-*) pre=true ;; *) pre=false ;; esac
+          # Create the release for the tag — or, on a re-run, reuse the existing one.
+          # The `|| true` keeps set -e from killing the step at curl so the
+          # diagnostic below is what lands in the log.
+          resp=$(curl -sf -X POST "$api/releases" -H @"$hdr" \
+                   -H "Content-Type: application/json" \
+                   -d "{\"tag_name\":\"$FORGEJO_REF_NAME\",\"name\":\"$FORGEJO_REF_NAME\",\"prerelease\":$pre}" \
+                 || curl -sf "$api/releases/tags/$FORGEJO_REF_NAME" -H @"$hdr" || true)
+          id=$(printf '%s' "$resp" | grep -o '"id":[0-9]*' | head -n1 | cut -d: -f2)
+          test -n "$id" \
+            || { echo "could not create or find the release for $FORGEJO_REF_NAME (bad/missing token scope, or API unreachable)" >&2; exit 1; }
+          for f in dist/release/*; do
+            curl -sf -X POST "$api/releases/$id/assets?name=$(basename "$f")" \
+              -H @"$hdr" -F "attachment=@$f" -o /dev/null \
+              || { echo "failed to attach $(basename "$f") to release $id" >&2; exit 1; }
+            echo "attached: $(basename "$f")"
+          done
+          rm -f "$hdr"
+          echo "release $FORGEJO_REF_NAME published (prerelease=$pre)"
