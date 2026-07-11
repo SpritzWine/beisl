@@ -28,12 +28,15 @@ pub const AUTOSTART_LOG_SECS: u32 = 1;
 /// Configure `cmd`'s environment so MangoHud logs frametimes into `run_dir` for the
 /// whole session (auto-started, see [`AUTOSTART_LOG_SECS`]), sampling the GPU at
 /// `pci_dev` (see [`sample_pci_dev`]) when one is known.
-pub fn configure(cmd: &mut Command, run_dir: &Path, pci_dev: Option<&str>) {
+///
+/// Returns a note for `beisl.log` when a user-set key had to be overridden.
+pub fn configure(cmd: &mut Command, run_dir: &Path, pci_dev: Option<&str>) -> Option<String> {
     cmd.env("MANGOHUD", "1");
 
     // Append to any MANGOHUD_CONFIG the user already set rather than clobbering it
     // (for duplicate keys MangoHud takes the last occurrence, so ours win).
-    let mut cfg = std::env::var("MANGOHUD_CONFIG").unwrap_or_default();
+    let cfg_user = std::env::var("MANGOHUD_CONFIG").unwrap_or_default();
+    let mut cfg = cfg_user.clone();
     if !cfg.is_empty() {
         cfg.push(',');
     }
@@ -50,11 +53,33 @@ pub fn configure(cmd: &mut Command, run_dir: &Path, pci_dev: Option<&str>) {
     if let Some(addr) = pci_dev {
         cfg.push_str(&format!(",pci_dev={addr}"));
     }
+    // A user's own log_duration=N would auto-stop the always-on log after N seconds,
+    // quietly truncating CSV coverage for exactly the users most likely to carry a
+    // MangoHud config. Appended unconditionally: 0 disables the auto-stop (MangoHud
+    // skips the check entirely for 0), and appending — rather than stripping the
+    // user's key — also beats a log_duration from their config *file*, which MangoHud
+    // only reads alongside MANGOHUD_CONFIG under read_cfg=1 and then re-applies the
+    // env last. We can't see that file; last-wins means we don't have to.
+    cfg.push_str(",log_duration=0");
+    let overridden = user_cfg_value(&cfg_user, "log_duration").map(|v| {
+        format!("mangohud: overriding user log_duration={v} — the frametime CSV must cover the whole session")
+    });
     cmd.env("MANGOHUD_CONFIG", cfg);
 
     // TODO: for bare-wine / non-Steam launchers the Vulkan/GL layer must be enabled
     //   explicitly (Steam's mangohud integration and the `mangohud` prefix handle it
     //   for us; otherwise set VK_ADD_LAYER / the `mangohud` exec prefix).
+    overridden
+}
+
+/// The value of `key` in a comma-separated MangoHud config, if present (last wins,
+/// mirroring MangoHud's own parse).
+fn user_cfg_value<'a>(cfg: &'a str, key: &str) -> Option<&'a str> {
+    cfg.split(',')
+        .filter_map(|kv| kv.split_once('='))
+        .filter(|(k, _)| k.trim() == key)
+        .map(|(_, v)| v.trim())
+        .next_back()
 }
 
 /// The GPU MangoHud should sample, as its `pci_dev=` config value — `None` when we
@@ -131,7 +156,7 @@ mod tests {
             cfg,
             format!(
                 "output_folder=/tmp/run,toggle_logging={TOGGLE_KEY},\
-                 autostart_log={AUTOSTART_LOG_SECS},pci_dev={ARC_SLOT}"
+                 autostart_log={AUTOSTART_LOG_SECS},pci_dev={ARC_SLOT},log_duration=0"
             )
         );
 
@@ -158,7 +183,11 @@ mod tests {
             cfg.starts_with("fps_limit=60,"),
             "user config must survive: {cfg}"
         );
-        assert!(cfg.ends_with(&format!(",pci_dev={ARC_SLOT}")), "got: {cfg}");
+        assert!(cfg.contains(&format!(",pci_dev={ARC_SLOT}")), "got: {cfg}");
+        assert!(
+            cfg.ends_with(",log_duration=0"),
+            "the guard trails all: {cfg}"
+        );
 
         unsafe {
             std::env::remove_var("MANGOHUD_CONFIG");

@@ -65,7 +65,9 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
     if let Some(addr) = &mango_pci_dev {
         log.line(&format!("mangohud: sample GPU pci_dev={addr}"));
     }
-    mangohud::configure(&mut child, &run_dir, mango_pci_dev.as_deref());
+    if let Some(note) = mangohud::configure(&mut child, &run_dir, mango_pci_dev.as_deref()) {
+        log.line(&note);
+    }
 
     // Tee the child's stdout+stderr into game.log — Wine/vkd3d/DXVK diagnostics
     // (err: lines, device-lost messages) land on stderr, and inherited stdio alone is

@@ -69,14 +69,11 @@ multi-GPU boxes); the exit-status log line is labeled as the wrapper's, not the
 game's; `session.json`'s `game` is upgraded from the launcher argv guess to the real
 name once the MangoHud CSV appears; MangoHud logging is always-on (`autostart_log=1`
 — the CSV is flushed per frame, so frametimes survive up to a crash; the hotkey now
-pauses/resumes instead of arming).
+pauses/resumes instead of arming); a user's own `log_duration=N` no longer truncates
+the CSV (we append `log_duration=0` last — MangoHud resolves duplicate keys
+last-wins and 0 disables the auto-stop — with a beisl.log note when overriding).
 
-Still open:
-
-- **A user's own `log_duration=N`** in MANGOHUD_CONFIG still auto-stops the
-  always-on log after N seconds (we append no duplicate of that key), quietly
-  re-truncating CSV coverage for exactly the users most likely to carry a MangoHud
-  config.
+Still open: nothing at the moment.
 (The driver-hotspots half of the Outlaws follow-ups is handled too: the advisory
 "driver debug symbols" check probes each hardware ICD's build-id against
 `/usr/lib/debug/.build-id/` — debuginfod counts as covered — and names the
