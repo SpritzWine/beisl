@@ -90,12 +90,20 @@ jobs:
           { printf 'Authorization: token %s\n' "$RELEASE_TOKEN" > "$hdr"; } 2>/dev/null
           # SemVer: a hyphenated version is a prerelease.
           case "$FORGEJO_REF_NAME" in *-*) pre=true ;; *) pre=false ;; esac
+          # Release notes ride along when RELEASENOTES.md exists; jq does the JSON
+          # escaping (the rust image lacks it — same self-install the upstream
+          # release action does).
+          command -v jq >/dev/null || { apt-get -qq update && apt-get -qq install -y jq; } >/dev/null 2>&1
+          notes=""
+          test -f RELEASENOTES.md && notes=$(cat RELEASENOTES.md)
+          payload=$(jq -n --arg tag "$FORGEJO_REF_NAME" --arg body "$notes" --argjson pre "$pre" \
+                    '{tag_name:$tag, name:$tag, prerelease:$pre, body:$body}')
           # Create the release for the tag — or, on a re-run, reuse the existing one.
           # The `|| true` keeps set -e from killing the step at curl so the
           # diagnostic below is what lands in the log.
           resp=$(curl -sf -X POST "$api/releases" -H @"$hdr" \
                    -H "Content-Type: application/json" \
-                   -d "{\"tag_name\":\"$FORGEJO_REF_NAME\",\"name\":\"$FORGEJO_REF_NAME\",\"prerelease\":$pre}" \
+                   -d "$payload" \
                  || curl -sf "$api/releases/tags/$FORGEJO_REF_NAME" -H @"$hdr" || true)
           id=$(printf '%s' "$resp" | grep -o '"id":[0-9]*' | head -n1 | cut -d: -f2)
           test -n "$id" \
