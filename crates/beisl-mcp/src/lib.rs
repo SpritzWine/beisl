@@ -116,6 +116,8 @@ impl Server {
     fn dispatch(&self, name: &str, args: &Value) -> Result<String, String> {
         match name {
             "list_traces" => Ok(self.list_traces()),
+            "get_setup_status" => Ok(self.setup_status()),
+            "get_crash_summary" => self.crash_summary(args),
             "get_artifact" => self.read_run_file(args, ARTIFACT_FILE, None),
             "get_report" => self.read_run_file(args, REPORT_FILE, None),
             "get_log" => {
@@ -153,18 +155,139 @@ impl Server {
         json!({ "traces": runs, "traces_root": self.traces_root.display().to_string() }).to_string()
     }
 
+    /// The preflight checklist, read-only — the same assembly `beisl --check` and the
+    /// setup page render, so an AI can explain *why* a trace looks the way it does
+    /// ("60% of driver samples unnamed → the debug-symbols row is red") and name the
+    /// remedy. Fix commands are returned as text and never executed here: advising is
+    /// MCP's job, privilege stays behind the GUI's pkexec click (the consent stance).
+    fn setup_status(&self) -> String {
+        let distro = preflight::detect_distro();
+        let mut checks = preflight::all_checks();
+        for c in checks.iter_mut() {
+            c.detect();
+        }
+        checks.push(preflight::disk_check(&self.traces_root));
+        checks.push(preflight::gpu_dump_check());
+        checks.push(preflight::multi_gpu_check());
+        checks.push(preflight::driver_debuginfo_check());
+
+        let rows: Vec<Value> = checks
+            .iter()
+            .map(|c| {
+                let status = match &c.status {
+                    preflight::Status::Ok => "ok".to_string(),
+                    preflight::Status::NeedsFix => "needs setup".to_string(),
+                    preflight::Status::Failed(e) => format!("failed: {e}"),
+                    other => format!("{other:?}"),
+                };
+                let fix = c.fix.as_ref().map(|f| {
+                    let cmd = preflight::fix_command(f, distro);
+                    if cmd.is_empty() {
+                        Value::String("(install manually — unknown for this distro)".into())
+                    } else {
+                        Value::String(cmd.join(" "))
+                    }
+                });
+                json!({
+                    "id": format!("{:?}", c.id),
+                    "label": c.label,
+                    "status": status,
+                    "blocking": c.blocking,
+                    "why": c.why,
+                    "fix_command": fix,
+                })
+            })
+            .collect();
+        json!({
+            "distro_family": format!("{distro:?}"),
+            "checks": rows,
+            "note": "fix_command is advice for the user to run themselves (or via the \
+                     setup app) — this server never executes anything."
+        })
+        .to_string()
+    }
+
+    /// Pre-chewed crash forensics: the ten lines that matter instead of megabytes of
+    /// launcher spam — the wrapper's verdict lines, the session's own warnings (that's
+    /// where GPU-hang findings land), and the error-shaped lines from the game log's
+    /// tail. Shaped by a real case: a MangoHud ImGui assert in game.log was the whole
+    /// story of a "the game just died" report (upstream #2053).
+    fn crash_summary(&self, args: &Value) -> Result<String, String> {
+        /// A game.log line is worth surfacing when it smells like one of these.
+        /// Lowercase; matched case-insensitively.
+        const SIGNALS: &[&str] = &[
+            "err:",   // wine's own error channel
+            "error",  // MANGOHUD [error], generic loaders
+            "assert", // assertion failures (the #2053 shape)
+            "abort",
+            "panic",
+            "traceback",
+            "exception",
+            "segfault",
+            "sigsegv",
+            "device lost",
+            "device_lost",
+            "out of memory",
+        ];
+        const MAX_LINES: usize = 40;
+        const MAX_LINE_LEN: usize = 300;
+
+        let id = self.run_id(args)?;
+        let dir = self.traces_root.join(&id);
+        let session = session::Session::read(&dir);
+
+        // The wrapper's own log: launch, exit status, post-run verdict, GPU events.
+        let wrapper: Vec<String> = std::fs::read_to_string(dir.join("beisl.log"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| {
+                let ll = l.to_lowercase();
+                ll.contains("exited")
+                    || ll.contains("post-run")
+                    || ll.contains("error")
+                    || ll.contains("gpu")
+            })
+            .map(|l| clip(l, MAX_LINE_LEN))
+            .collect();
+
+        // Error-shaped lines from the tail of the game/launcher output.
+        let game_log = std::fs::read(dir.join("game.log")).unwrap_or_default();
+        let tail_start = game_log.len().saturating_sub(LOG_TAIL_BYTES as usize);
+        let tail = String::from_utf8_lossy(&game_log[tail_start..]);
+        let mut errors: Vec<String> = tail
+            .lines()
+            .filter(|l| {
+                let ll = l.to_lowercase();
+                SIGNALS.iter().any(|s| ll.contains(s))
+            })
+            .map(|l| clip(l, MAX_LINE_LEN))
+            .collect();
+        let dropped = errors.len().saturating_sub(MAX_LINES);
+        if dropped > 0 {
+            errors.drain(..dropped);
+        }
+
+        Ok(json!({
+            "run_id": id,
+            "game": session.as_ref().map(|s| s.game.clone()),
+            "state": session.as_ref().map(|s| format!("{:?}", s.state)),
+            "message": session.as_ref().map(|s| s.message.clone()),
+            "elapsed_secs": session.as_ref().map(|s| s.elapsed_secs),
+            "warnings": session.as_ref().map(|s| s.warnings.clone()),
+            "wrapper_log": wrapper,
+            "game_log_errors": errors,
+            "game_log_errors_dropped": dropped,
+            "analyzed": dir.join(ARTIFACT_FILE).is_file(),
+        })
+        .to_string())
+    }
+
     /// Read one well-known file out of one run dir. The run_id gate mirrors
     /// `library::delete_run`'s stance: only `run-*` names, no path fragments — the
     /// filename itself is never user input.
     fn read_run_file(&self, args: &Value, file: &str, tail: Option<u64>) -> Result<String, String> {
-        let id = args
-            .get("run_id")
-            .and_then(Value::as_str)
-            .ok_or("run_id is required (see list_traces)")?;
-        if !id.starts_with("run-") || id.contains('/') || id.contains("..") {
-            return Err(format!("not a run id: {id}"));
-        }
-        let path = self.traces_root.join(id).join(file);
+        let id = self.run_id(args)?;
+        let path = self.traces_root.join(&id).join(file);
         let data = std::fs::read(&path)
             .map_err(|e| format!("{id}/{file}: {e} (is the run analyzed? see list_traces)"))?;
         let text = match tail {
@@ -181,6 +304,32 @@ impl Server {
     }
 }
 
+impl Server {
+    /// The run_id gate every path-touching tool goes through — mirrors
+    /// `library::delete_run`'s stance: only `run-*` names, no path fragments.
+    fn run_id(&self, args: &Value) -> Result<String, String> {
+        let id = args
+            .get("run_id")
+            .and_then(Value::as_str)
+            .ok_or("run_id is required (see list_traces)")?;
+        if !id.starts_with("run-") || id.contains('/') || id.contains("..") {
+            return Err(format!("not a run id: {id}"));
+        }
+        Ok(id.to_string())
+    }
+}
+
+fn clip(line: &str, max: usize) -> String {
+    if line.len() <= max {
+        return line.to_string();
+    }
+    let mut cut = max;
+    while !line.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}…", &line[..cut])
+}
+
 fn tools_list() -> Value {
     let run_id =
         json!({ "type": "string", "description": "A run id from list_traces (run-<unix_ts>)" });
@@ -190,6 +339,15 @@ fn tools_list() -> Value {
             "description": "List all recorded game-performance runs, newest first: run_id, \
                             game, start time, duration, and whether an analysis artifact \
                             exists.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        },
+        {
+            "name": "get_setup_status",
+            "description": "The preflight checklist, read-only: perf, symbolizer, paranoid \
+                            level, MangoHud, disk, GPU dump access, multi-GPU, driver debug \
+                            symbols — each with status, why it matters, and the fix command \
+                            as text (never executed). Use it to explain missing symbol names \
+                            or to advise setup.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         },
         {
@@ -219,6 +377,16 @@ fn tools_list() -> Value {
                                  "log": { "type": "string", "enum": ["beisl", "game", "perf"] }
                              },
                              "required": ["run_id", "log"], "additionalProperties": false }
+        },
+        {
+            "name": "get_crash_summary",
+            "description": "Pre-chewed crash forensics for a run: the wrapper's exit/\
+                            post-run verdict lines, the session's warnings (GPU hangs \
+                            land there), and the error-shaped lines from the game log \
+                            tail (wine err:, asserts, aborts, device-lost, MangoHud \
+                            errors). Start here when a game 'just died'.",
+            "inputSchema": { "type": "object", "properties": { "run_id": run_id },
+                             "required": ["run_id"], "additionalProperties": false }
         }
     ]})
 }
@@ -281,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn the_four_tools_are_listed() {
+    fn the_six_tools_are_listed() {
         let server = Server::new(fixture_root("list"));
         let resp = call(
             &server,
@@ -295,7 +463,14 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            ["list_traces", "get_artifact", "get_report", "get_log"]
+            [
+                "list_traces",
+                "get_setup_status",
+                "get_artifact",
+                "get_report",
+                "get_log",
+                "get_crash_summary"
+            ]
         );
     }
 
@@ -338,6 +513,30 @@ mod tests {
     }
 
     #[test]
+    fn setup_status_reports_every_check_with_advice_shape() {
+        let server = Server::new(fixture_root("setup"));
+        let resp = call(
+            &server,
+            json!({"jsonrpc":"2.0","id":9,"method":"tools/call",
+                   "params":{"name":"get_setup_status","arguments":{}}}),
+        );
+        assert_eq!(resp["result"]["isError"], false);
+        let status: Value =
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let checks = status["checks"].as_array().unwrap();
+        // Statuses are host-dependent; the shape and the roster are not.
+        assert!(checks.len() >= 8, "expected the full checklist");
+        let ids: Vec<&str> = checks.iter().map(|c| c["id"].as_str().unwrap()).collect();
+        for expected in ["Perf", "MangoHud", "DiskSpace", "MultiGpu"] {
+            assert!(ids.contains(&expected), "missing {expected} in {ids:?}");
+        }
+        for c in checks {
+            assert!(c["label"].is_string() && c["status"].is_string() && c["why"].is_string());
+        }
+        assert!(status["distro_family"].is_string());
+    }
+
+    #[test]
     fn path_shaped_run_ids_are_refused() {
         let root = fixture_root("sec");
         put_run(&root, "run-100", true);
@@ -367,6 +566,59 @@ mod tests {
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.starts_with("[…"));
         assert!(text.len() < big.len());
+    }
+
+    #[test]
+    fn crash_summary_surfaces_the_signal_not_the_spam() {
+        let root = fixture_root("crash");
+        put_run(&root, "run-100", false);
+        let dir = root.join("run-100");
+        std::fs::write(
+            dir.join("beisl.log"),
+            "12.3s launched pid 4242\n\
+             99.1s launched command exited: exit status: 0 (with launcher chains this is the wrapper's status, not the game's), trace 16319876 bytes\n\
+             99.1s post-run: clean exit — leaving raw trace in place\n",
+        )
+        .unwrap();
+        // Real-world shape: thousands of benign loader lines around one fatal assert
+        // (the MangoHud #2053 crash as captured in an actual game.log).
+        let mut game = String::new();
+        for _ in 0..500 {
+            game.push_str(
+                "gamemodeauto: dlopen failed - libgamemode.so: cannot open shared object file\n",
+            );
+        }
+        game.push_str("../subprojects/imgui-1.91.6/imgui.cpp:10783: bool ImGui::ItemAdd(const ImRect&, ImGuiID, const ImRect*, ImGuiItemFlags): Assertion `id != window->ID && \"Cannot have an empty ID\"' failed.\n");
+        game.push_str("some ordinary shutdown line\n");
+        std::fs::write(dir.join("game.log"), game).unwrap();
+
+        let server = Server::new(root);
+        let resp = call(
+            &server,
+            json!({"jsonrpc":"2.0","id":10,"method":"tools/call",
+                   "params":{"name":"get_crash_summary","arguments":{"run_id":"run-100"}}}),
+        );
+        assert_eq!(resp["result"]["isError"], false);
+        let sum: Value =
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let errors = sum["game_log_errors"].as_array().unwrap();
+        assert!(
+            errors
+                .iter()
+                .any(|l| l.as_str().unwrap().contains("Assertion")),
+            "the assert must surface: {errors:?}"
+        );
+        // dlopen spam matches no signal; the summary stays context-cheap.
+        assert!(
+            errors.len() <= 2,
+            "spam leaked through: {} lines",
+            errors.len()
+        );
+        let wrapper = sum["wrapper_log"].as_array().unwrap();
+        assert!(wrapper
+            .iter()
+            .any(|l| l.as_str().unwrap().contains("exited: exit status: 0")));
+        assert_eq!(sum["analyzed"], false);
     }
 
     #[test]
