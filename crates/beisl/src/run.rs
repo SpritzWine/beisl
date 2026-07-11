@@ -24,7 +24,10 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
     let (envs, prog) = split_env_prefix(cmd);
     if prog.is_empty() {
         log.line("error: nothing to run after env assignments");
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "no program to run"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "no program to run",
+        ));
     }
     if !envs.is_empty() {
         log.line(&format!("env prefix = {envs:?}"));
@@ -78,7 +81,9 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
         }
         Err(e) => {
             // Inherited stdio stays in place — the game still runs, just uncaptured.
-            log.line(&format!("game.log: couldn't create ({e}) — child output not captured"));
+            log.line(&format!(
+                "game.log: couldn't create ({e}) — child output not captured"
+            ));
             None
         }
     };
@@ -187,7 +192,10 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
         // that beats the argv guess (which names the wrapper, e.g. "upc.exe").
         if let Some(game) = mangohud_game_name(&run_dir) {
             if sess.game != game {
-                log.line(&format!("game name from MangoHud csv: {game} (was: {})", sess.game));
+                log.line(&format!(
+                    "game name from MangoHud csv: {game} (was: {})",
+                    sess.game
+                ));
                 sess.game = game;
             }
         }
@@ -222,7 +230,10 @@ fn drain_gpu_events(watch: &mut gpu::GpuWatch, log: &mut Log, sess: &mut Session
     for ev in watch.poll() {
         match ev {
             gpu::Event::Captured { card, dest } => {
-                log.line(&format!("gpu: devcoredump on {card} captured -> {}", dest.display()));
+                log.line(&format!(
+                    "gpu: devcoredump on {card} captured -> {}",
+                    dest.display()
+                ));
                 let file = dest
                     .file_name()
                     .map(|s| s.to_string_lossy().into_owned())
@@ -235,7 +246,10 @@ fn drain_gpu_events(watch: &mut gpu::GpuWatch, log: &mut Log, sess: &mut Session
                 ));
             }
             gpu::Event::Unreadable { card, node } => {
-                log.line(&format!("gpu: devcoredump pending on {card} but root-only ({})", node.display()));
+                log.line(&format!(
+                    "gpu: devcoredump pending on {card} but root-only ({})",
+                    node.display()
+                ));
                 // Offer the one-click enable only under the warn-only policy.
                 let offer = preflight::Config::load().dump_access_policy
                     == preflight::DumpAccessPolicy::WarnOnly;
@@ -482,7 +496,10 @@ mod tests {
                      /usr/share/vulkan/icd.d/intel_icd.i686.json"
                         .to_string()
                 ),
-                ("MESA_VK_DEVICE_SELECT".to_string(), "8086:56a0!".to_string()),
+                (
+                    "MESA_VK_DEVICE_SELECT".to_string(),
+                    "8086:56a0!".to_string()
+                ),
             ]
         );
     }
@@ -538,7 +555,10 @@ mod tests {
             icd_paths: vec!["/a.json".into()],
             device_select: None,
         };
-        let cfg = preflight::Config { gpu_pin: Some(pin.clone()), ..Default::default() };
+        let cfg = preflight::Config {
+            gpu_pin: Some(pin.clone()),
+            ..Default::default()
+        };
         let label = cfg.gpu_pin.as_ref().map(|p| p.name.clone());
         assert_eq!(label.as_deref(), Some(pin.name.as_str()));
     }

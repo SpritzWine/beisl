@@ -99,7 +99,10 @@ impl GpuWatch {
         if let Ok(entries) = std::fs::read_dir(&self.base) {
             for e in entries.flatten() {
                 let name = e.file_name().to_string_lossy().into_owned();
-                if name.strip_prefix("card").is_some_and(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit())) {
+                if name
+                    .strip_prefix("card")
+                    .is_some_and(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()))
+                {
                     cards.push(name);
                 }
             }

@@ -124,7 +124,10 @@ mod tests {
         }
 
         // Default when nothing is written yet.
-        assert_eq!(Config::load().dump_access_policy, DumpAccessPolicy::WarnOnly);
+        assert_eq!(
+            Config::load().dump_access_policy,
+            DumpAccessPolicy::WarnOnly
+        );
 
         let cfg = Config {
             dump_access_policy: DumpAccessPolicy::RuleInstalled,

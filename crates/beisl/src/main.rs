@@ -15,9 +15,9 @@ use std::process::ExitCode;
 
 mod check;
 mod cue;
+mod gpu;
 mod install;
 mod mangohud;
-mod gpu;
 mod perf;
 mod run;
 

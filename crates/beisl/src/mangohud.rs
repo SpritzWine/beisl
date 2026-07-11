@@ -110,7 +110,10 @@ mod tests {
 
         let mut cmd = Command::new("true");
         configure(&mut cmd, Path::new("/tmp/run"), None);
-        assert!(!mangohud_config(&cmd).contains("pci_dev"), "no GPU known — key must be absent");
+        assert!(
+            !mangohud_config(&cmd).contains("pci_dev"),
+            "no GPU known — key must be absent"
+        );
     }
 
     #[test]
@@ -124,7 +127,10 @@ mod tests {
         let mut cmd = Command::new("true");
         configure(&mut cmd, Path::new("/tmp/run"), Some("0000:03:00.0"));
         let cfg = mangohud_config(&cmd);
-        assert!(cfg.starts_with("fps_limit=60,"), "user config must survive: {cfg}");
+        assert!(
+            cfg.starts_with("fps_limit=60,"),
+            "user config must survive: {cfg}"
+        );
         assert!(cfg.ends_with(",pci_dev=0000:03:00.0"), "got: {cfg}");
 
         unsafe {
@@ -145,8 +151,10 @@ mod tests {
     /// MangoHud's sampler had picked the idle iGPU; the pin must aim it at the Arc.
     #[test]
     fn pinned_gpu_wins_over_everything() {
-        let gpus =
-            vec![gpu("0x1002", "0x164e", "0000:16:00.0"), gpu("0x8086", "0x56a0", "0000:03:00.0")];
+        let gpus = vec![
+            gpu("0x1002", "0x164e", "0000:16:00.0"),
+            gpu("0x8086", "0x56a0", "0000:03:00.0"),
+        ];
         let pin = GpuPin {
             name: "Intel — intel_icd (/usr/share/vulkan/icd.d)".into(),
             icd_paths: vec!["/usr/share/vulkan/icd.d/intel_icd.x86_64.json".into()],
@@ -161,11 +169,20 @@ mod tests {
     #[test]
     fn unpinned_defaults_to_the_sole_gpu_and_refuses_to_guess_between_several() {
         let one = vec![gpu("0x8086", "0x56a0", "0000:03:00.0")];
-        assert_eq!(sample_pci_dev_from(None, &one).as_deref(), Some("0000:03:00.0"));
+        assert_eq!(
+            sample_pci_dev_from(None, &one).as_deref(),
+            Some("0000:03:00.0")
+        );
 
-        let two =
-            vec![gpu("0x1002", "0x164e", "0000:16:00.0"), gpu("0x8086", "0x56a0", "0000:03:00.0")];
-        assert_eq!(sample_pci_dev_from(None, &two), None, "ambiguous — must not guess");
+        let two = vec![
+            gpu("0x1002", "0x164e", "0000:16:00.0"),
+            gpu("0x8086", "0x56a0", "0000:03:00.0"),
+        ];
+        assert_eq!(
+            sample_pci_dev_from(None, &two),
+            None,
+            "ambiguous — must not guess"
+        );
     }
 
     #[test]
@@ -182,7 +199,10 @@ mod tests {
             Some("0000:03:00.0")
         );
         // No selector on the pin at all behaves the same.
-        let pin = GpuPin { device_select: None, ..pin };
+        let pin = GpuPin {
+            device_select: None,
+            ..pin
+        };
         assert_eq!(
             sample_pci_dev_from(Some(&pin), &one).as_deref(),
             Some("0000:03:00.0")

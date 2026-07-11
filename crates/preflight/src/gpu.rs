@@ -99,7 +99,12 @@ pub fn scan_icd_dirs(dirs: &[PathBuf]) -> Vec<IcdManifest> {
             let Some(library_path) = json_string_field(&text, "library_path") else {
                 continue;
             };
-            out.push(IcdManifest { json_path: path, library_path, family, arch });
+            out.push(IcdManifest {
+                json_path: path,
+                library_path,
+                family,
+                arch,
+            });
         }
     }
     out
@@ -178,7 +183,12 @@ pub fn scan_drm(base: &Path) -> Vec<PhysicalGpu> {
                             .map(|v| v.trim().to_ascii_lowercase())
                     })
                 });
-            Some(PhysicalGpu { card, vendor_id, device_id, pci_slot })
+            Some(PhysicalGpu {
+                card,
+                vendor_id,
+                device_id,
+                pci_slot,
+            })
         })
         .collect()
 }
@@ -247,7 +257,11 @@ pub fn detect_candidates() -> Vec<GpuPinCandidate> {
 pub fn build_candidates(manifests: &[IcdManifest], gpus: &[PhysicalGpu]) -> Vec<GpuPinCandidate> {
     let mut groups: BTreeMap<(PathBuf, String), Vec<&IcdManifest>> = BTreeMap::new();
     for m in manifests {
-        let dir = m.json_path.parent().unwrap_or_else(|| Path::new("")).to_path_buf();
+        let dir = m
+            .json_path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .to_path_buf();
         groups.entry((dir, m.family.clone())).or_default().push(m);
     }
 
@@ -267,19 +281,26 @@ pub fn build_candidates(manifests: &[IcdManifest], gpus: &[PhysicalGpu]) -> Vec<
         let vendor_id = family_vendor(&family);
         // Only surface candidates for a vendor we can actually see hardware for — keeps the
         // picker to real GPUs on this machine, not every driver family Mesa ships.
-        let Some(matched) = vendor_id.and_then(|v| gpus.iter().find(|g| g.vendor_id.as_deref() == Some(v)))
+        let Some(matched) =
+            vendor_id.and_then(|v| gpus.iter().find(|g| g.vendor_id.as_deref() == Some(v)))
         else {
             continue;
         };
         let vendor_word = vendor_id.map(vendor_name).unwrap_or("GPU");
         let name = format!("{vendor_word} \u{2014} {family} ({})", dir.display());
         let device_select = match (&matched.vendor_id, &matched.device_id) {
-            (Some(v), Some(d)) => {
-                Some(format!("{}:{}!", v.trim_start_matches("0x"), d.trim_start_matches("0x")))
-            }
+            (Some(v), Some(d)) => Some(format!(
+                "{}:{}!",
+                v.trim_start_matches("0x"),
+                d.trim_start_matches("0x")
+            )),
             _ => None,
         };
-        out.push(GpuPinCandidate { name, icd_paths, device_select });
+        out.push(GpuPinCandidate {
+            name,
+            icd_paths,
+            device_select,
+        });
     }
     out
 }
@@ -324,20 +345,41 @@ mod tests {
     fn classifies_hardware_vs_software_icds() {
         let tmp = TempDir::new("classify");
         let dir = tmp.path().join("icd.d");
-        write_icd(&dir, "intel_icd.x86_64.json", "/usr/lib64/libvulkan_intel.so");
+        write_icd(
+            &dir,
+            "intel_icd.x86_64.json",
+            "/usr/lib64/libvulkan_intel.so",
+        );
         write_icd(&dir, "intel_icd.i686.json", "/usr/lib/libvulkan_intel.so");
         write_icd(&dir, "lvp_icd.x86_64.json", "/usr/lib64/libvulkan_lvp.so");
         write_icd(&dir, "dzn_icd.x86_64.json", "/usr/lib64/libvulkan_dzn.so");
-        write_icd(&dir, "virtio_icd.x86_64.json", "/usr/lib64/libvulkan_virtio.so");
-        write_icd(&dir, "radeon_icd.x86_64.json", "/usr/lib64/libvulkan_radeon.so");
+        write_icd(
+            &dir,
+            "virtio_icd.x86_64.json",
+            "/usr/lib64/libvulkan_virtio.so",
+        );
+        write_icd(
+            &dir,
+            "radeon_icd.x86_64.json",
+            "/usr/lib64/libvulkan_radeon.so",
+        );
 
         let manifests = scan_icd_dirs(&[dir]);
         let families: Vec<&str> = manifests.iter().map(|m| m.family.as_str()).collect();
         assert!(families.contains(&"intel_icd"));
         assert!(families.contains(&"radeon_icd"));
-        assert!(!families.contains(&"lvp_icd"), "lavapipe must be excluded: {families:?}");
-        assert!(!families.contains(&"dzn_icd"), "dzn must be excluded: {families:?}");
-        assert!(!families.contains(&"virtio_icd"), "virtio must be excluded: {families:?}");
+        assert!(
+            !families.contains(&"lvp_icd"),
+            "lavapipe must be excluded: {families:?}"
+        );
+        assert!(
+            !families.contains(&"dzn_icd"),
+            "dzn must be excluded: {families:?}"
+        );
+        assert!(
+            !families.contains(&"virtio_icd"),
+            "virtio must be excluded: {families:?}"
+        );
 
         let intel_x64 = manifests
             .iter()
@@ -470,7 +512,11 @@ mod tests {
             .iter()
             .find(|c| c.name.contains("/usr/local"))
             .expect("local install candidate");
-        assert_eq!(local.icd_paths.len(), 1, "no i686 counterpart was installed locally");
+        assert_eq!(
+            local.icd_paths.len(),
+            1,
+            "no i686 counterpart was installed locally"
+        );
         assert_eq!(local.device_select.as_deref(), Some("8086:56a0!"));
     }
 

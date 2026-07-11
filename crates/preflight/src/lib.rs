@@ -45,6 +45,17 @@ pub enum CheckId {
     /// Saints Row case study. No privileged fix; the remedy is picking a pin in the GUI's
     /// Advanced section (see [`multi_gpu_check`]).
     MultiGpu,
+    /// Optional, informational: the kernel hides kallsyms addresses from us, so
+    /// kernel-side samples in a trace stay anonymous (the Outlaws crash trace lost its
+    /// crash-adjacent kernel activity to exactly this). Detection reads `/proc/kallsyms`
+    /// — reality, not the knobs: visibility needs `kptr_restrict=0` AND
+    /// `perf_event_paranoid <= 1` (the kernel's `kallsyms_for_perf()` gate), or
+    /// CAP_SYSLOG, which our setcap fix deliberately doesn't grant (CAP_PERFMON lets
+    /// perf *record* kernel samples, not *name* them). No auto-fix: lowering those knobs
+    /// is a system-wide hardening rollback that must not ride along in the "set
+    /// everything up" sweep — the same consent line that keeps [`gpu_dump_check`] out of
+    /// it. The `why` carries the manual command instead.
+    KptrRestrict,
 }
 
 /// How to repair a failing check. Turned into a concrete `pkexec` argv by [`fix_command`].
@@ -53,7 +64,10 @@ pub enum Fix {
     /// Install a package; `role` is mapped to the distro's package name at fix time.
     InstallPackage { role: &'static str },
     /// Lower a sysctl (root-only, hence `pkexec`). The blunt fallback.
-    Sysctl { key: &'static str, value: &'static str },
+    Sysctl {
+        key: &'static str,
+        value: &'static str,
+    },
     /// Grant `perf` CAP_PERFMON — least-privilege, no global change, output stays
     /// user-owned. Preferred where `perf` is a real ELF binary; on Debian's wrapper
     /// script it doesn't stick, so [`perf_record_fix`] picks `Sysctl` there instead.
@@ -99,12 +113,13 @@ impl Check {
             CheckId::LlvmSymbolizer => ok_or_fix(which("llvm-symbolizer").is_some()),
             CheckId::MangoHud => ok_or_fix(which("mangohud").is_some()),
             CheckId::PerfParanoid => {
-                let can_record = perf_has_perfmon()
-                    || matches!(read_paranoid(), Some(v) if v <= PARANOID_MAX);
+                let can_record =
+                    perf_has_perfmon() || matches!(read_paranoid(), Some(v) if v <= PARANOID_MAX);
                 ok_or_fix(can_record)
             }
             CheckId::GpuDumpAccess => dump_access_status(),
             CheckId::MultiGpu => multi_gpu_status(&gpu::physical_gpus()),
+            CheckId::KptrRestrict => ok_or_fix(kernel_symbols_visible()),
             CheckId::DiskSpace => return, // computed in `disk_check`
         };
     }
@@ -134,10 +149,25 @@ pub fn all_checks() -> Vec<Check> {
             id: CheckId::PerfParanoid,
             label: "perf can record",
             why: "The kernel restricts profiling by default; we grant perf the CAP_PERFMON \
-                  capability so it can record without weakening the whole system.".into(),
+                  capability so it can record without weakening the whole system."
+                .into(),
             blocking: true,
             status: Status::Pending,
             fix: Some(perf_record_fix()),
+        },
+        Check {
+            id: CheckId::KptrRestrict,
+            label: "kernel symbols (optional)",
+            why: "Time spent inside the kernel (drivers, syscalls) shows up as nameless \
+                  addresses while the kernel hides its symbol table. Game and wine symbols \
+                  get names either way; to also name kernel time, a system administrator \
+                  can run `sysctl kernel.kptr_restrict=0 kernel.perf_event_paranoid=1` \
+                  (in effect until reboot). That weakens a system-wide hardening default, \
+                  so Beisl points it out rather than flipping it for you."
+                .into(),
+            blocking: false,
+            status: Status::Pending,
+            fix: None,
         },
         Check {
             id: CheckId::MangoHud,
@@ -163,7 +193,8 @@ pub fn disk_check(trace_dir: &Path) -> Check {
         id: CheckId::DiskSpace,
         label: "disk space for traces",
         why: "perf traces with call stacks can grow to gigabytes in seconds; we keep \
-              headroom and stop the capture if it runs low.".into(),
+              headroom and stop the capture if it runs low."
+            .into(),
         blocking: false,
         status,
         fix: None,
@@ -193,7 +224,8 @@ pub fn gpu_dump_check() -> Check {
         why: "When your GPU crashes a game, the proof that the GPU — not the game or Wine — \
                was at fault is locked to the system administrator by default. Turn this on and \
                Beisl can save that evidence itself, the moment it happens. The saved dumps only \
-               ever describe your own crashed games' GPU state.".into(),
+               ever describe your own crashed games' GPU state."
+            .into(),
         blocking: false,
         status: dump_access_status(),
         fix: Some(Fix::InstallDumpAccessRule),
@@ -498,6 +530,33 @@ fn read_paranoid() -> Option<i32> {
         .ok()
 }
 
+/// Reality probe for kernel-symbol visibility: does `/proc/kallsyms` show us real
+/// addresses? The gate is two knobs deep — `kptr_restrict` must be 0 AND
+/// `perf_event_paranoid <= 1` (the kernel's `kallsyms_for_perf()` gate) — and checking
+/// the sysctls would re-derive kernel policy and get it wrong (kptr=0 + paranoid=2, the
+/// state our preferred setcap fix leaves in place, still zeroes every address). Reading
+/// the file measures the thing perf actually needs. Missing kallsyms (unusual) counts as
+/// visible — nothing to gate on, same stance as `dump_nodes_readable`.
+fn kernel_symbols_visible() -> bool {
+    match std::fs::File::open("/proc/kallsyms") {
+        Ok(f) => kallsyms_shows_addresses(std::io::BufReader::new(f)),
+        Err(_) => true,
+    }
+}
+
+/// True if any line carries a non-zero address. Addresses come sorted, but the low end
+/// is legitimately near-zero (per-cpu symbols), so scan for the first non-zero anywhere:
+/// a visible table hits one within a few lines, a hidden one is all zeros and costs a
+/// single full scan of the (in-memory procfs) file. Testable core of
+/// [`kernel_symbols_visible`].
+fn kallsyms_shows_addresses<R: std::io::BufRead>(r: R) -> bool {
+    r.lines().map_while(Result::ok).any(|l| {
+        l.split_whitespace()
+            .next()
+            .is_some_and(|a| a.bytes().any(|b| b != b'0'))
+    })
+}
+
 /// Free bytes on the filesystem holding `path` (or its nearest existing ancestor).
 pub fn disk_free_bytes(path: &Path) -> Option<u64> {
     let dir = existing_ancestor(path)?;
@@ -538,7 +597,10 @@ mod tests {
     #[test]
     fn sysctl_fix_is_a_pkexec_argv() {
         let cmd = fix_command(
-            &Fix::Sysctl { key: "kernel.perf_event_paranoid", value: "-1" },
+            &Fix::Sysctl {
+                key: "kernel.perf_event_paranoid",
+                value: "-1",
+            },
             Distro::Fedora,
         );
         assert_eq!(cmd[0], "pkexec");
@@ -550,7 +612,10 @@ mod tests {
         assert_eq!(package_for("perf", Distro::Debian), vec!["linux-perf"]);
         assert_eq!(package_for("perf", Distro::Fedora), vec!["perf"]);
         let arch = fix_command(&Fix::InstallPackage { role: "mangohud" }, Distro::Arch);
-        assert_eq!(arch, vec!["pkexec", "pacman", "-S", "--noconfirm", "mangohud"]);
+        assert_eq!(
+            arch,
+            vec!["pkexec", "pacman", "-S", "--noconfirm", "mangohud"]
+        );
         // Unknown distro: no automatic command.
         assert!(fix_command(&Fix::InstallPackage { role: "perf" }, Distro::Unknown).is_empty());
     }
@@ -607,12 +672,48 @@ mod tests {
     #[test]
     fn all_checks_have_why_and_blocking_flags() {
         let checks = all_checks();
-        assert_eq!(checks.len(), 4);
+        assert_eq!(checks.len(), 5);
         assert!(checks.iter().all(|c| !c.why.is_empty()));
-        // MangoHud is the only optional one in the core list.
+        // Kernel symbols and MangoHud are advisory; everything else gates a trace.
         assert_eq!(
-            checks.iter().filter(|c| !c.blocking).map(|c| c.id).collect::<Vec<_>>(),
-            vec![CheckId::MangoHud]
+            checks
+                .iter()
+                .filter(|c| !c.blocking)
+                .map(|c| c.id)
+                .collect::<Vec<_>>(),
+            vec![CheckId::KptrRestrict, CheckId::MangoHud]
         );
+    }
+
+    #[test]
+    fn kptr_check_is_advisory_and_never_joins_the_sweep() {
+        let c = all_checks()
+            .into_iter()
+            .find(|c| c.id == CheckId::KptrRestrict)
+            .unwrap();
+        assert!(
+            !c.blocking,
+            "hidden kernel symbols must never block a trace"
+        );
+        // No auto-fix: revealing kernel addresses is a system-wide hardening rollback
+        // that must stay a deliberate admin action — a fix here would ride along in the
+        // GUI's one-click "set everything up" sweep (same consent line as gpu_dump).
+        assert!(c.fix.is_none());
+        // The why must hand the admin the actual knobs instead.
+        assert!(c.why.contains("kptr_restrict"));
+        assert!(c.why.contains("perf_event_paranoid"));
+    }
+
+    #[test]
+    fn kallsyms_probe_reads_reality_not_the_knobs() {
+        use std::io::Cursor;
+        // Hidden: every address zeroed (kptr_restrict, or kptr=0 with paranoid >= 2 —
+        // the false-Ok state a sysctl-value check would miss).
+        let hidden = "0000000000000000 A fixed_percpu_data\n0000000000000000 T _stext\n";
+        assert!(!kallsyms_shows_addresses(Cursor::new(hidden)));
+        // Visible: the low end may legitimately be zero; any later non-zero counts.
+        let visible = "0000000000000000 A fixed_percpu_data\nffffffff81000000 T _stext\n";
+        assert!(kallsyms_shows_addresses(Cursor::new(visible)));
+        assert!(!kallsyms_shows_addresses(Cursor::new("")));
     }
 }

@@ -13,7 +13,11 @@ use std::process::ExitCode;
 const DESKTOP_FILE: &str = "org.spritzwine.beisl-setup.desktop";
 
 pub fn run(uninstall: bool) -> ExitCode {
-    let res = if uninstall { do_uninstall() } else { do_install() };
+    let res = if uninstall {
+        do_uninstall()
+    } else {
+        do_install()
+    };
     match res {
         Ok(msg) => {
             println!("{msg}");

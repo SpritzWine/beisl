@@ -75,8 +75,9 @@ Still open:
   in the Outlaws case). For "why did it crash" sessions an always-on log
   (`autostart_log=1`) or at least a note in session.json about the logged window
   would help correlate with the perf timeline.
-- **Kernel samples in perf.data are unresolvable** (`kptr_restrict` warning in
-  `perf.log`); the crash-adjacent kernel activity couldn't be symbolized. Preflight
-  (`crates/preflight/`) could check/surface `kptr_restrict` / `perf_event_paranoid`
-  alongside the existing cap_perfmon check, and hint at installing mesa debuginfo so
-  driver hotspots (`libvulkan_intel.so` etc.) aren't anonymous addresses.
+- **Driver hotspots are anonymous addresses** (`libvulkan_intel.so` etc.); preflight
+  could hint at installing mesa debuginfo so they get names. (The `kptr_restrict`
+  half of this finding is handled: the advisory "kernel symbols" check probes
+  `/proc/kallsyms` for real addresses and names the manual sysctls in its why —
+  deliberately no auto-fix, so the hardening rollback never joins the one-click
+  sweep.)
