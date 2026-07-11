@@ -527,14 +527,23 @@ impl SessionApp {
                 "CPU by layer — of {:.0}% of samples we could place:",
                 a.attributed_pct
             )));
-            // The colored stacked bar (GPU driver segment tinted by vendor), then the precise
-            // per-layer legend below it.
+            // The colored stacked bar (GPU driver segment tinted by vendor), each segment
+            // with a hover card, then the precise per-layer legend below it.
             let segments = a
                 .layers
                 .iter()
-                .map(|l| (l.pct, crate::chart::layer_color(&l.layer, &a.gpu_vendor)))
+                .map(|l| crate::chart::LayerSegment {
+                    label: if l.layer == "driver" && !a.gpu_vendor.is_empty() {
+                        format!("driver · {}", a.gpu_vendor)
+                    } else {
+                        l.layer.clone()
+                    },
+                    share: l.pct,
+                    named_pct: l.symbol_pct,
+                    color: crate::chart::layer_color(&l.layer, &a.gpu_vendor),
+                })
                 .collect();
-            col = col.push(crate::chart::LayerBar::new(segments).view::<Msg>());
+            col = col.push(crate::chart::layer_bar::<Msg>(segments));
             // Legend: a color swatch matching the bar segment, then the precise numbers.
             for l in &a.layers {
                 let row = widget::Row::new()
