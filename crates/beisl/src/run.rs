@@ -367,25 +367,35 @@ impl Log {
     }
 }
 
-/// Launch the session window: prefer `beisl-setup` on PATH, else a sibling of this binary.
+/// Launch the session window: prefer the `beisl-setup` sibling of this binary (same
+/// build, no version skew), else fall back to PATH.
 fn spawn_monitor(dir: &Path) {
     // Headless / testing: `BEISL_NO_UI=1` runs the wrapper without the window.
     if std::env::var_os("BEISL_NO_UI").is_some() {
         return;
     }
-    if Command::new("beisl-setup")
-        .arg("--session")
-        .arg(dir)
-        .spawn()
-        .is_ok()
-    {
-        return;
-    }
+    // Sibling first, PATH second: the beisl-setup sitting next to this binary is by
+    // construction the same build (one bundle, one dist tree), while PATH may hold an
+    // older install. A version-skewed window silently freezes on session states it
+    // doesn't know (a fresh wrapper's "Saved" froze an 11-o'clock GUI at "Recording"
+    // during review, 2026-07-11) — skew-proofing beats install-preferring.
     if let Ok(exe) = std::env::current_exe() {
         if let Some(sibling) = exe.parent().map(|p| p.join("beisl-setup")) {
-            let _ = Command::new(sibling).arg("--session").arg(dir).spawn();
+            if sibling.is_file()
+                && Command::new(&sibling)
+                    .arg("--session")
+                    .arg(dir)
+                    .spawn()
+                    .is_ok()
+            {
+                return;
+            }
         }
     }
+    let _ = Command::new("beisl-setup")
+        .arg("--session")
+        .arg(dir)
+        .spawn();
 }
 
 /// Blocking preflight checks that still need setup — surfaced live as "what's wrong".
