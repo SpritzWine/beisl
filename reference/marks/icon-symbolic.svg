@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
+  <!-- Beisl symbolic icon — monochrome variant of "Das Glasl".
+       Single-color line art: the glass, and the frametime trace as the
+       surface of the wine (one hitch spike). Uses currentColor so shells
+       and panels can recolor it; renders black standalone. -->
+  <g fill="none" stroke="currentColor" stroke-width="2.6"
+     stroke-linecap="round" stroke-linejoin="round">
+    <path d="M13 7 H35 V15.5 C35 22.6 30.4 27.4 24 27.4 C17.6 27.4 13 22.6 13 15.5 Z"/>
+    <!-- the meniscus is the trace -->
+    <path d="M14.2 15 H19 L22 9.8 L25 15 H33.8"/>
+    <path d="M24 27.4 V36"/>
+    <path d="M15.5 39.2 H32.5"/>
+  </g>
+</svg>

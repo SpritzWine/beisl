@@ -1,0 +1,345 @@
+<title>Beisl — brand & icon concept</title>
+<style>
+  :root {
+    --cream: #f4ede4;
+    --wood: #2b2320;
+    --beislrot: #7a1f33;
+    --beislrot-hell: #b14358;
+    /* light theme tokens */
+    --ground: #f4ede4;
+    --panel: #fbf7f1;
+    --ink: #2b2320;
+    --muted: #6b5f58;
+    --hair: #e2d6c8;
+    --accent: #7a1f33;
+    --tile: #2b2320;
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, ui-serif, serif;
+    --sans: ui-sans-serif, system-ui, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #1e1815;
+      --panel: #29211d;
+      --ink: #f4ede4;
+      --muted: #b6a99f;
+      --hair: #3a2f2a;
+      --accent: #b14358;
+      --tile: #17110f;
+    }
+  }
+  :root[data-theme="light"] {
+    --ground: #f4ede4; --panel: #fbf7f1; --ink: #2b2320; --muted: #6b5f58;
+    --hair: #e2d6c8; --accent: #7a1f33; --tile: #2b2320;
+  }
+  :root[data-theme="dark"] {
+    --ground: #1e1815; --panel: #29211d; --ink: #f4ede4; --muted: #b6a99f;
+    --hair: #3a2f2a; --accent: #b14358; --tile: #17110f;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--serif);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 960px; margin: 0 auto; padding: clamp(28px, 5vw, 72px) clamp(20px, 5vw, 40px) 96px; }
+
+  .eyebrow {
+    font-family: var(--sans);
+    text-transform: uppercase;
+    letter-spacing: .16em;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent);
+    margin: 0 0 18px;
+  }
+  h1 { font-size: clamp(30px, 5vw, 48px); line-height: 1.08; margin: 0 0 10px; text-wrap: balance; font-weight: 600; }
+  h2 {
+    font-family: var(--sans); font-weight: 600; letter-spacing: -.01em;
+    font-size: clamp(19px, 2.6vw, 24px); margin: 0 0 6px; text-wrap: balance;
+  }
+  .lede { font-size: clamp(17px, 2.2vw, 20px); color: var(--ink); max-width: 62ch; }
+  p { max-width: 64ch; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); }
+
+  /* wordmark: lowercase, geometric; the i's tittle is a wine-red spike tick */
+  .wordmark {
+    font-family: var(--sans); font-weight: 600; letter-spacing: -.02em;
+    line-height: 1; display: inline-flex; align-items: baseline;
+  }
+  .wordmark .i { position: relative; }
+  .wordmark .tick {
+    position: absolute; left: 50%; width: .2em; height: .2em;
+    background: var(--accent); transform: translateX(-50%) rotate(45deg);
+    top: -.34em; border-radius: 1px;
+  }
+
+  /* hero */
+  .hero { display: grid; grid-template-columns: 168px 1fr; gap: clamp(20px, 4vw, 44px); align-items: center; margin: 22px 0 8px; }
+  .hero .glass { width: 168px; height: 168px; filter: drop-shadow(0 10px 24px rgba(43,35,32,.28)); }
+  .hero .wordmark { font-size: clamp(40px, 8vw, 72px); }
+  .tagline { font-family: var(--sans); font-weight: 500; font-size: clamp(18px, 3vw, 24px); margin: 14px 0 0; }
+  .tagline em { font-style: normal; color: var(--accent); }
+  @media (max-width: 560px) { .hero { grid-template-columns: 1fr; text-align: center; justify-items: center; } }
+
+  .rule { height: 1px; background: var(--hair); border: 0; margin: 48px 0; }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--hair);
+    border-radius: 14px;
+    padding: clamp(20px, 3.4vw, 32px);
+  }
+  .section-label {
+    font-family: var(--sans); text-transform: uppercase; letter-spacing: .14em;
+    font-size: 11px; font-weight: 600; color: var(--muted); margin: 0 0 14px;
+  }
+
+  /* decode strip */
+  .decode { display: grid; grid-template-columns: 120px 1fr; gap: clamp(18px, 3vw, 32px); align-items: center; }
+  .decode .glass { width: 120px; height: 120px; }
+  .barmap { display: flex; flex-direction: column; gap: 9px; }
+  .barrow { display: grid; grid-template-columns: 92px 1fr; gap: 14px; align-items: center; }
+  .barrow .name { font-family: var(--sans); font-size: 13px; color: var(--muted); }
+  .barrow .name b { color: var(--ink); font-weight: 600; }
+  .swatchbar { height: 15px; border-radius: 3px; }
+  @media (max-width: 560px) { .decode { grid-template-columns: 1fr; justify-items: center; } }
+
+  /* icon trio */
+  .trio { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+  .trio .cell { text-align: center; }
+  .trio .art {
+    display: grid; place-items: center; height: 148px;
+    border: 1px solid var(--hair); border-radius: 12px; background: var(--ground);
+  }
+  .trio .art svg { width: 104px; height: 104px; }
+  .trio .cap { font-family: var(--sans); font-size: 13px; margin-top: 12px; }
+  .trio .cap b { display: block; font-weight: 600; letter-spacing: -.01em; font-size: 14px; }
+  .trio .cap .role { color: var(--muted); }
+  .badge {
+    display: inline-block; font-family: var(--sans); font-size: 10px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .1em; padding: 3px 8px; border-radius: 999px;
+    margin-bottom: 8px;
+  }
+  .badge.pick { background: var(--accent); color: var(--cream); }
+  .badge.alt { background: transparent; color: var(--muted); border: 1px solid var(--hair); }
+  @media (max-width: 620px) { .trio { grid-template-columns: 1fr; } .trio .art { height: 168px; } }
+
+  /* taskbar-size proof */
+  .taskbar { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .taskbar .chip {
+    display: inline-flex; align-items: center; gap: 9px;
+    background: var(--tile); color: var(--cream);
+    border-radius: 8px; padding: 7px 12px 7px 8px; font-family: var(--sans); font-size: 13px;
+  }
+  .taskbar .chip svg { width: 22px; height: 22px; display: block; }
+  .taskbar .note { font-family: var(--sans); font-size: 13px; color: var(--muted); }
+
+  /* palette ladder */
+  .ladder { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+  .chip2 { border: 1px solid var(--hair); border-radius: 11px; overflow: hidden; background: var(--panel); }
+  .chip2 .fill { height: 62px; }
+  .chip2 .meta { padding: 10px 12px; }
+  .chip2 .nm { font-family: var(--sans); font-weight: 600; font-size: 13px; }
+  .chip2 .hex { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .chip2 .role { font-family: var(--sans); font-size: 11px; color: var(--muted); margin-top: 3px; }
+
+  .datachips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+  .datachip { display: inline-flex; align-items: center; gap: 8px; font-family: var(--sans); font-size: 12px; color: var(--muted); border: 1px solid var(--hair); border-radius: 999px; padding: 5px 11px 5px 6px; }
+  .dot { width: 13px; height: 13px; border-radius: 3px; }
+
+  /* taglines */
+  .taglist { list-style: none; padding: 0; margin: 0; display: grid; gap: 12px; }
+  .taglist li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: baseline; padding-bottom: 12px; border-bottom: 1px solid var(--hair); }
+  .taglist li:last-child { border-bottom: 0; padding-bottom: 0; }
+  .taglist .line { font-family: var(--sans); font-weight: 500; font-size: clamp(16px, 2.4vw, 19px); }
+  .taglist .line.primary { color: var(--accent); }
+  .taglist .use { font-family: var(--sans); font-size: 12px; color: var(--muted); text-align: right; }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 620px) { .grid2 { grid-template-columns: 1fr; } }
+  .stack { display: grid; gap: 12px; }
+  h3 { font-family: var(--sans); font-size: 15px; font-weight: 600; margin: 0; }
+
+  section { margin-top: 52px; }
+  .kicker { font-family: var(--sans); text-transform: uppercase; letter-spacing: .14em; font-size: 11px; font-weight: 600; color: var(--accent); margin: 0 0 12px; }
+</style>
+
+<div class="wrap">
+
+  <p class="eyebrow">Beisl · visual identity</p>
+
+  <div class="hero">
+    <!-- Das Glasl: the layer split, poured -->
+    <svg class="glass" viewBox="0 0 48 48" role="img" aria-label="Beisl app icon: a wine glass whose drink is the app's layer bar">
+      <rect x="2" y="2" width="44" height="44" rx="11" fill="#2b2320"/>
+      <linearGradient id="bowlH" gradientUnits="userSpaceOnUse" x1="24" y1="10.5" x2="24" y2="27.2"><stop offset="0" stop-color="#8e6fd6"/><stop offset="0.27" stop-color="#8e6fd6"/><stop offset="0.27" stop-color="#e0a030"/><stop offset="0.57" stop-color="#e0a030"/><stop offset="0.57" stop-color="#9c2b3b"/><stop offset="1" stop-color="#9c2b3b"/></linearGradient>
+      <path d="M14 10.5 L18.6 10.5 L21.4 8.4 L24.2 10.5 L34 10.5 L34 16 C34 22.8 29.9 27.2 24 27.2 C18.1 27.2 14 22.8 14 16 Z" fill="url(#bowlH)"/>
+      <path d="M14 9 V16 C14 22.8 18.1 27.2 24 27.2 C29.9 27.2 34 22.8 34 16 V9" fill="none" stroke="#f4ede4" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+      <rect x="22.7" y="27" width="2.6" height="8.2" fill="#f4ede4"/>
+      <rect x="16" y="35.2" width="16" height="2.8" rx="1.4" fill="#f4ede4"/>
+    </svg>
+    <div>
+      <span class="wordmark">be<span class="i">ı<span class="tick"></span></span>sl</span>
+      <p class="tagline"><em>Who ate the frame?</em></p>
+      <p class="muted" style="font-family:var(--sans);font-size:15px;margin:12px 0 0;max-width:52ch;">
+        The Viennese corner pub where the regulars tell you, precisely and without malice, what went wrong — and when it didn't. A performance critic whose subject is literally wine.
+      </p>
+    </div>
+  </div>
+
+  <hr class="rule">
+
+  <!-- DECODE -->
+  <section class="card decode">
+    <svg class="glass" viewBox="0 0 48 48" aria-hidden="true">
+      <rect x="2" y="2" width="44" height="44" rx="11" fill="#2b2320"/>
+      <linearGradient id="bowlD" gradientUnits="userSpaceOnUse" x1="24" y1="10.5" x2="24" y2="27.2"><stop offset="0" stop-color="#8e6fd6"/><stop offset="0.27" stop-color="#8e6fd6"/><stop offset="0.27" stop-color="#e0a030"/><stop offset="0.57" stop-color="#e0a030"/><stop offset="0.57" stop-color="#9c2b3b"/><stop offset="1" stop-color="#9c2b3b"/></linearGradient>
+      <path d="M14 10.5 L18.6 10.5 L21.4 8.4 L24.2 10.5 L34 10.5 L34 16 C34 22.8 29.9 27.2 24 27.2 C18.1 27.2 14 22.8 14 16 Z" fill="url(#bowlD)"/>
+      <path d="M14 9 V16 C14 22.8 18.1 27.2 24 27.2 C29.9 27.2 34 22.8 34 16 V9" fill="none" stroke="#f4ede4" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+      <rect x="22.7" y="27" width="2.6" height="8.2" fill="#f4ede4"/>
+      <rect x="16" y="35.2" width="16" height="2.8" rx="1.4" fill="#f4ede4"/>
+    </svg>
+    <div>
+      <p class="section-label">The drink is the verdict</p>
+      <p style="margin:0 0 16px;max-width:52ch;">The pour isn't decoration — it's the app's own headline bar, in the exact colours the results view uses. The surface is the frametime trace, with one hitch spike. The icon and the app teach each other.</p>
+      <div class="barmap">
+        <div class="barrow"><span class="name"><b>dxvk/vkd3d</b> · the top pour, its surface the spike</span><span class="swatchbar" style="background:#8e6fd6;width:32%"></span></div>
+        <div class="barrow"><span class="name"><b>game / JIT</b></span><span class="swatchbar" style="background:#e0a030;width:52%"></span></div>
+        <div class="barrow"><span class="name"><b>wine</b> · the house pour, settled at the bottom</span><span class="swatchbar" style="background:#9c2b3b;width:70%"></span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ICONS -->
+  <section>
+    <p class="kicker">Three marks</p>
+    <div class="trio">
+      <div class="cell">
+        <span class="badge pick">Recommended</span>
+        <div class="art">
+          <svg viewBox="0 0 48 48" aria-label="Das Glasl icon">
+            <rect x="2" y="2" width="44" height="44" rx="11" fill="#2b2320"/>
+            <linearGradient id="b1" gradientUnits="userSpaceOnUse" x1="24" y1="10.5" x2="24" y2="27.2"><stop offset="0" stop-color="#8e6fd6"/><stop offset="0.27" stop-color="#8e6fd6"/><stop offset="0.27" stop-color="#e0a030"/><stop offset="0.57" stop-color="#e0a030"/><stop offset="0.57" stop-color="#9c2b3b"/><stop offset="1" stop-color="#9c2b3b"/></linearGradient>
+            <path d="M14 10.5 L18.6 10.5 L21.4 8.4 L24.2 10.5 L34 10.5 L34 16 C34 22.8 29.9 27.2 24 27.2 C18.1 27.2 14 22.8 14 16 Z" fill="url(#b1)"/>
+            <path d="M14 9 V16 C14 22.8 18.1 27.2 24 27.2 C29.9 27.2 34 22.8 34 16 V9" fill="none" stroke="#f4ede4" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+            <rect x="22.7" y="27" width="2.6" height="8.2" fill="#f4ede4"/>
+            <rect x="16" y="35.2" width="16" height="2.8" rx="1.4" fill="#f4ede4"/>
+          </svg>
+        </div>
+        <div class="cap"><b>Das Glasl</b><span class="role">app icon · the pour is the layer bar</span></div>
+      </div>
+
+      <div class="cell">
+        <span class="badge alt">Symbolic</span>
+        <div class="art">
+          <svg viewBox="0 0 48 48" aria-label="Symbolic glass icon" style="color:var(--ink)">
+            <g fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M13 7 H35 V15.5 C35 22.6 30.4 27.4 24 27.4 C17.6 27.4 13 22.6 13 15.5 Z"/>
+              <path d="M14.2 15 H19 L22 9.8 L25 15 H33.8"/>
+              <path d="M24 27.4 V36"/>
+              <path d="M15.5 39.2 H32.5"/>
+            </g>
+          </svg>
+        </div>
+        <div class="cap"><b>Symbolic</b><span class="role">panel / mono · meniscus is the trace</span></div>
+      </div>
+
+      <div class="cell">
+        <span class="badge alt">Secondary</span>
+        <div class="art">
+          <svg viewBox="0 0 48 48" aria-label="Der Deckel coaster mark">
+            <circle cx="24" cy="24" r="21" fill="#f4ede4"/>
+            <circle cx="24" cy="24" r="19.8" fill="none" stroke="#7a1f33" stroke-width="2.4"/>
+            <circle cx="24" cy="24" r="16" fill="none" stroke="#7a1f33" stroke-width="1.2" opacity="0.45"/>
+            <g stroke-width="3.2" stroke-linecap="round">
+              <line x1="15.8" y1="17" x2="15.8" y2="31" stroke="#5a6777"/>
+              <line x1="21.3" y1="17" x2="21.3" y2="31" stroke="#3a9188"/>
+              <line x1="26.7" y1="17" x2="26.7" y2="31" stroke="#e0a030"/>
+              <line x1="32.2" y1="17" x2="32.2" y2="31" stroke="#8e6fd6"/>
+              <line x1="12.6" y1="28.6" x2="35.4" y2="19.4" stroke="#9c2b3b"/>
+            </g>
+          </svg>
+        </div>
+        <div class="cap"><b>Der Deckel</b><span class="role">swag / badge · the itemized tab</span></div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:20px;">
+      <p class="section-label">Legible at taskbar size (22px)</p>
+      <div class="taskbar">
+        <span class="chip">
+          <svg viewBox="0 0 48 48" aria-hidden="true">
+            <rect x="2" y="2" width="44" height="44" rx="11" fill="#2b2320"/>
+            <linearGradient id="b22" gradientUnits="userSpaceOnUse" x1="24" y1="10.5" x2="24" y2="27.2"><stop offset="0" stop-color="#8e6fd6"/><stop offset="0.27" stop-color="#8e6fd6"/><stop offset="0.27" stop-color="#e0a030"/><stop offset="0.57" stop-color="#e0a030"/><stop offset="0.57" stop-color="#9c2b3b"/><stop offset="1" stop-color="#9c2b3b"/></linearGradient>
+            <path d="M14 10.5 L18.6 10.5 L21.4 8.4 L24.2 10.5 L34 10.5 L34 16 C34 22.8 29.9 27.2 24 27.2 C18.1 27.2 14 22.8 14 16 Z" fill="url(#b22)"/>
+            <path d="M14 9 V16 C14 22.8 18.1 27.2 24 27.2 C29.9 27.2 34 22.8 34 16 V9" fill="none" stroke="#f4ede4" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+            <rect x="22.7" y="27" width="2.6" height="8.2" fill="#f4ede4"/>
+            <rect x="16" y="35.2" width="16" height="2.8" rx="1.4" fill="#f4ede4"/>
+          </svg>
+          Beisl ∷ Results
+        </span>
+        <span class="note">Cream-on-wood silhouette holds; the three layer bands stay distinct. The spike softens to texture and returns at 32px+.</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- PALETTE -->
+  <section>
+    <p class="kicker">Palette</p>
+    <h2>Beislrot frames, layer colours testify</h2>
+    <p class="muted" style="font-family:var(--sans);font-size:15px;max-width:60ch;">The signature is <b style="color:var(--accent)">Beislrot</b> — a house-pour burgundy one shade darker than the wine <em>data</em> colour, so brand chrome is never mistaken for the tool blaming wine, and never for a bright vendor red.</p>
+    <div class="ladder" style="margin-top:18px;">
+      <div class="chip2"><div class="fill" style="background:#7a1f33"></div><div class="meta"><div class="nm">Beislrot</div><div class="hex">#7A1F33</div><div class="role">signature · accents, links</div></div></div>
+      <div class="chip2"><div class="fill" style="background:#b14358"></div><div class="meta"><div class="nm">Beislrot hell</div><div class="hex">#B14358</div><div class="role">signature on dark</div></div></div>
+      <div class="chip2"><div class="fill" style="background:#f4ede4"></div><div class="meta"><div class="nm">Kaffeehauscreme</div><div class="hex">#F4EDE4</div><div class="role">glass · light ground</div></div></div>
+      <div class="chip2"><div class="fill" style="background:#2b2320"></div><div class="meta"><div class="nm">Wirtshausholz</div><div class="hex">#2B2320</div><div class="role">tile · dark ground</div></div></div>
+    </div>
+    <p class="section-label" style="margin-top:22px;">Data colours — used only inside charts, never as chrome</p>
+    <div class="datachips">
+      <span class="datachip"><span class="dot" style="background:#5a6777"></span>kernel #5A6777</span>
+      <span class="datachip"><span class="dot" style="background:#3a9188"></span>driver #3A9188 <span style="opacity:.7">/ vendor</span></span>
+      <span class="datachip"><span class="dot" style="background:#e0a030"></span>game #E0A030</span>
+      <span class="datachip"><span class="dot" style="background:#8e6fd6"></span>dxvk #8E6FD6</span>
+      <span class="datachip"><span class="dot" style="background:#9c2b3b"></span>wine #9C2B3B</span>
+    </div>
+  </section>
+
+  <!-- WORDMARK + TAGLINES -->
+  <section class="grid2">
+    <div class="card stack">
+      <p class="section-label">Wordmark</p>
+      <span class="wordmark" style="font-size:52px;">be<span class="i">ı<span class="tick"></span></span>sl</span>
+      <p class="muted" style="font-family:var(--sans);font-size:14px;margin:6px 0 0;">Lowercase, always — a Beisl has a hand-painted sign, not a brass plate. The one flourish: the dot of the <b>i</b> is a wine-red <b>spike tick</b> — the hitch bookmark from the trace view, and the single glyph that makes plain "beisl" ownable.</p>
+    </div>
+    <div class="card stack">
+      <p class="section-label">Taglines</p>
+      <ul class="taglist">
+        <li><span class="line primary">Who ate the frame?</span><span class="use">primary</span></li>
+        <li><span class="line">Your frame, itemized.</span><span class="use">readme</span></li>
+        <li><span class="line">Good runs are a result too.</span><span class="use">clean-run screen</span></li>
+        <li><span class="line">Na, wer war's?</span><span class="use">de-AT easter egg</span></li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- CONCEPT NOTES -->
+  <section>
+    <p class="kicker">Why these, and why not the wheel</p>
+    <div class="grid2">
+      <div class="card stack">
+        <h3>Recommended · Das Glasl</h3>
+        <p style="margin:0;font-size:15px;">The only mark where name, product, and picture are one sentence: the pub serves the wine, and the wine's contents are the layer verdict. It's cheerful — a good run looks like a good pour — which is the tool's own stance that confirming a good game is a first-class result, not a null one.</p>
+      </div>
+      <div class="card stack">
+        <h3>Declined · the Riesenrad</h3>
+        <p style="margin:0;font-size:15px;">A Ferris-wheel frametime gauge is handsome, but the <b>Riesenrad is Prater's</b> icon in the family (Spritz · Prater · Beisl). Spending Vienna's most iconic silhouette on the pub-named sibling would strip-mine the family — and below 32px it collapses into the generic circular-gauge cliché. Declined for family reasons, not aesthetic ones.</p>
+      </div>
+    </div>
+  </section>
+
+</div>
