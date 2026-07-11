@@ -35,6 +35,15 @@ human-editable):
 - **Git hygiene.** Direct commits only on `loop/*` branches; `agent-dev`
   receives merges only; main receives only human-approved landings (step 9).
   No history rewriting outside an unmerged `loop/*` branch.
+- **The main checkout is Florian's.** Never `git checkout`, `reset`, or
+  `merge` in it — he may be mid-work there (e.g. the MCP crate) and the loop
+  must not switch branches under him (this bit us on 2026-07-11: a landing
+  left his tree on agent-dev). Every ref-touching operation happens in
+  worktrees: per-item worktrees under `.loop/wt/<slug>`, and the **standing
+  `.loop/wt/agent-dev` worktree** (create with
+  `git worktree add .loop/wt/agent-dev agent-dev` if missing) for step 0's
+  sync and step 7's `--no-ff` merges. Exception: step 9's landing on main is
+  human-gated and interactive — coordinate in chat if his checkout is dirty.
 - **Build economy.** Worktrees share one target dir so iterations don't
   cold-build: export `CARGO_TARGET_DIR=<main-repo>/.loop/target` in every
   worktree shell. Build `crates/beisl-gui` only when the item touches it
@@ -58,11 +67,12 @@ human-editable):
 - Review does NOT throttle the loop: it keeps iterating with any number of
   unreviewed queue entries (Florian's call, 2026-07-11). Human review gates
   only the landing on main (step 9).
-- **Sync `agent-dev`:** create it at main HEAD if missing. If the queue has
-  no unreviewed entries (all merged/discarded by Florian), reset it to main.
-  Otherwise, if main gained commits, merge main into agent-dev; a conflict
-  here means human work and loop work collided — stop and tell Florian
-  instead of resolving on his behalf.
+- **Sync `agent-dev`** — inside the standing `.loop/wt/agent-dev` worktree,
+  never in the main checkout: create the branch at main HEAD if missing. If
+  the queue has no unreviewed entries (all merged/discarded by Florian),
+  reset it to main. Otherwise, if main gained commits, merge main into
+  agent-dev; a conflict here means human work and loop work collided — stop
+  and tell Florian instead of resolving on his behalf.
 - Uncommitted changes in the main checkout are invisible to worktrees
   branched from HEAD — if they overlap the item about to be picked, pick a
   non-overlapping one; if everything overlaps, stop and say main needs a
@@ -124,7 +134,8 @@ the backlog — a misfit is cheaper abandoned than merged).
 
 Commit on the branch (conventional message, `Co-Authored-By: Claude Fable 5
 <noreply@anthropic.com>`), then `git merge --no-ff loop/<slug>` into
-`agent-dev` and record the merge-commit hash — that hash is the unit of
+`agent-dev` — run inside the `.loop/wt/agent-dev` worktree, not the main
+checkout — and record the merge-commit hash: that hash is the unit of
 review and of revert.
 
 ### 8. Queue for human review
@@ -173,5 +184,6 @@ The forensic detail stays on the `loop/*` branches and in the queue entries.
 A rejected item is instead `git revert -m 1 <merge-commit>`-ed on agent-dev
 and its branch dropped, with the reason noted in the backlog.
 
-After landing: reset `agent-dev` onto main, delete the landed `land/*` and
-`loop/*` branches, and remove (or mark `[reviewed]`) the queue entries.
+After landing: reset `agent-dev` onto main (in its worktree), delete the
+landed `land/*` and `loop/*` branches, and remove (or mark `[reviewed]`)
+the queue entries.

@@ -6,8 +6,7 @@ members = [
     "crates/session",         # live session state shared with the session window
     "crates/symbol-resolver", # perf.data addresses -> wine symbols (tiered fidelity)
     "crates/artifact",        # the merged, exportable trace (frametimes ⋈ samples)
-    # v1:
-    # "crates/beisl-mcp",     # serve the artifact to Claude
+    "crates/beisl-mcp",       # MCP server binary over the trace library (opt-in, stdio)
 ]
 
 # beisl-gui is a standalone workspace (its own lockfile): the heavy libcosmic/wgpu tree

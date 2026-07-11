@@ -22,6 +22,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "beisl-mcp"
+version = "0.0.1-alpha.1"
+dependencies = [
+ "serde_json",
+ "session",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -5,7 +5,8 @@ sets up the environment (MangoHud frametime CSV side-channel, optional GPU pin),
 `perf` + logs into a per-run trace dir under `~/.local/share/beisl/traces/run-*/`
 (`session.json`, `beisl.log`, `perf.log`, `perf.data`, MangoHud CSV), and publishes live
 state for a session window. Wine-agnostic by design. `DESIGN.md` has the architecture,
-case studies, and roadmap; symbol resolution, artifact export, and MCP are still stubs.
+case studies, and roadmap. Symbol resolution (Exports tier), artifact export, the trace
+library, and the MCP server are built; the Full/DWARF symbol tier is still open.
 
 ## Workspace layout
 
@@ -19,8 +20,10 @@ Main workspace (`Cargo.toml`, crates.io deps only, mostly std):
   `fix_command()`) and executed by the caller via pkexec, never from inside the crate.
 - `crates/session` — small serde JSON state file (`session.json`) bridging the CLI
   writer and the GUI session window reader.
-- `crates/symbol-resolver` — perf.data addresses → wine symbols, tiered fidelity (stub).
-- `crates/artifact` — merged exportable trace, frametimes ⋈ samples (stub).
+- `crates/symbol-resolver` — perf.data addresses → wine symbols, tiered fidelity.
+- `crates/artifact` — merged exportable trace, frametimes ⋈ samples.
+- `crates/beisl-mcp` — `beisl-mcp` binary: read-only MCP server (JSON-RPC over stdio,
+  hand-rolled — no async runtime) over the trace library; opt-in, ships in the bundle.
 - `crates/beisl-gui` — `beisl-setup` binary (libcosmic): preflight checklist, plus an
   install/update page shown first when run from an extracted dist tree (a tiny fork of
   the SpritzWine installer wizard over `beisl install`). **Excluded** from the main

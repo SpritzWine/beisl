@@ -31,6 +31,7 @@ package: build
 	rm -rf $(DIST)/$(BUNDLE)
 	mkdir -p $(DIST)/$(BUNDLE)
 	install -m755 target/release/beisl $(DIST)/$(BUNDLE)/
+	install -m755 target/release/beisl-mcp $(DIST)/$(BUNDLE)/
 	install -m755 crates/beisl-gui/target/release/beisl-setup $(DIST)/$(BUNDLE)/
 	install -m644 README.md LICENSE $(DIST)/$(BUNDLE)/
 	tar -C $(DIST) -czf $(DIST)/$(BUNDLE)-$(ARCH).tar.gz $(BUNDLE)

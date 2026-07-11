@@ -66,6 +66,13 @@ fn do_install() -> Result<String, String> {
         write_desktop(&setup_dst)?;
         extra.push_str("\n  + beisl-setup, and \"Beisl Setup\" added to your app menu");
     }
+    // The MCP server rides along when the bundle carries it — inert unless the user
+    // wires `beisl-mcp` into an AI client's config (stdio only, no ports).
+    let mcp_src = here.join("beisl-mcp");
+    if mcp_src.is_file() {
+        install_file(&mcp_src, &bindir.join("beisl-mcp"))?;
+        extra.push_str("\n  + beisl-mcp (MCP server for AI clients; see the README)");
+    }
 
     let path_note = if on_path(&bindir) {
         String::new()
@@ -92,6 +99,7 @@ fn do_uninstall() -> Result<String, String> {
     for p in [
         bin_dir().join("beisl"),
         bin_dir().join("beisl-setup"),
+        bin_dir().join("beisl-mcp"),
         applications_dir().join(DESKTOP_FILE),
     ] {
         if p.exists() {

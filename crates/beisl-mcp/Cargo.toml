@@ -1,0 +1,17 @@
+# The MCP face of a trace: serve past runs and their artifacts to an AI client
+# (DESIGN.md "The flywheel"). Deliberately hand-rolled JSON-RPC over stdio — the
+# protocol's stdio transport is newline-delimited JSON and this server is a read-only,
+# single-client file server, so the official SDK's async runtime would be all weight
+# and no lift here.
+[package]
+name = "beisl-mcp"
+description = "MCP server over the trace library — past runs and their artifacts, for AI clients"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde_json = "1"
+session = { path = "../session" }

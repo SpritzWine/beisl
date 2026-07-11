@@ -72,6 +72,22 @@ of the main lockfile on purpose):
 cd crates/beisl-gui && cargo build --release
 ```
 
+## Asking an AI about your traces (MCP)
+
+The bundle ships `beisl-mcp`, a read-only [MCP](https://modelcontextprotocol.io)
+server over your recorded traces. It is entirely opt-in: it opens no ports (the
+transport is its own stdin/stdout) and nothing runs unless you wire it into an AI
+client's configuration, e.g.:
+
+```json
+{ "mcpServers": { "beisl": { "command": "beisl-mcp" } } }
+```
+
+The client can then list your runs and read each run's analysis artifact, report,
+and logs — "which layer ate the frame in last night's session?" becomes a question
+you can literally ask. Deleting and analyzing stay in the app, where a human
+confirms them.
+
 **A note on git dependencies:** the main workspace is crates.io-only. `beisl-gui` pulls
 ~48 git dependencies — all of them the [libcosmic](https://github.com/pop-os/libcosmic)
 stack, which System76 does not publish to crates.io yet (the whole COSMIC ecosystem ships
