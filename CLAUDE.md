@@ -67,14 +67,16 @@ into `game.log` in the run dir; MangoHud gets `pci_dev=` (from the GPU pin, or t
 sole GPU — with ≥2 GPUs and no pin it still guesses nothing, so *pin the GPU* on
 multi-GPU boxes); the exit-status log line is labeled as the wrapper's, not the
 game's; `session.json`'s `game` is upgraded from the launcher argv guess to the real
-name once the MangoHud CSV appears.
+name once the MangoHud CSV appears; MangoHud logging is always-on (`autostart_log=1`
+— the CSV is flushed per frame, so frametimes survive up to a crash; the hotkey now
+pauses/resumes instead of arming).
 
 Still open:
 
-- **MangoHud CSV only covers the hotkey-toggled window** (11.5 s of an 86 s session
-  in the Outlaws case). For "why did it crash" sessions an always-on log
-  (`autostart_log=1`) or at least a note in session.json about the logged window
-  would help correlate with the perf timeline.
+- **A user's own `log_duration=N`** in MANGOHUD_CONFIG still auto-stops the
+  always-on log after N seconds (we append no duplicate of that key), quietly
+  re-truncating CSV coverage for exactly the users most likely to carry a MangoHud
+  config.
 - **Driver hotspots are anonymous addresses** (`libvulkan_intel.so` etc.); preflight
   could hint at installing mesa debuginfo so they get names. (The `kptr_restrict`
   half of this finding is handled: the advisory "kernel symbols" check probes

@@ -12,23 +12,36 @@ use std::process::Command;
 use preflight::gpu::PhysicalGpu;
 use preflight::GpuPin;
 
-/// The MangoHud hotkey that toggles frametime logging (and, with it, our capture).
+/// The MangoHud hotkey that toggles frametime logging — with [`AUTOSTART_LOG_SECS`]
+/// this now means *pausing/resuming* an already-running log rather than starting one.
 pub const TOGGLE_KEY: &str = "Shift_L+F2";
 
-/// Configure `cmd`'s environment so MangoHud logs frametimes into `run_dir`, sampling
-/// the GPU at `pci_dev` (see [`sample_pci_dev`]) when one is known.
+/// Seconds after game start when MangoHud begins logging on its own. Logging used to be
+/// hotkey-only, which left "why did it crash" sessions with a CSV covering only the
+/// window the user happened to toggle — or none at all. Always-on costs little (tens of
+/// bytes per frame) and MangoHud 0.8.x writes + flushes the CSV *per frame*, so the
+/// frametimes right up to a crash survive on disk (only the `_summary.csv`, written at
+/// log-stop, is lost). One second, not zero: MangoHud sleeps this long before
+/// `start_logging()`, and 0 disables the feature.
+pub const AUTOSTART_LOG_SECS: u32 = 1;
+
+/// Configure `cmd`'s environment so MangoHud logs frametimes into `run_dir` for the
+/// whole session (auto-started, see [`AUTOSTART_LOG_SECS`]), sampling the GPU at
+/// `pci_dev` (see [`sample_pci_dev`]) when one is known.
 pub fn configure(cmd: &mut Command, run_dir: &Path, pci_dev: Option<&str>) {
     cmd.env("MANGOHUD", "1");
 
-    // Append to any MANGOHUD_CONFIG the user already set rather than clobbering it.
+    // Append to any MANGOHUD_CONFIG the user already set rather than clobbering it
+    // (for duplicate keys MangoHud takes the last occurrence, so ours win).
     let mut cfg = std::env::var("MANGOHUD_CONFIG").unwrap_or_default();
     if !cfg.is_empty() {
         cfg.push(',');
     }
     cfg.push_str(&format!(
-        "output_folder={},toggle_logging={}",
+        "output_folder={},toggle_logging={},autostart_log={}",
         run_dir.display(),
-        TOGGLE_KEY
+        TOGGLE_KEY,
+        AUTOSTART_LOG_SECS
     ));
     // Which GPU the stats sampler reads. Left to itself MangoHud picks a card
     // independently of Vulkan device selection, and on a multi-GPU system that can be an
@@ -105,7 +118,10 @@ mod tests {
         let cfg = mangohud_config(&cmd);
         assert_eq!(
             cfg,
-            format!("output_folder=/tmp/run,toggle_logging={TOGGLE_KEY},pci_dev=0000:03:00.0")
+            format!(
+                "output_folder=/tmp/run,toggle_logging={TOGGLE_KEY},\
+                 autostart_log={AUTOSTART_LOG_SECS},pci_dev=0000:03:00.0"
+            )
         );
 
         let mut cmd = Command::new("true");
