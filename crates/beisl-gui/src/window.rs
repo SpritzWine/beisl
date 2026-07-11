@@ -99,9 +99,8 @@ impl Application for SessionApp {
                             // capture the still-pending dump on its next poll.
                             self.config.dump_access_policy = DumpAccessPolicy::RuleInstalled;
                             let _ = self.config.save();
-                            self.enable_note = Some(
-                                "Capture enabled — saving this crash's dump now.".to_string(),
-                            );
+                            self.enable_note =
+                                Some("Capture enabled — saving this crash's dump now.".to_string());
                         }
                     }
                 }
@@ -123,7 +122,9 @@ impl Application for SessionApp {
                 }
             }
             Msg::OpenFolder => {
-                let _ = std::process::Command::new("xdg-open").arg(&self.dir).spawn();
+                let _ = std::process::Command::new("xdg-open")
+                    .arg(&self.dir)
+                    .spawn();
             }
             Msg::Close => std::process::exit(0),
         }
@@ -145,7 +146,11 @@ impl Application for SessionApp {
             State::Error => "Error",
         };
 
-        let title = if s.game.is_empty() { "Beisl".to_string() } else { s.game.clone() };
+        let title = if s.game.is_empty() {
+            "Beisl".to_string()
+        } else {
+            s.game.clone()
+        };
         let mut col = widget::Column::new()
             .spacing(10)
             .push(widget::text::title3(title))
@@ -181,9 +186,7 @@ impl Application for SessionApp {
         // The live "help gather evidence" affordance: only under the warn-only policy, and
         // only once a crash has left a dump we couldn't read (the wrapper sets the flag).
         // The headline diagnosis is already in the warning text above; this is the action.
-        if s.dump_capture_offer
-            && self.config.dump_access_policy == DumpAccessPolicy::WarnOnly
-        {
+        if s.dump_capture_offer && self.config.dump_access_policy == DumpAccessPolicy::WarnOnly {
             let mut b = widget::button::suggested("Enable auto-capture");
             if self.enabling.is_none() {
                 b = b.on_press(Msg::EnableDumpCapture);

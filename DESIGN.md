@@ -205,6 +205,62 @@ Entry points, easy → portable:
 Owning the compat tool is what lets our own users skip the scary launch-option step
 entirely; the wrapper is the universal fallback for everyone else.
 
+### Flatpak plan (2026-07-11) — reaching the Flatpak Lutris/Steam userbase
+
+Investigated against a real Flatpak Lutris install. The findings:
+
+- **Lutris declares no add-on extension point.** Steam's "GE-Proton in Discover"
+  works because Valve's manifest declares `com.valvesoftware.Steam.CompatibilityTool`
+  / `.Utility`; `net.lutris.Lutris` has nothing equivalent, so a first-class
+  `net.lutris.Lutris.beisl` add-on needs an upstream manifest PR first.
+- **The proven side door is a freedesktop-runtime extension** à la
+  `org.freedesktop.Platform.VulkanLayer.gamescope` / `.MangoHud`: both ship *binaries*
+  (not just layers), get mounted at `/usr/lib/extensions/vulkan/<name>/` inside every
+  runtime-based app, show up in Discover as add-ons, and Lutris already wires their
+  `bin/` dirs into `PATH`. Shipping `…VulkanLayer.beisl` the same way works with
+  today's Lutris *and* Steam flatpaks; the user points Lutris's command prefix (or
+  Steam's launch options) at the mounted binary.
+- **The real blockers are perf's, not packaging's:**
+  - Flatpak's seccomp filter blocks `perf_event_open` unless the app sandbox has
+    `--allow=devel`. The inspected Lutris install has `features=devel` set (whether
+    stock or a Flatseal override — verify before relying on it; if not stock it's a
+    documented one-liner: `flatpak override --allow=devel net.lutris.Lutris`).
+  - **File capabilities are dead inside the sandbox** (bubblewrap sets no-new-privs),
+    so the `cap_perfmon`-on-perf-binary model preflight checks today cannot work
+    there. In-sandbox recording needs host `kernel.perf_event_paranoid` lowered via
+    sysctl (fixable through `flatpak-spawn --host pkexec …` — the session-bus talk
+    permission for `org.freedesktop.Flatpak` exists on the inspected install), or a
+    fallback to child-tree-only recording (works at paranoid ≤ 2, loses kernel
+    samples and the system-wide view).
+  - The runtime ships no `perf`; the extension must bundle it.
+  - Alternative worth prototyping first: **keep perf on the host entirely** —
+    beisl-in-sandbox only orchestrates (env, MangoHud, session.json) and starts the
+    recorder on the host via `flatpak-spawn --host`, where cap_perfmon keeps working.
+    Simpler privilege story, one binary in two contexts.
+- **The file-based `session.json` bridge survives the sandbox boundary for free** —
+  a host-side GUI/monitor watches the trace dir; no IPC needed. This is now a design
+  constraint to preserve.
+- Sandbox awareness = detect `/.flatpak-info`, then: preflight switches to
+  sandbox-mode checks (paranoid sysctl instead of cap_perfmon, fixes via
+  `flatpak-spawn --host`), and symbol resolution must look under `/run/host` for
+  host libraries.
+
+### AppImage (2026-07-11) — low-hanging fruit for single-file distribution
+
+Unlike Flatpak, AppImage is a natural fit: no sandbox means the wrapper semantics
+survive untouched — Steam launch options see the real process tree, host `perf`,
+`pkexec` and MangoHud work as-is, traces land in the real `$HOME`. Findings from the
+dist work:
+
+- **Almost nothing to bundle.** `beisl` links only glibc; `beisl-setup` dlopens its
+  display/Vulkan libs (winit/wgpu style) from the host — which is standard AppImage
+  practice anyway. `linuxdeploy` can consume the `make package` dist tree directly.
+- **Chores, not blockers:** build against an older glibc baseline (CI image) for
+  portability; AppImage has a single entrypoint, so an `AppRun` dispatch is needed
+  (`Beisl.AppImage setup` → GUI, or match `$ARGV0`; everything else → the wrapper);
+  `beisl install` should learn to copy the AppImage itself + a symlink instead of
+  the raw binary.
+
 ## Case study: the Saints Row GPU hang (2026-07-05)
 
 What a wrong-layer diagnosis costs, measured on our own kitchen table. Saints Row
@@ -279,3 +335,10 @@ hot-path roadmap. Creators generate exactly the profiling data the roadmap needs
 - **Case-study-driven additions (2026-07-05, see above):** devcoredump watcher in the
   wrapper (v0/v1); dual-ICD detection + `VK_DRIVER_FILES` pinning in preflight (v1);
   hang/device-loss as first-class A/B outcomes (v2).
+- **Flatpak (2026-07-11, see Packaging):** prototype the host-side-perf split via
+  `flatpak-spawn --host` first, then a `…VulkanLayer.beisl` runtime extension (MVP,
+  covers Flatpak Lutris *and* Steam); upstream a Lutris extension point later for the
+  first-class Discover add-on story.
+- **AppImage (2026-07-11, see Packaging):** low-hanging fruit — unsandboxed, so the
+  wrapper works unchanged; both binaries are host-lib-light. `AppRun` dispatch +
+  older-glibc build baseline on top of `make package`, that's it.

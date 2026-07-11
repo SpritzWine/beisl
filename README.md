@@ -23,8 +23,15 @@ Beisl ships bundled with SpritzWine (or build it standalone — it works with an
 From the extracted tree:
 
 ```sh
-beisl install          # copies beisl onto your PATH (~/.local/bin) + adds "Beisl Setup" to the menu
-beisl-setup            # (or the menu entry) — check prerequisites: perf, symbols, permissions
+./beisl-setup          # GUI: offers Install/Update from this tree, then checks
+                       # prerequisites (perf, symbols, permissions)
+```
+
+or headless:
+
+```sh
+./beisl install        # copies beisl onto your PATH (~/.local/bin) + adds "Beisl Setup" to the menu
+beisl --check          # prerequisite checklist in the terminal
 ```
 
 Then add Beisl to a game's launch options — **Steam → Properties → Launch Options**:
@@ -45,6 +52,14 @@ resolution, the artifact export and the MCP server are stubbed with their design
 DESIGN.md.
 
 ## Build
+
+Everything at once — both workspaces, packaged into a release tarball under `dist/`:
+
+```sh
+make                    # = make package; needs a recent stable Rust
+```
+
+Or piece by piece:
 
 ```sh
 cargo build --release   # host-side tool; needs a recent stable Rust

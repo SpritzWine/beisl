@@ -6,6 +6,12 @@
 //! each other). The UI polls the worker on a timer — the same pattern the SpritzWine
 //! installer uses, avoiding the version-volatile parts of libcosmic's async API.
 //!
+//! When launched from an *extracted dist tree* (a `beisl` binary next to this one that is
+//! not the installed copy), an install page comes first: a tiny fork of the SpritzWine
+//! installer wizard, collapsed to one page over `beisl install` — so the standalone
+//! tarball has the same double-click install/update story as the SpritzWine bundle.
+//! Pass `--payload <dir>` to point at a tree explicitly (e.g. from a dev checkout).
+//!
 //! A rotating tip panel turns the setup wait into onboarding (shortcut, where traces land,
 //! that it works with any wine). Mirrors the installer's widget idioms for the pinned rev.
 
@@ -60,8 +66,11 @@ fn spawn_fixer(cmds: Vec<Vec<String>>) -> Arc<Mutex<Shared>> {
             match std::process::Command::new(&cmd[0]).args(&cmd[1..]).output() {
                 Ok(out) => {
                     let mut s = s2.lock().unwrap();
-                    for line in String::from_utf8_lossy(&out.stderr).lines() {
-                        s.log.push(line.to_string());
+                    // pkexec fixes report on stderr, `beisl install` on stdout — keep both.
+                    for stream in [&out.stdout, &out.stderr] {
+                        for line in String::from_utf8_lossy(stream).lines() {
+                            s.log.push(line.to_string());
+                        }
                     }
                     if !out.status.success() {
                         s.error = Some(format!("`{}` failed", cmd.join(" ")));
@@ -86,8 +95,20 @@ fn spawn_fixer(cmds: Vec<Vec<String>>) -> Arc<Mutex<Shared>> {
 // Application
 // ---------------------------------------------------------------------------------------
 
+/// Which page is showing. `Install` only exists when launched from an extracted dist
+/// tree; it hands over to the checklist once the bundle is installed (or skipped).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Page {
+    Install,
+    Checks,
+}
+
 #[derive(Debug, Clone)]
 enum Message {
+    /// Install page: run `<payload>/beisl install` on the worker.
+    InstallBundle,
+    /// Install page: move on to the checklist (skip, or continue after installing).
+    ShowChecks,
     Recheck,
     FixAll,
     /// The optional GPU dump-access row's OWN button — a standing privilege change, always
@@ -105,9 +126,22 @@ enum Message {
     Close,
 }
 
+/// Startup flags: the extracted dist tree to offer installing, when there is one.
+struct Flags {
+    payload: Option<PathBuf>,
+}
+
 struct AppModel {
     core: Core,
     distro: Distro,
+    page: Page,
+    /// The dist tree the install page installs from (`Some` iff launched from one).
+    payload: Option<PathBuf>,
+    /// `~/.local/bin/beisl` already existed at startup — wording flips to "Update".
+    had_install: bool,
+    install_worker: Option<Arc<Mutex<Shared>>>,
+    /// The install worker ran to completion (successfully or not) at least once.
+    install_done: bool,
     trace_dir: PathBuf,
     checks: Vec<Check>,
     worker: Option<Arc<Mutex<Shared>>>,
@@ -122,6 +156,31 @@ struct AppModel {
     error: Option<String>,
     tick: u64,
     tip: usize,
+}
+
+fn home() -> PathBuf {
+    PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+}
+
+/// Where `beisl install` puts the binaries. Also the discriminator for bundle detection:
+/// the installed layout has `beisl` next to `beisl-setup` too, so *location* is what
+/// tells an extracted tarball apart from the installed copy.
+fn bin_dir() -> PathBuf {
+    home().join(".local/bin")
+}
+
+/// The extracted dist tree this binary runs from, if any: the executable's directory when
+/// it carries a `beisl` binary and is not `~/.local/bin` itself.
+fn detect_bundle() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?.to_path_buf();
+    if !dir.join("beisl").is_file() {
+        return None;
+    }
+    match (dir.canonicalize(), bin_dir().canonicalize()) {
+        (Ok(a), Ok(b)) if a == b => None,
+        _ => Some(dir),
+    }
 }
 
 fn trace_dir() -> PathBuf {
@@ -151,7 +210,7 @@ impl AppModel {
     }
 
     fn running(&self) -> bool {
-        self.worker.is_some() || self.dump_worker.is_some()
+        self.worker.is_some() || self.dump_worker.is_some() || self.install_worker.is_some()
     }
 
     /// All *blocking* checks satisfied → the user can trace. (The optional GPU-dump row is
@@ -214,7 +273,7 @@ impl AppModel {
 
 impl Application for AppModel {
     type Executor = cosmic::executor::Default;
-    type Flags = ();
+    type Flags = Flags;
     type Message = Message;
 
     const APP_ID: &'static str = "org.spritzwine.Beisl";
@@ -227,12 +286,21 @@ impl Application for AppModel {
         &mut self.core
     }
 
-    fn init(core: Core, _flags: Self::Flags) -> (Self, Task<Self::Message>) {
+    fn init(core: Core, flags: Self::Flags) -> (Self, Task<Self::Message>) {
         let trace_dir = trace_dir();
         let checks = Self::detect_all(&trace_dir);
         let app = AppModel {
             core,
             distro: detect_distro(),
+            page: if flags.payload.is_some() {
+                Page::Install
+            } else {
+                Page::Checks
+            },
+            had_install: bin_dir().join("beisl").is_file(),
+            payload: flags.payload,
+            install_worker: None,
+            install_done: false,
             trace_dir,
             checks,
             worker: None,
@@ -250,6 +318,29 @@ impl Application for AppModel {
 
     fn update(&mut self, message: Self::Message) -> Task<Self::Message> {
         match message {
+            Message::InstallBundle => {
+                if !self.running() {
+                    if let Some(p) = &self.payload {
+                        self.log.clear();
+                        self.error = None;
+                        self.install_done = false;
+                        self.install_worker = Some(spawn_fixer(vec![vec![
+                            p.join("beisl").display().to_string(),
+                            "install".into(),
+                        ]]));
+                    }
+                }
+            }
+            Message::ShowChecks => {
+                if !self.running() {
+                    self.page = Page::Checks;
+                    self.log.clear();
+                    self.error = None;
+                    // Fresh detection — the install just changed what's on PATH.
+                    self.checks = Self::detect_all(&self.trace_dir);
+                    self.gpu_candidates = preflight::gpu::detect_candidates();
+                }
+            }
             Message::Recheck => {
                 if !self.running() {
                     self.checks = Self::detect_all(&self.trace_dir);
@@ -289,11 +380,13 @@ impl Application for AppModel {
             Message::SetGpuPin(sel) => {
                 // Plain config write — no privilege anywhere in this path.
                 if !self.running() {
-                    self.config.gpu_pin = sel.and_then(|i| self.gpu_candidates.get(i)).map(|c| GpuPin {
-                        name: c.name.clone(),
-                        icd_paths: c.icd_paths.clone(),
-                        device_select: c.device_select.clone(),
-                    });
+                    self.config.gpu_pin =
+                        sel.and_then(|i| self.gpu_candidates.get(i))
+                            .map(|c| GpuPin {
+                                name: c.name.clone(),
+                                icd_paths: c.icd_paths.clone(),
+                                device_select: c.device_select.clone(),
+                            });
                     let _ = self.config.save();
                 }
             }
@@ -313,6 +406,18 @@ impl Application for AppModel {
                         self.worker = None;
                         self.error = error;
                         self.checks = Self::detect_all(&self.trace_dir);
+                    }
+                }
+                if let Some(w) = &self.install_worker {
+                    let (log, finished, error) = {
+                        let s = w.lock().unwrap();
+                        (s.log.clone(), s.finished, s.error.clone())
+                    };
+                    self.log = log;
+                    if finished {
+                        self.install_worker = None;
+                        self.install_done = true;
+                        self.error = error;
                     }
                 }
                 if let Some((w, becomes)) = self.dump_worker.clone() {
@@ -344,6 +449,20 @@ impl Application for AppModel {
     }
 
     fn view(&self) -> Element<'_, Self::Message> {
+        let page = match self.page {
+            Page::Install => self.install_page(),
+            Page::Checks => self.checks_page(),
+        };
+        widget::container(page)
+            .padding(28)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    }
+}
+
+impl AppModel {
+    fn checks_page(&self) -> Element<'_, Message> {
         let title = if self.ready() {
             "You're ready to trace"
         } else {
@@ -379,7 +498,9 @@ impl Application for AppModel {
             } else {
                 row = row.push(widget::text::caption(status_word(c)));
             }
-            content = content.push(row).push(widget::text::caption(c.why.clone().into_owned()));
+            content = content
+                .push(row)
+                .push(widget::text::caption(c.why.clone().into_owned()));
         }
 
         // Advanced (opt-in details): collapsed by default. No expander widget at this
@@ -401,7 +522,7 @@ impl Application for AppModel {
 
         // Scrollable content fills the space; the rotating tip and the footer stay pinned
         // and always visible at the bottom.
-        let page = widget::Column::new()
+        widget::Column::new()
             .spacing(14)
             .push(
                 widget::scrollable(content)
@@ -409,24 +530,79 @@ impl Application for AppModel {
                     .height(Length::Fill),
             )
             .push(widget::container(widget::text::body(TIPS[self.tip])).padding(12))
-            .push(self.footer());
-
-        widget::container(page)
-            .padding(28)
-            .width(Length::Fill)
-            .height(Length::Fill)
+            .push(self.footer())
             .into()
     }
-}
 
-impl AppModel {
+    /// The install page — the SpritzWine installer wizard collapsed to one page: offer,
+    /// streamed `beisl install` log, then hand over to the checklist. Only reachable when
+    /// launched from an extracted dist tree (see `detect_bundle`).
+    fn install_page(&self) -> Element<'_, Message> {
+        let verb = if self.had_install {
+            "Update"
+        } else {
+            "Install"
+        };
+        let mut col = widget::Column::new()
+            .spacing(14)
+            .push(widget::text::title1(format!("{verb} Beisl")))
+            .push(widget::text::body(
+                "Copies beisl and this setup app into ~/.local/bin and adds \"Beisl Setup\" \
+                 to your app menu, so `beisl %command%` works in a game's launch options.",
+            ));
+        if let Some(p) = &self.payload {
+            col = col.push(widget::text::caption(format!("Bundle: {}", p.display())));
+        }
+        if self.had_install && !self.install_done {
+            col = col.push(widget::text::caption(
+                "Replaces the copy already in ~/.local/bin.",
+            ));
+        }
+
+        // The streamed `beisl install` output (its success message doubles as the
+        // launch-option guidance), then the verdict line.
+        if self.running() || !self.log.is_empty() {
+            let mut logcol = widget::Column::new().spacing(2);
+            for line in &self.log {
+                logcol = logcol.push(widget::text::monotext(line.clone()));
+            }
+            col = col.push(logcol);
+        }
+        if let Some(e) = &self.error {
+            col = col.push(widget::text::body(format!("Something went wrong: {e}")));
+        }
+
+        let done_ok = self.install_done && self.error.is_none();
+        let mut buttons = widget::Row::new().spacing(8);
+        if done_ok {
+            buttons = buttons.push(widget::Space::new().width(Length::Fill)).push(
+                widget::button::suggested("Check prerequisites").on_press(Message::ShowChecks),
+            );
+        } else {
+            let mut skip = widget::button::standard("Skip");
+            let mut install = widget::button::suggested(verb);
+            if !self.running() {
+                skip = skip.on_press(Message::ShowChecks);
+                install = install.on_press(Message::InstallBundle);
+            }
+            buttons = buttons
+                .push(skip)
+                .push(widget::Space::new().width(Length::Fill))
+                .push(install);
+        }
+
+        col.push(widget::Space::new().height(Length::Fill))
+            .push(buttons)
+            .into()
+    }
+
     /// The collapsed "Advanced" block: a toggle header, and when open, the GPU dump-access
     /// policy radios + a "Remove rule" button. The radios record intent only; the actual
     /// privileged install/remove are always the explicit Enable / Remove buttons.
     fn advanced_section(&self) -> Element<'_, Message> {
         let arrow = if self.show_advanced { "▾" } else { "▸" };
-        let header = widget::button::text(format!("{arrow} Advanced"))
-            .on_press(Message::ToggleAdvanced);
+        let header =
+            widget::button::text(format!("{arrow} Advanced")).on_press(Message::ToggleAdvanced);
 
         let mut col = widget::Column::new().spacing(8).push(header);
         if !self.show_advanced {
@@ -555,13 +731,36 @@ fn status_word(c: &Check) -> String {
 }
 
 fn main() -> cosmic::iced::Result {
-    // `beisl-setup --session <dir>` opens the live session window; otherwise the setup page.
+    // `beisl-setup --session <dir>` opens the live session window; otherwise the setup
+    // page, with the install page in front when a dist tree is (or is pointed) at hand.
     let mut args = std::env::args().skip(1);
-    if args.next().as_deref() == Some("--session") {
-        let dir = PathBuf::from(args.next().unwrap_or_default());
-        let settings = Settings::default().size(cosmic::iced::Size::new(440.0, 560.0));
-        return cosmic::app::run::<window::SessionApp>(settings, dir);
+    let mut payload = None;
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--session" => {
+                let dir = PathBuf::from(args.next().unwrap_or_default());
+                let settings = Settings::default().size(cosmic::iced::Size::new(440.0, 560.0));
+                return cosmic::app::run::<window::SessionApp>(settings, dir);
+            }
+            "--payload" => {
+                // Dev-only escape hatch (run from a checkout against a built dist tree),
+                // so a bad value is a plain CLI error rather than an in-GUI state.
+                let dir = PathBuf::from(args.next().unwrap_or_default());
+                if !dir.join("beisl").is_file() {
+                    eprintln!(
+                        "beisl-setup: --payload {} has no beisl binary (expected an extracted dist tree)",
+                        dir.display()
+                    );
+                    std::process::exit(2);
+                }
+                payload = Some(dir);
+            }
+            _ => {}
+        }
     }
+    let flags = Flags {
+        payload: payload.or_else(detect_bundle),
+    };
     let settings = Settings::default().size(cosmic::iced::Size::new(640.0, 640.0));
-    cosmic::app::run::<AppModel>(settings, ())
+    cosmic::app::run::<AppModel>(settings, flags)
 }
