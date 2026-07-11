@@ -11,9 +11,19 @@ use preflight::{
     multi_gpu_check, Status,
 };
 
+/// `println!` that shrugs off a closed stdout (`beisl --check | head`): the reader
+/// hanging up mid-listing is not an error worth a panic — std's `println!` aborts with
+/// a broken-pipe panic there. Drop the remaining output, keep the exit code honest.
+macro_rules! out {
+    ($($t:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout(), $($t)*);
+    }};
+}
+
 pub fn run() -> ExitCode {
     let distro = detect_distro();
-    println!("Beisl preflight  (distro family: {distro:?})\n");
+    out!("Beisl preflight  (distro family: {distro:?})\n");
 
     let mut checks = all_checks();
     for c in checks.iter_mut() {
@@ -45,35 +55,35 @@ pub fn run() -> ExitCode {
             Status::Failed(e) => format!("failed: {e}"),
             other => format!("{other:?}"),
         };
-        println!("{mark} {:<24} {}", c.label, state);
-        println!("       {}", c.why);
+        out!("{mark} {:<24} {}", c.label, state);
+        out!("       {}", c.why);
 
         if c.status == Status::NeedsFix {
             if let Some(fix) = &c.fix {
                 match fix_command(fix, distro) {
                     cmd if cmd.is_empty() => {
-                        println!("       fix:  (install manually — unknown for this distro)")
+                        out!("       fix:  (install manually — unknown for this distro)")
                     }
                     // Multi-line elevated scripts (the dump-access rule) are unreadable as a
                     // single line — summarise instead of dumping the whole heredoc.
                     cmd if cmd.iter().any(|a| a.contains('\n')) => {
-                        println!("       fix:  enable in beisl-setup (installs a udev rule + tmpfiles entry via pkexec)")
+                        out!("       fix:  enable in beisl-setup (installs a udev rule + tmpfiles entry via pkexec)")
                     }
-                    cmd => println!("       fix:  {}", cmd.join(" ")),
+                    cmd => out!("       fix:  {}", cmd.join(" ")),
                 }
             }
             if c.blocking {
                 blocking_missing = true;
             }
         }
-        println!();
+        out!();
     }
 
     if blocking_missing {
-        println!("Some required checks need setup — the GUI runs each `fix:` line via pkexec.");
+        out!("Some required checks need setup — the GUI runs each `fix:` line via pkexec.");
         ExitCode::from(1)
     } else {
-        println!("All required checks pass — ready to trace.");
+        out!("All required checks pass — ready to trace.");
         ExitCode::SUCCESS
     }
 }

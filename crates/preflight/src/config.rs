@@ -107,6 +107,10 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    // The Arc A770 from the case-study machine as a MESA_VK_DEVICE_SELECT selector
+    // (same fixture naming as the gpu.rs test module).
+    const ARC_SELECT: &str = "8086:56a0!";
+
     // `Config::path()` reads the process-global `XDG_CONFIG_HOME` env var, so any two tests
     // that set/unset it concurrently (cargo test runs them on separate threads by default)
     // race each other. Serialize the tests that touch it.
@@ -164,7 +168,8 @@ mod tests {
                     "/usr/share/vulkan/icd.d/intel_icd.x86_64.json".into(),
                     "/usr/share/vulkan/icd.d/intel_icd.i686.json".into(),
                 ],
-                device_select: Some("8086:56a0!".into()),
+                // The case-study machine's Arc selector (same fixture as gpu.rs tests).
+                device_select: Some(ARC_SELECT.into()),
             }),
             ..Default::default()
         };

@@ -56,7 +56,7 @@ pub enum CheckId {
     /// is a system-wide hardening rollback that must not ride along in the "set
     /// everything up" sweep — the same consent line that keeps [`gpu_dump_check`] out of
     /// it. The `why` carries the manual command instead.
-    KptrRestrict,
+    KernelSymbols,
     /// Optional, informational: the Vulkan driver's debug symbols aren't installed, so
     /// time spent inside the driver (`libvulkan_intel.so` etc. — often the hottest
     /// non-game code in a trace) shows as anonymous addresses. Detection probes each
@@ -129,7 +129,7 @@ impl Check {
             }
             CheckId::GpuDumpAccess => dump_access_status(),
             CheckId::MultiGpu => multi_gpu_status(&gpu::physical_gpus()),
-            CheckId::KptrRestrict => ok_or_fix(kernel_symbols_visible()),
+            CheckId::KernelSymbols => ok_or_fix(kernel_symbols_visible()),
             CheckId::DriverDebuginfo => driver_debuginfo_status(),
             CheckId::DiskSpace => return, // computed in `disk_check`
         };
@@ -167,7 +167,7 @@ pub fn all_checks() -> Vec<Check> {
             fix: Some(perf_record_fix()),
         },
         Check {
-            id: CheckId::KptrRestrict,
+            id: CheckId::KernelSymbols,
             label: "kernel symbols (optional)",
             why: "Time spent inside the kernel (drivers, syscalls) shows up as nameless \
                   addresses while the kernel hides its symbol table. Game and wine symbols \
@@ -761,15 +761,15 @@ mod tests {
                 .filter(|c| !c.blocking)
                 .map(|c| c.id)
                 .collect::<Vec<_>>(),
-            vec![CheckId::KptrRestrict, CheckId::MangoHud]
+            vec![CheckId::KernelSymbols, CheckId::MangoHud]
         );
     }
 
     #[test]
-    fn kptr_check_is_advisory_and_never_joins_the_sweep() {
+    fn kernel_symbols_check_is_advisory_and_never_joins_the_sweep() {
         let c = all_checks()
             .into_iter()
-            .find(|c| c.id == CheckId::KptrRestrict)
+            .find(|c| c.id == CheckId::KernelSymbols)
             .unwrap();
         assert!(
             !c.blocking,

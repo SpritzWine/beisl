@@ -476,6 +476,10 @@ mod tests {
     use super::*;
     use preflight::GpuPin;
 
+    // The Arc A770 from the case-study machine as a MESA_VK_DEVICE_SELECT selector
+    // (same fixture naming as the mangohud/preflight test modules).
+    const ARC_SELECT: &str = "8086:56a0!";
+
     #[test]
     fn gpu_pin_envs_joins_icd_paths_and_sets_device_select() {
         let pin = GpuPin {
@@ -484,7 +488,7 @@ mod tests {
                 "/usr/share/vulkan/icd.d/intel_icd.x86_64.json".into(),
                 "/usr/share/vulkan/icd.d/intel_icd.i686.json".into(),
             ],
-            device_select: Some("8086:56a0!".into()),
+            device_select: Some(ARC_SELECT.into()),
         };
         let envs = gpu_pin_envs(&pin);
         assert_eq!(
@@ -496,10 +500,7 @@ mod tests {
                      /usr/share/vulkan/icd.d/intel_icd.i686.json"
                         .to_string()
                 ),
-                (
-                    "MESA_VK_DEVICE_SELECT".to_string(),
-                    "8086:56a0!".to_string()
-                ),
+                ("MESA_VK_DEVICE_SELECT".to_string(), ARC_SELECT.to_string()),
             ]
         );
     }
