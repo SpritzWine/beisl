@@ -268,6 +268,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "assets"
+version = "0.0.1-alpha.1"
+
+[[package]]
 name = "async-broadcast"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3608,6 +3612,7 @@ dependencies = [
 name = "preflight"
 version = "0.0.1-alpha.1"
 dependencies = [
+ "assets",
  "serde",
  "toml 0.8.23",
 ]
