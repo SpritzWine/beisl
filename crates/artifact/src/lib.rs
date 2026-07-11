@@ -16,7 +16,7 @@ use std::io;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use symbol_resolver::{FidelityTier, Resolution};
+use symbol_resolver::{FidelityTier, Layer, Resolution};
 
 /// Bump when the on-disk shape changes incompatibly; consumers check it before trusting.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -51,6 +51,19 @@ pub struct HotSymbol {
     pub pct: f32,
 }
 
+/// One layer's slice of the "who ate the frame" split, biggest first. `layer` is one of
+/// `kernel/driver/dxvk/vkd3d/wine/game`; `pct` is its share of the *attributed* samples
+/// (see [`TraceArtifact::attributed_pct`]). `symbol_pct` is the layer's own symbol coverage
+/// — how many of *its* samples we could name a function for — so a big layer with a low
+/// `symbol_pct` flags where debuginfo / the Full tier would reveal what's inside.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LayerShare {
+    pub layer: String,
+    pub pct: f32,
+    #[serde(default)]
+    pub symbol_pct: f32,
+}
+
 /// The self-describing "issues" summary — what a UI issues panel binds to.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Diagnostics {
@@ -73,6 +86,22 @@ pub struct TraceArtifact {
     pub frame_stats: Option<FrameStats>,
     /// Worst frametime spikes, worst first (bookmarks into the timeline).
     pub spikes: Vec<Spike>,
+    /// The layer split — where CPU went across the stack (kernel/driver/dxvk/wine/game),
+    /// biggest first. This is what the headline "who ate the frame" bar renders. The shares
+    /// are over the *attributed* samples only (see `attributed_pct`), not the whole trace:
+    /// the unmapped `[unknown]` samples are a measurement gap, not a stack layer, so folding
+    /// them in as a peer bucket would both shrink the real layers and present the gap as if
+    /// it were an answer. They're disclosed via `attributed_pct` instead — never redistributed
+    /// into a named layer (that could be graphics/driver code we simply couldn't place).
+    /// Defaulted so an artifact written before this field still deserializes (schema stays v1:
+    /// the addition is read-compatible).
+    #[serde(default)]
+    pub layers: Vec<LayerShare>,
+    /// Share of all samples that landed in *some* layer (100 − the unmapped `[unknown]`
+    /// fraction). The `layers` shares are normalized over this, so the coverage caveat is
+    /// carried explicitly rather than baked into the bar.
+    #[serde(default)]
+    pub attributed_pct: f32,
     /// Hottest resolved wine/game functions by self time, biggest first.
     pub hot_symbols: Vec<HotSymbol>,
     pub diagnostics: Diagnostics,
@@ -125,6 +154,40 @@ impl TraceArtifact {
             .iter()
             .map(|(m, n)| (m.clone(), 100.0 * *n as f32 / total))
             .collect();
+        // The resolver bucketed every sample, including the unmapped `[unknown]` ones it
+        // parks in `Layer::Other`. That's a measurement gap, not a stack layer: normalize the
+        // real layers over the *attributed* samples (total − gap) so driver-vs-wine-vs-game is
+        // a fair comparison, and carry the gap separately as `attributed_pct`. Resolver order
+        // (biggest first) is monotonic under this scaling, so it's preserved.
+        let gap: u64 = res
+            .layers
+            .iter()
+            .find(|t| t.layer == Layer::Other)
+            .map_or(0, |t| t.samples);
+        let attributed = res.diagnostics.total_samples.saturating_sub(gap);
+        let layers = if attributed == 0 {
+            Vec::new()
+        } else {
+            res.layers
+                .iter()
+                .filter(|t| t.layer != Layer::Other)
+                .map(|t| LayerShare {
+                    layer: t.layer.as_str().to_string(),
+                    pct: 100.0 * t.samples as f32 / attributed as f32,
+                    // The layer's own symbol coverage: named / placed-in-layer.
+                    symbol_pct: if t.samples == 0 {
+                        0.0
+                    } else {
+                        100.0 * t.named as f32 / t.samples as f32
+                    },
+                })
+                .collect()
+        };
+        let attributed_pct = if res.diagnostics.total_samples == 0 {
+            0.0
+        } else {
+            100.0 * attributed as f32 / res.diagnostics.total_samples as f32
+        };
         TraceArtifact {
             schema_version: SCHEMA_VERSION,
             game: game.to_string(),
@@ -132,6 +195,8 @@ impl TraceArtifact {
             duration_s,
             frame_stats,
             spikes,
+            layers,
+            attributed_pct,
             hot_symbols,
             diagnostics: Diagnostics {
                 fidelity: res.diagnostics.tier.as_str().to_string(),
@@ -209,6 +274,35 @@ impl TraceArtifact {
             }
         } else {
             let _ = writeln!(o, "\nFrametimes: no MangoHud CSV logged for this run.");
+        }
+
+        if !self.layers.is_empty() {
+            let _ = writeln!(
+                o,
+                "\nWho ate the frame (CPU by layer, of {:.0}% attributed):",
+                self.attributed_pct
+            );
+            for l in &self.layers {
+                // A 24-cell proportional bar; `#` filled to the layer's share. The trailing
+                // "N% named" is the layer's symbol coverage — how much of it we could name.
+                let filled = ((l.pct / 100.0) * 24.0).round() as usize;
+                let bar: String = "#".repeat(filled) + &".".repeat(24 - filled.min(24));
+                let _ = writeln!(
+                    o,
+                    "  {:<11} {bar} {:4.1}%   {:3.0}% named",
+                    l.layer, l.pct, l.symbol_pct
+                );
+            }
+            // The unmapped remainder isn't a layer — it's coverage we didn't get. Disclose it
+            // rather than fold it into a bucket: it could be any layer, graphics/driver too.
+            let gap = 100.0 - self.attributed_pct;
+            if gap >= 0.5 {
+                let _ = writeln!(
+                    o,
+                    "  ({gap:.0}% of samples were unmapped — could belong to any layer, \
+                     graphics/driver included)"
+                );
+            }
         }
 
         let _ = writeln!(o, "\nHottest functions (self time, all layers):");
@@ -362,6 +456,19 @@ mod tests {
             duration_s: 42.0,
             frame_stats: None,
             spikes: vec![],
+            layers: vec![
+                LayerShare {
+                    layer: "wine".into(),
+                    pct: 60.0,
+                    symbol_pct: 20.0,
+                },
+                LayerShare {
+                    layer: "driver".into(),
+                    pct: 40.0,
+                    symbol_pct: 5.0,
+                },
+            ],
+            attributed_pct: 75.0,
             hot_symbols: vec![HotSymbol {
                 module: "ntdll.dll".into(),
                 symbol: "RtlAllocateHeap".into(),
@@ -378,6 +485,74 @@ mod tests {
         let back: TraceArtifact = serde_json::from_str(&json).unwrap();
         assert_eq!(back.game, "Test");
         assert_eq!(back.hot_symbols[0].symbol, "RtlAllocateHeap");
+        assert_eq!(back.layers[0].layer, "wine");
+        assert_eq!(back.layers[0].pct, 60.0);
+        assert!(a.render_report().contains("Who ate the frame"));
         assert!(a.headline().contains("RtlAllocateHeap"));
+    }
+
+    #[test]
+    fn layer_shares_normalize_over_attributed_samples_not_the_gap() {
+        use symbol_resolver::{Diagnostics, FidelityTier, Layer, LayerTally, Resolution};
+        let tally = |layer, samples, named| LayerTally {
+            layer,
+            samples,
+            named,
+        };
+        // 100 samples: 40 unmapped (the gap); 60 attributed as game 45 (36 named) /
+        // driver 15 (3 named).
+        let res = Resolution {
+            symbols: vec![],
+            diagnostics: Diagnostics {
+                tier: FidelityTier::Exports,
+                total_samples: 100,
+                unresolved_samples: 40,
+                anonymous_modules: vec![],
+            },
+            layers: vec![
+                tally(Layer::Game, 45, 36),
+                tally(Layer::Driver, 15, 3),
+                tally(Layer::Other, 40, 0),
+            ],
+            wine_flavor: None,
+        };
+        let a = TraceArtifact::from_parts("G", 1.0, res, None, vec![]);
+        // The gap is disclosed as coverage, never as a peer layer.
+        assert_eq!(a.attributed_pct, 60.0);
+        assert!(a.layers.iter().all(|l| l.layer != "other"));
+        // Shares are over the 60 attributed, not the 100 total: game = 45/60 = 75%.
+        let game = a.layers.iter().find(|l| l.layer == "game").unwrap();
+        assert!((game.pct - 75.0).abs() < 0.01, "game {}", game.pct);
+        // Symbol coverage is per layer: game 36/45 = 80%, driver 3/15 = 20%.
+        assert!(
+            (game.symbol_pct - 80.0).abs() < 0.01,
+            "game {}",
+            game.symbol_pct
+        );
+        let driver = a.layers.iter().find(|l| l.layer == "driver").unwrap();
+        assert!((driver.pct - 25.0).abs() < 0.01, "driver {}", driver.pct);
+        assert!(
+            (driver.symbol_pct - 20.0).abs() < 0.01,
+            "driver {}",
+            driver.symbol_pct
+        );
+        // The report states coverage and names the caveat.
+        assert!(a.render_report().contains("of 60% attributed"));
+        assert!(a.render_report().contains("named"));
+        assert!(a.render_report().contains("unmapped"));
+    }
+
+    /// An artifact written before the `layers` field must still deserialize (schema stayed
+    /// v1 because the addition is read-compatible) — `layers` just defaults to empty.
+    #[test]
+    fn an_artifact_without_layers_still_loads() {
+        let json = r#"{
+            "schema_version": 1, "game": "Old", "wine_flavor": "unknown",
+            "duration_s": 1.0, "frame_stats": null, "spikes": [], "hot_symbols": [],
+            "diagnostics": {"fidelity": "Exports", "total_samples": 0,
+                            "unresolved_pct": 0.0, "anonymous_modules": []}
+        }"#;
+        let back: TraceArtifact = serde_json::from_str(json).unwrap();
+        assert!(back.layers.is_empty());
     }
 }

@@ -48,6 +48,115 @@ impl FidelityTier {
     }
 }
 
+/// The stack layer a sample belongs to — the "who ate the frame" axis. Every sample lands
+/// in exactly one bucket by its DSO, so the shares sum across the *whole* trace (named or
+/// not: a kernel-heavy trace shows a big kernel bar even though we can't name kernel
+/// functions without its debuginfo). This is the classification the headline layer bar
+/// reads instead of re-deriving it from the top symbols.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Layer {
+    /// Linux kernel + vDSO: syscalls, scheduler, page faults, GPU submit ioctls.
+    Kernel,
+    /// GPU userspace driver: Mesa/NVIDIA Vulkan ICDs, DRI, libdrm.
+    Driver,
+    /// Direct3D→Vulkan translation: DXVK (d3d9/10/11) and vkd3d-proton (d3d12).
+    Translation,
+    /// wine itself — its builtin PE DLLs (under the wine tree) and ELF loader.
+    Wine,
+    /// The game's own cost: native ELF, its PE exe/DLLs, JIT (mono/.NET), the C runtime.
+    Game,
+    /// Samples we can't place — `[unknown]`, unmapped.
+    Other,
+}
+
+impl Layer {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Layer::Kernel => "kernel",
+            Layer::Driver => "driver",
+            Layer::Translation => "dxvk/vkd3d",
+            Layer::Wine => "wine",
+            Layer::Game => "game",
+            Layer::Other => "other",
+        }
+    }
+}
+
+/// Bucket a sample's DSO into a [`Layer`]. Ordered most-specific first and wine-agnostic:
+/// it keys on the *kind* of module, not on a particular build — the translation DLLs and
+/// driver libs carry the same names under any Proton/GE/SpritzWine tree, and wine's own
+/// builtins are the PEs living under a `/lib/wine/` (or `/wine/`) path, which a game's own
+/// PE never is.
+pub fn classify_layer(dso: &str) -> Layer {
+    let l = dso.to_ascii_lowercase();
+    let base = l.rsplit('/').next().unwrap_or(&l);
+
+    // perf pseudo-DSOs first — they have no path to key on. `[JIT] tid N` is the game's
+    // JIT'd code; `[unknown]` is genuinely unbacked (perf couldn't map the ip to a module);
+    // every *other* bracketed DSO is kernel-space — `[kernel.kallsyms]`, `[vdso]`, and the
+    // in-kernel driver modules (`[amdgpu]`, `[nvidia]`, `[i915]`), i.e. GPU submit lands in
+    // the kernel bucket, not lost to Other.
+    if base.starts_with("[jit]") {
+        return Layer::Game;
+    }
+    if l == "[unknown]" {
+        return Layer::Other;
+    }
+    if l.starts_with('[') {
+        return Layer::Kernel;
+    }
+    if !dso.starts_with('/') {
+        return Layer::Other; // defensive: a non-path, non-bracket DSO
+    }
+
+    // D3D→Vulkan translation, by the well-known module names (shipped identically under any
+    // wine tree, so the name — not the path — is the reliable key). Checked before wine so a
+    // DXVK `d3d11.dll` dropped into the wine tree reads as translation, not wine.
+    if base.starts_with("dxvk")
+        || base.starts_with("vkd3d")
+        || base.starts_with("libvkd3d")
+        || matches!(
+            base,
+            "d3d9.dll"
+                | "d3d10.dll"
+                | "d3d10_1.dll"
+                | "d3d10core.dll"
+                | "d3d11.dll"
+                | "d3d12.dll"
+                | "d3d12core.dll"
+                | "dxgi.dll"
+        )
+    {
+        return Layer::Translation;
+    }
+
+    // wine's own builtins live under the wine tree; its ELF support is libwine*. A PE
+    // anywhere else is the game's own DLL/exe. Checked *before* the driver keywords so wine's
+    // own `winevulkan.dll` (a builtin PE under `/lib/wine/`) isn't misread as a GPU driver.
+    if l.contains("/lib/wine/") || l.contains("/wine/") || base.starts_with("libwine") {
+        return Layer::Wine;
+    }
+
+    // GPU userspace driver: Vulkan ICDs/loader, Mesa DRI, vendor libs (kept specific to
+    // avoid swallowing unrelated `libgl*` like glib).
+    if base.contains("vulkan")
+        || base.ends_with("_dri.so")
+        || base.contains("nvidia")
+        || base.contains("radeonsi")
+        || base.contains("zink")
+        || base.starts_with("libdrm")
+        || base.starts_with("libglx")
+        || base.starts_with("libegl")
+        || base.starts_with("libglapi")
+        || base.starts_with("libgbm")
+    {
+        return Layer::Driver;
+    }
+
+    // Everything else with a real path is the game process's own userland.
+    Layer::Game
+}
+
 /// One executable mapping from a perf `PERF_RECORD_MMAP2` record — the post-mortem stand-in
 /// for `/proc/<pid>/maps` (the live pid is long gone by resolve time, but perf recorded the
 /// map events into `perf.data`).
@@ -67,6 +176,18 @@ impl Mapping {
     fn rva(&self, ip: u64) -> u32 {
         (ip - self.start + self.pgoff) as u32
     }
+}
+
+/// A layer's sample tally: how many samples landed in it, and how many of those we could
+/// name a function for. The gap (`samples − named`) is code we placed by *module* but
+/// couldn't name inside — a stripped ELF without debuginfo, or a PE past any export — so
+/// `named / samples` is the layer's symbol coverage: how much of its hot-function list is
+/// real, and thus where installing debuginfo / the Full tier would actually reveal something.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LayerTally {
+    pub layer: Layer,
+    pub samples: u64,
+    pub named: u64,
 }
 
 /// One aggregated hot symbol: how many samples landed in it.
@@ -107,6 +228,11 @@ impl Diagnostics {
 pub struct Resolution {
     pub symbols: Vec<SymbolCount>,
     pub diagnostics: Diagnostics,
+    /// Every sample's [`LayerTally`], biggest first — the "who ate the frame" split the
+    /// headline bar reads. Covers the whole trace (over `total_samples`), so it includes
+    /// kernel/anonymous samples the named `symbols` list can't; each tally also carries how
+    /// many of its samples we could name (the layer's symbol coverage).
+    pub layers: Vec<LayerTally>,
     /// Best-effort wine build identifier from a PE module's path (`SpritzWine-Prater`,
     /// `Proton - Experimental`, …) — the artifact's `wine_flavor`. `None` if no wine PE.
     pub wine_flavor: Option<String>,
@@ -139,6 +265,8 @@ pub fn resolve_perf_data(perf_data: &Path) -> io::Result<Resolution> {
     let mut anon: HashMap<String, u64> = HashMap::new();
     let mut total: u64 = 0;
     let mut unresolved: u64 = 0;
+    // Per layer: (samples, named) — the named count is the layer's symbol coverage.
+    let mut layers: HashMap<Layer, (u64, u64)> = HashMap::new();
     let mut pe_paths: Vec<String> = Vec::new();
 
     use io::BufRead as _;
@@ -161,6 +289,9 @@ pub fn resolve_perf_data(perf_data: &Path) -> io::Result<Resolution> {
             continue;
         };
         total += 1;
+        // Every sample lands in exactly one layer, whether or not we can name its function —
+        // the split is over the whole trace, not just the resolved symbols.
+        let layer = classify_layer(&sample.dso);
 
         // A confident function name for this sample, or None. Both paths aggregate by
         // *name* (offset stripped) so a function's samples coalesce into one hot row.
@@ -187,8 +318,13 @@ pub fn resolve_perf_data(perf_data: &Path) -> io::Result<Resolution> {
             None
         };
 
+        let tally = layers.entry(layer).or_insert((0, 0));
+        tally.0 += 1;
         match named {
-            Some(sym) => *counts.entry((basename(&sample.dso), sym)).or_insert(0) += 1,
+            Some(sym) => {
+                tally.1 += 1;
+                *counts.entry((basename(&sample.dso), sym)).or_insert(0) += 1;
+            }
             None => {
                 unresolved += 1;
                 // A real on-disk module we couldn't name (ELF w/o debuginfo, or a PE past
@@ -224,6 +360,21 @@ pub fn resolve_perf_data(perf_data: &Path) -> io::Result<Resolution> {
     anonymous_modules.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
     anonymous_modules.truncate(8);
 
+    // Descending by share; ties broken by the layer's stable order so the bar is deterministic.
+    let mut layers: Vec<LayerTally> = layers
+        .into_iter()
+        .map(|(layer, (samples, named))| LayerTally {
+            layer,
+            samples,
+            named,
+        })
+        .collect();
+    layers.sort_by(|a, b| {
+        b.samples
+            .cmp(&a.samples)
+            .then((a.layer as u8).cmp(&(b.layer as u8)))
+    });
+
     Ok(Resolution {
         diagnostics: Diagnostics {
             tier: detect_tier(&pe_paths),
@@ -231,6 +382,7 @@ pub fn resolve_perf_data(perf_data: &Path) -> io::Result<Resolution> {
             unresolved_samples: unresolved,
             anonymous_modules,
         },
+        layers,
         wine_flavor: pe_paths.iter().find_map(|p| wine_flavor(p)),
         symbols,
     })
@@ -448,6 +600,12 @@ mod tests {
         };
         let res = resolve_perf_data(Path::new(&path)).expect("resolves");
         assert!(res.diagnostics.total_samples > 0, "no samples in the trace");
+        // Every sample is bucketed, so the layer shares cover the whole trace.
+        assert_eq!(
+            res.layers.iter().map(|t| t.samples).sum::<u64>(),
+            res.diagnostics.total_samples,
+            "layer tallies must sum to every sample"
+        );
         // A wine trace stamps a real tier and names at least some PE functions.
         assert_ne!(res.diagnostics.tier, FidelityTier::Unknown);
         assert!(
@@ -456,6 +614,50 @@ mod tests {
                 .any(|s| s.module.to_ascii_lowercase().ends_with(".dll")),
             "no PE symbols resolved"
         );
+    }
+
+    #[test]
+    fn classify_layer_buckets_by_module_kind() {
+        use Layer::*;
+        // kernel + pseudo-DSOs
+        assert_eq!(classify_layer("[kernel.kallsyms]"), Kernel);
+        assert_eq!(classify_layer("[vdso]"), Kernel);
+        // an in-kernel GPU driver module is kernel-space, not Other
+        assert_eq!(classify_layer("[amdgpu]"), Kernel);
+        assert_eq!(classify_layer("[nvidia]"), Kernel);
+        assert_eq!(classify_layer("[JIT] tid 4242"), Game);
+        assert_eq!(classify_layer("[unknown]"), Other);
+        // translation, by name, wherever the tree puts it
+        assert_eq!(
+            classify_layer("/opt/w/x86_64-windows/dxgi.dll"),
+            Translation
+        );
+        assert_eq!(
+            classify_layer("/opt/w/x86_64-windows/d3d11.dll"),
+            Translation
+        );
+        assert_eq!(
+            classify_layer("/prefix/system32/vkd3d-proton.dll"),
+            Translation
+        );
+        // GPU driver
+        assert_eq!(classify_layer("/usr/lib/libvulkan_intel.so"), Driver);
+        assert_eq!(classify_layer("/usr/lib/dri/radeonsi_dri.so"), Driver);
+        assert_eq!(classify_layer("/usr/lib/libnvidia-glcore.so.560"), Driver);
+        // a lookalike that must NOT be read as a driver
+        assert_eq!(classify_layer("/usr/lib/libglib-2.0.so.0"), Game);
+        // wine builtins live under the wine tree; a same-named PE elsewhere is the game's
+        assert_eq!(
+            classify_layer("/opt/w/lib/wine/x86_64-windows/ntdll.dll"),
+            Wine
+        );
+        // wine's own winevulkan.dll is a builtin, not a GPU driver (wine check wins)
+        assert_eq!(
+            classify_layer("/opt/w/lib/wine/x86_64-windows/winevulkan.dll"),
+            Wine
+        );
+        assert_eq!(classify_layer("/games/Foo/bin/Foo.exe"), Game);
+        assert_eq!(classify_layer("/usr/lib/libc.so.6"), Game);
     }
 
     #[test]
