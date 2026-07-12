@@ -11,6 +11,10 @@ assets/style.css      styles (light + dark via prefers-color-scheme, with a manu
 assets/site.js        the interactive layer bar, frametime figure, hero trace, theme toggle
 assets/*.svg          brand icons (Das Glasl app icon, bare light/dark glasses,
                       symbolic mono variant, Der Deckel coaster mark)
+releasenotes.md       verbatim copy of the repo's RELEASENOTES.md (main branch),
+                      rendered into the "Release notes" section by site.js
+                      (same-origin fetch; under file:// the section keeps its
+                      Codeberg fallback link)
 .domains              custom-domain config for Codeberg Pages (commented example)
 ```
 
@@ -23,6 +27,7 @@ no webhook. Pushing the branch republishes it:
 
 ```sh
 # from a checkout of the beisl repo, on the pages branch
+git show main:RELEASENOTES.md > page/releasenotes.md   # refresh at each release
 git add page
 git commit -m "update landing page"
 git push origin pages

@@ -637,3 +637,11 @@ section + section { border-top: 1px solid var(--hair); }
   .layerbar .seg { border: 1px solid CanvasText; }
   .covmeter { border: 1px solid CanvasText; }
 }
+
+/* ---------- release notes (releasenotes.md, rendered by site.js) ---------- */
+.release-notes h3 { margin: 4px 0 6px; font-size: 1.25em; }
+.release-notes h3 + p { color: var(--muted); }
+.release-notes h4 { margin: 20px 0 8px; letter-spacing: 0.02em; }
+.release-notes ul { margin: 8px 0 16px; padding-left: 22px; }
+.release-notes li { margin: 7px 0; }
+.release-notes hr { border: none; border-top: 1px solid var(--hair); margin: 28px 0; }

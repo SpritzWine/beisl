@@ -30,6 +30,7 @@
       <a href="#verdict" class="hide-sm">The verdict</a>
       <a href="#how" class="hide-sm">How it works</a>
       <a href="#install">Install</a>
+      <a href="#notes" class="hide-sm">Release notes</a>
       <a href="https://codeberg.org/SpritzWine/beisl" rel="external">Source</a>
       <button id="theme-toggle" class="theme-toggle" type="button">Theme: Auto</button>
     </nav>
@@ -287,7 +288,7 @@
     <div class="surfaces">
       <div class="surface">
         <b>The wrapper</b>
-        <code>beisl %command%</code> · <code>beisl check</code> — the CLI that runs the
+        <code>beisl %command%</code> · <code>beisl --check</code> — the CLI that runs the
         show and vets your host: perf, symbolizer, paranoid level, MangoHud, GPU quirks
         like dual ICDs.
       </div>
@@ -321,11 +322,17 @@
         <li><span class="ctx">Bare wine</span> <span><code>beisl wine game.exe</code></span></li>
         <li><span class="ctx">SpritzWine</span> <span>a “Record performance” toggle in the control panel — no launch options at all</span></li>
       </ul>
+      <p class="muted">Steam’s newest client launches games with a bare system PATH —
+        the setup checklist ships a one-click fix so a plain <code>beisl %command%</code>
+        keeps working (<a href="https://github.com/ValveSoftware/steam-for-linux/issues/13389"
+        rel="external">upstream bug</a>).</p>
       <p class="status-note">
-        Beisl is young, but the pipeline runs end to end: the v1 surface is shipped —
-        results view, trace library (browse, analyze, export, delete past runs), and
-        the MCP server. The <code>Exports</code> symbol tier is proven on real
-        captures; <code>Full</code>-tier symbols are en route. Grab the tarball from
+        Beisl is young, but <b>0.1.0</b> — the first release without the alpha tag —
+        runs end to end: results view, trace library (browse, analyze, export, delete
+        past runs), the MCP server, man pages, and a degraded recording tier so a
+        locked-down box still gets a userspace-only trace instead of nothing. The
+        <code>Exports</code> symbol tier is proven on real captures;
+        <code>Full</code>-tier symbols are en route. Grab the tarball from
         <a href="https://codeberg.org/SpritzWine/beisl/releases" rel="external">releases</a>,
         or source and issues at
         <a href="https://codeberg.org/SpritzWine/beisl" rel="external">codeberg.org/SpritzWine/beisl</a>.
@@ -335,16 +342,32 @@
       <button id="copy-cmd" class="copy-btn" type="button"
               aria-label="Copy the launch option: beisl percent command percent">Copy</button>
 <pre><code><span class="c"># from an extracted release bundle:</span>
-<span class="cmd">./beisl install</span>   <span class="c"># beisl + beisl-setup onto your PATH</span>
+<span class="cmd">./beisl install</span>   <span class="c"># beisl, beisl-setup + man pages (`man beisl`)</span>
 
 <span class="c"># once: vet the host (perf, llvm, paranoid, MangoHud, GPU)</span>
-<span class="cmd">beisl check</span>
+<span class="cmd">beisl --check</span>
 
 <span class="c"># Steam → your game → Properties… → Launch Options:</span>
 <span class="cmd">beisl <span class="hl">%command%</span></span>
 
 <span class="c"># next launch is traced; each run keeps its own dir:</span>
 <span class="c">#   ~/.local/share/beisl/traces/run-*/</span></code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= RELEASE NOTES ======================= -->
+<section id="notes" aria-labelledby="notes-h">
+  <div class="wrap">
+    <p class="kicker">Fresh from the cellar</p>
+    <h2 id="notes-h">Release notes.</h2>
+    <div id="release-notes" class="release-notes card">
+      <!-- site.js replaces this with releasenotes.md (same-origin fetch; the file is
+           a verbatim copy of the repo's RELEASENOTES.md — see page/README.md). Under
+           file:// or if the fetch fails, this fallback link stays. -->
+      <p>Read the current
+        <a href="https://codeberg.org/SpritzWine/beisl/src/branch/main/RELEASENOTES.md"
+           rel="external">release notes on Codeberg</a>.</p>
     </div>
   </div>
 </section>

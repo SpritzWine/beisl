@@ -443,4 +443,68 @@
       }
     });
   }
+
+  /* ---------- release notes: releasenotes.md, rendered client-side ----------
+     Single source of truth: the file is a verbatim copy of the repo's
+     RELEASENOTES.md, refreshed at each release (see page/README.md). Fetch is
+     same-origin only — the page's no-external-requests rule holds; under
+     file:// (or any fetch failure) the section keeps its fallback link. */
+
+  /* md-render-start (extracted for the offline renderer test) */
+  function mdInline(s) {
+    return s
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/`([^`]+)`/g, "<code>$1</code>")
+      .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+      .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" rel="external">$1</a>')
+      .replace(/\*([^*]+)\*/g, "<em>$1</em>");
+  }
+
+  function mdRender(md) {
+    /* The subset RELEASENOTES.md actually uses: #/## headings, ---, - lists
+       (with indented continuation lines), paragraphs, and the inline set
+       above. Anything fancier belongs in the repo file, not here. */
+    var out = [], inList = false, para = [];
+    function flushPara() {
+      if (para.length) { out.push("<p>" + mdInline(para.join(" ")) + "</p>"); para = []; }
+    }
+    function closeList() { if (inList) { out.push("</ul>"); inList = false; } }
+    md.split(/\r?\n/).forEach(function (line) {
+      var h = line.match(/^(#{1,3})\s+(.*)$/);
+      if (h) {
+        flushPara(); closeList();
+        var lvl = h[1].length + 2; /* # -> h3: the section already owns the h2 */
+        out.push("<h" + lvl + ">" + mdInline(h[2]) + "</h" + lvl + ">");
+        return;
+      }
+      if (/^---+\s*$/.test(line)) { flushPara(); closeList(); out.push("<hr>"); return; }
+      if (/^[-*]\s+/.test(line)) {
+        flushPara();
+        if (!inList) { out.push("<ul>"); inList = true; }
+        out.push("<li>" + mdInline(line.replace(/^[-*]\s+/, "")) + "</li>");
+        return;
+      }
+      if (inList && /^\s+\S/.test(line)) {
+        out[out.length - 1] =
+          out[out.length - 1].replace(/<\/li>$/, " " + mdInline(line.trim()) + "</li>");
+        return;
+      }
+      if (/^\s*$/.test(line)) { flushPara(); closeList(); return; }
+      para.push(line.trim());
+    });
+    flushPara(); closeList();
+    return out.join("\n");
+  }
+  /* md-render-end */
+
+  var notesHost = document.getElementById("release-notes");
+  if (notesHost && window.fetch && location.protocol !== "file:") {
+    fetch("releasenotes.md")
+      .then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.text();
+      })
+      .then(function (md) { notesHost.innerHTML = mdRender(md); })
+      .catch(function () { /* fallback link stays */ });
+  }
 })();
