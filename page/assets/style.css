@@ -645,3 +645,5 @@ section + section { border-top: 1px solid var(--hair); }
 .release-notes ul { margin: 8px 0 16px; padding-left: 22px; }
 .release-notes li { margin: 7px 0; }
 .release-notes hr { border: none; border-top: 1px solid var(--hair); margin: 28px 0; }
+.release-notes { position: relative; } /* offsetParent for the two-release height cap */
+.release-notes.scrolls { overflow-y: auto; padding-right: 22px; } /* keep text off the scrollbar */

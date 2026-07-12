@@ -504,7 +504,17 @@
         if (!r.ok) throw new Error("HTTP " + r.status);
         return r.text();
       })
-      .then(function (md) { notesHost.innerHTML = mdRender(md); })
+      .then(function (md) {
+        notesHost.innerHTML = mdRender(md);
+        /* Two releases worth of height, then scroll: each release opens with
+           an h3, so the 3rd h3's top is exactly the cut line. With <= 2
+           releases the box stays uncapped (nothing to scroll to). */
+        var heads = notesHost.querySelectorAll("h3");
+        if (heads.length > 2) {
+          notesHost.style.maxHeight = heads[2].offsetTop + "px";
+          notesHost.classList.add("scrolls");
+        }
+      })
       .catch(function () { /* fallback link stays */ });
   }
 })();
