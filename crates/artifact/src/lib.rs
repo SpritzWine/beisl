@@ -341,8 +341,9 @@ impl TraceArtifact {
             if f.dropped_rows > 0 {
                 let _ = writeln!(
                     o,
-                    "  note: {} implausible frametime row(s) (>10 s) dropped — a MangoHud \
-                     logging glitch, not gameplay.",
+                    "  note: {} implausible frametime row(s) dropped (>10 s, or matching \
+                     time-since-boot — MangoHud logs the machine's uptime as the first \
+                     frametime of every new swapchain). A logging glitch, not gameplay.",
                     f.dropped_rows
                 );
             }
@@ -428,6 +429,59 @@ type CsvFrames = (FrameStats, Vec<Spike>, Vec<(f64, f32)>);
 /// shader-compile stalls are real and must survive; hours are not a frame.
 const MAX_PLAUSIBLE_FRAMETIME_MS: f32 = 10_000.0;
 
+/// The glitch's precise signature: the bogus value IS the machine's uptime at the
+/// moment the row was logged (MangoHud computes `now - last_present_time` against the
+/// zero-initialized timestamp of every new swapchain's first frame, so raw
+/// CLOCK_MONOTONIC leaks into the log — measured at 99.7-99.8 % of uptime across two
+/// real traces). Matching the signature catches what the fixed ceiling can't: on a
+/// fast-boot setup (boot -> Steam -> game in seconds) the leak is small enough to
+/// pass 10 s. Leaks mid-session carry the uptime of *their* moment, so the window
+/// spans the whole logged duration, padded by [`LEAK_SLACK_S`] + 2 % for clock skew.
+fn leak_window(uptime_end_s: f64, logged_dur_s: f64) -> (f64, f64) {
+    let slack = LEAK_SLACK_S + uptime_end_s * 0.02;
+    (uptime_end_s - logged_dur_s - slack, uptime_end_s + slack)
+}
+const LEAK_SLACK_S: f64 = 5.0;
+
+/// Is this frametime the monotonic leak? Only answerable with a window (same machine,
+/// same boot — see [`uptime_at_csv_end`]). The lower bound is floored at
+/// [`LEAK_FLOOR_S`]: no Steam box goes boot -> first presented frame in under ~20 s,
+/// and the floor guarantees even a pathological real 10-20 s stall can never be
+/// misclassified — below it, the ceiling is deliberately the only gate.
+fn is_uptime_leak(ms: f32, window: Option<(f64, f64)>) -> bool {
+    let Some((lo, hi)) = window else {
+        return false;
+    };
+    let s = ms as f64 / 1000.0;
+    s >= lo.max(LEAK_FLOOR_S) && s <= hi
+}
+/// The window may never reach below this, whatever the uptime says.
+const LEAK_FLOOR_S: f64 = 20.0;
+
+/// Uptime (seconds since boot) when the CSV's last row was written: its mtime
+/// (MangoHud flushes per frame, so mtime ≈ end of logging) minus the boot epoch from
+/// `/proc/stat`'s `btime`. `None` off-Linux or when the numbers say "different boot /
+/// different machine" (non-positive uptime) — an exported trace analyzed elsewhere
+/// gets the ceiling only, never a bogus window.
+fn uptime_at_csv_end(csv: &Path) -> Option<f64> {
+    let stat = std::fs::read_to_string("/proc/stat").ok()?;
+    let btime: f64 = stat
+        .lines()
+        .find_map(|l| l.strip_prefix("btime "))?
+        .trim()
+        .parse()
+        .ok()?;
+    let mtime = std::fs::metadata(csv)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs_f64();
+    let uptime = mtime - btime;
+    (uptime > 0.0).then_some(uptime)
+}
+
 /// Parse a MangoHud frametime CSV into stats + worst spikes.
 ///
 /// Layout (verified): two system-info header lines, then a data-header line whose columns
@@ -435,30 +489,44 @@ const MAX_PLAUSIBLE_FRAMETIME_MS: f32 = 10_000.0;
 /// running sum of frametimes rather than the absolute-clock `elapsed` column, so it's
 /// robust to that column's units.
 fn frames_from_csv(path: &Path) -> Option<CsvFrames> {
+    frames_from_csv_gated(path, uptime_at_csv_end(path))
+}
+
+/// [`frames_from_csv`] with the uptime injectable, so tests exercise the leak window
+/// without depending on the test machine's real boot time.
+fn frames_from_csv_gated(path: &Path, uptime_end_s: Option<f64>) -> Option<CsvFrames> {
     let text = std::fs::read_to_string(path).ok()?;
     let mut lines = text.lines();
     // Skip the two system-info lines; the third line is the data header.
     let header = lines.by_ref().nth(2)?;
     let ft_col = header.split(',').position(|c| c.trim() == "frametime")?;
 
+    let raw: Vec<f32> = lines
+        .filter_map(|row| row.split(',').nth(ft_col))
+        .filter_map(|field| field.trim().parse::<f32>().ok())
+        .filter(|ms| *ms > 0.0 && ms.is_finite())
+        .collect();
+
+    // The leak window needs the session's logged duration, which needs the rows —
+    // so: provisional duration over ceiling-passing rows first (leaks are rare and
+    // huge, so their exclusion here is what makes the estimate usable), then the
+    // real classification pass.
+    let provisional_dur_s: f64 = raw
+        .iter()
+        .filter(|ms| **ms <= MAX_PLAUSIBLE_FRAMETIME_MS)
+        .map(|ms| *ms as f64 / 1000.0)
+        .sum();
+    let window = uptime_end_s.map(|ue| leak_window(ue, provisional_dur_s));
+
     let mut fts: Vec<f32> = Vec::new();
     let mut timeline: Vec<(f64, f32)> = Vec::new();
     let mut dropped: u64 = 0;
     let mut t = 0.0f64;
-    for row in lines {
-        let Some(field) = row.split(',').nth(ft_col) else {
-            continue;
-        };
-        let Ok(ms) = field.trim().parse::<f32>() else {
-            continue;
-        };
-        if ms <= 0.0 || !ms.is_finite() {
-            continue;
-        }
+    for ms in raw {
         // Implausible rows are dropped from *everything* — stats, spikes, and the
         // timeline clock: one hours-long value would otherwise shift every later
         // bookmark by hours and flatten the chart to a spike at nothing.
-        if ms > MAX_PLAUSIBLE_FRAMETIME_MS {
+        if ms > MAX_PLAUSIBLE_FRAMETIME_MS || is_uptime_leak(ms, window) {
             dropped += 1;
             continue;
         }
@@ -591,6 +659,46 @@ mod tests {
         assert!(timeline
             .iter()
             .all(|&(_, ms)| ms <= MAX_PLAUSIBLE_FRAMETIME_MS));
+    }
+
+    #[test]
+    fn uptime_leak_window_matches_the_signature_and_nothing_else() {
+        // A 6.4 h session-end uptime, 4-minute log (the real CarX shape): the leak
+        // values (uptime at their moment) fall inside; real frametimes never do.
+        let w = Some(leak_window(23_070.0, 235.0));
+        assert!(is_uptime_leak(23_024_200.0, w)); // 23_024 s — the real leak value (ms)
+        assert!(is_uptime_leak(22_995_200.0, w)); // earliest leak in that session
+        assert!(!is_uptime_leak(16.0, w)); // a frame
+        assert!(!is_uptime_leak(2_500.0, w)); // a real shader stall
+        assert!(!is_uptime_leak(9_500.0, w)); // even a huge real stall
+                                              // No window (other machine / other boot / non-Linux): never a leak verdict.
+        assert!(!is_uptime_leak(23_024_200.0, None));
+    }
+
+    #[test]
+    fn leak_floor_protects_real_stalls_on_fresh_boots() {
+        // Machine up only 13 s at log end: the naive window would reach down into
+        // real-stall territory; the 20 s floor keeps anything below it out of reach.
+        let w = Some(leak_window(13.0, 5.0));
+        assert!(!is_uptime_leak(8_000.0, w)); // 8 s stall on a fresh boot: kept
+                                              // And above the floor the window still works where it can exist at all.
+        let w = Some(leak_window(60.0, 10.0));
+        assert!(is_uptime_leak(55_000.0, w)); // 55 s ≈ uptime: the leak
+        assert!(!is_uptime_leak(15_000.0, w)); // below the floor: ceiling's business
+    }
+
+    #[test]
+    fn injected_uptime_drops_a_leak_row_from_the_csv() {
+        // A leak row whose value sits inside the injected uptime window but is also
+        // > ceiling — the common real case; it must be dropped and counted exactly once.
+        let csv = "os,cpu\nSteam,Ryzen\nfps,frametime,elapsed\n\
+                   60,16.0,1\n60,16.0,2\n0,59000.0,3\n60,16.0,4\n";
+        let (stats, _, timeline) =
+            frames_from_csv_gated(&write_csv("leak", csv), Some(60.0)).unwrap();
+        assert_eq!(stats.dropped_rows, 1);
+        assert_eq!(stats.frames, 3);
+        assert!(stats.logged_seconds < 1.0);
+        assert!(timeline.iter().all(|&(_, ms)| ms < 100.0));
     }
 
     #[test]
