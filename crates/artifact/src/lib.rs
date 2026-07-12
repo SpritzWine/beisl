@@ -41,6 +41,11 @@ pub struct FrameStats {
     pub worst_frametime_ms: f32,
     /// Seconds the logged window spans (sum of frametimes).
     pub logged_seconds: f64,
+    /// Rows discarded as physically implausible (frametime above
+    /// [`MAX_PLAUSIBLE_FRAMETIME_MS`]) — a MangoHud logging glitch, not gameplay.
+    /// `default` so artifacts written before this field deserialize as 0.
+    #[serde(default)]
+    pub dropped_rows: u64,
 }
 
 /// One hot symbol with its share of samples precomputed (so consumers don't need the total).
@@ -333,6 +338,14 @@ impl TraceArtifact {
                 f.p99_frametime_ms,
                 f.worst_frametime_ms
             );
+            if f.dropped_rows > 0 {
+                let _ = writeln!(
+                    o,
+                    "  note: {} implausible frametime row(s) (>10 s) dropped — a MangoHud \
+                     logging glitch, not gameplay.",
+                    f.dropped_rows
+                );
+            }
             if !self.spikes.is_empty() {
                 let _ = writeln!(o, "  worst spikes:");
                 for s in &self.spikes {
@@ -408,6 +421,13 @@ fn find_csv(run_dir: &Path) -> Option<std::path::PathBuf> {
 /// timeline for the chart.
 type CsvFrames = (FrameStats, Vec<Spike>, Vec<(f64, f32)>);
 
+/// The plausibility ceiling for one frame. MangoHud occasionally logs physically
+/// impossible frametimes (a real CarX Street run had five rows of ~23,000,000 ms —
+/// 6.4 *hours* each — in an otherwise healthy 4-minute log; they dragged avg_fps to
+/// 0.34 and logged_seconds to 32 hours). 10 s is deliberately generous: multi-second
+/// shader-compile stalls are real and must survive; hours are not a frame.
+const MAX_PLAUSIBLE_FRAMETIME_MS: f32 = 10_000.0;
+
 /// Parse a MangoHud frametime CSV into stats + worst spikes.
 ///
 /// Layout (verified): two system-info header lines, then a data-header line whose columns
@@ -423,6 +443,7 @@ fn frames_from_csv(path: &Path) -> Option<CsvFrames> {
 
     let mut fts: Vec<f32> = Vec::new();
     let mut timeline: Vec<(f64, f32)> = Vec::new();
+    let mut dropped: u64 = 0;
     let mut t = 0.0f64;
     for row in lines {
         let Some(field) = row.split(',').nth(ft_col) else {
@@ -432,6 +453,13 @@ fn frames_from_csv(path: &Path) -> Option<CsvFrames> {
             continue;
         };
         if ms <= 0.0 || !ms.is_finite() {
+            continue;
+        }
+        // Implausible rows are dropped from *everything* — stats, spikes, and the
+        // timeline clock: one hours-long value would otherwise shift every later
+        // bookmark by hours and flatten the chart to a spike at nothing.
+        if ms > MAX_PLAUSIBLE_FRAMETIME_MS {
+            dropped += 1;
             continue;
         }
         timeline.push((t, ms));
@@ -476,6 +504,7 @@ fn frames_from_csv(path: &Path) -> Option<CsvFrames> {
             p99_frametime_ms: p99,
             worst_frametime_ms: worst,
             logged_seconds,
+            dropped_rows: dropped,
         },
         spikes,
         downsample(&timeline),
@@ -536,6 +565,41 @@ mod tests {
         let (stats, spikes, _timeline) = frames_from_csv(&write_csv("smooth", csv)).unwrap();
         assert!(spikes.is_empty());
         assert!(stats.avg_fps > 55.0 && stats.avg_fps < 65.0);
+    }
+
+    #[test]
+    fn implausible_frametimes_are_dropped_not_averaged() {
+        // Real-world shape (CarX Street, 2026-07-12): healthy frames with hours-long
+        // garbage rows in between. They must vanish from stats, spikes, and the
+        // timeline clock — and be counted. The genuine 2.5 s shader-stall survives.
+        let csv = "os,cpu\nSteam,Ryzen\nfps,frametime,elapsed\n\
+                   60,16.0,1\n60,16.0,2\n0,23000000.0,3\n60,16.0,4\n\
+                   0,23024200.0,5\n0.4,2500.0,6\n";
+        let (stats, spikes, timeline) = frames_from_csv(&write_csv("garbage", csv)).unwrap();
+        assert_eq!(stats.dropped_rows, 2);
+        assert_eq!(stats.frames, 4);
+        assert_eq!(stats.worst_frametime_ms, 2500.0);
+        assert!(
+            stats.logged_seconds < 3.0,
+            "the clock must not include garbage: {}",
+            stats.logged_seconds
+        );
+        assert!(spikes
+            .iter()
+            .chain(std::iter::empty())
+            .all(|s| s.frametime_ms <= MAX_PLAUSIBLE_FRAMETIME_MS));
+        assert!(timeline
+            .iter()
+            .all(|&(_, ms)| ms <= MAX_PLAUSIBLE_FRAMETIME_MS));
+    }
+
+    #[test]
+    fn frame_stats_json_without_dropped_rows_defaults_to_zero() {
+        // Artifacts written before the plausibility gate carry no dropped_rows field.
+        let j = r#"{"frames":1,"avg_fps":60.0,"median_frametime_ms":16.0,
+                    "p99_frametime_ms":16.0,"worst_frametime_ms":16.0,"logged_seconds":1.0}"#;
+        let f: FrameStats = serde_json::from_str(j).unwrap();
+        assert_eq!(f.dropped_rows, 0);
     }
 
     #[test]
