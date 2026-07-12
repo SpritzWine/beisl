@@ -42,13 +42,21 @@ pub fn run(run_dir: &str) -> ExitCode {
         eprintln!("beisl: no perf.data in {run_dir} (expected a trace run directory)");
         return ExitCode::from(2);
     }
-    // The game name is best-effort from the run's session.json; duration likewise.
-    let (game, duration) = session::Session::read(dir)
-        .map(|s| (s.game, s.elapsed_secs as f64))
-        .unwrap_or_else(|| ("unknown".to_string(), 0.0));
+    // The game name, duration, and record mode are best-effort from the run's session.json
+    // (record_mode empty when unreadable — same as a legacy run that predates the field, so
+    // the report simply omits the degraded note rather than guessing).
+    let (game, duration, record_mode) = session::Session::read(dir)
+        .map(|s| (s.game, s.elapsed_secs as f64, s.record_mode))
+        .unwrap_or_else(|| ("unknown".to_string(), 0.0, String::new()));
 
     let urls = debuginfod_urls(&Config::load());
-    match artifact::TraceArtifact::build_with_debuginfod(dir, &game, duration, urls.as_deref()) {
+    match artifact::TraceArtifact::build_with_debuginfod(
+        dir,
+        &game,
+        duration,
+        &record_mode,
+        urls.as_deref(),
+    ) {
         Ok(a) => {
             out!("{}", a.render_report().trim_end());
             ExitCode::SUCCESS

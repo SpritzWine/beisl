@@ -85,6 +85,12 @@ pub struct TraceArtifact {
     /// UI. Empty string when undetected. Defaulted so pre-vendor artifacts still load.
     #[serde(default)]
     pub gpu_vendor: String,
+    /// Which perf record mode produced this trace (`"full"`/`"degraded"`/`"none"`, empty on
+    /// legacy runs). "degraded" is userspace-only (no `-a`, no kernel/CAP_PERFMON access), so
+    /// its `layers` split has NO kernel bar by construction — that's a measurement limit, not
+    /// a quiet kernel. Defaulted so pre-record_mode artifacts still load.
+    #[serde(default)]
+    pub record_mode: String,
     pub duration_s: f64,
     /// Present when a MangoHud CSV was logged; absent otherwise.
     pub frame_stats: Option<FrameStats>,
@@ -125,21 +131,25 @@ const TOP_SPIKES: usize = 10;
 impl TraceArtifact {
     /// Build the artifact for a trace run directory: resolve its `perf.data` and fold in
     /// the frametime CSV if one is present. `game` and `duration_s` come from the wrapper
-    /// (the session); the wine flavor is inferred during resolution.
+    /// (the session); the wine flavor is inferred during resolution. No record mode is
+    /// known here — callers that have a `Session` should call `build_with_debuginfod`
+    /// directly so the artifact can carry it.
     pub fn build(run_dir: &Path, game: &str, duration_s: f64) -> io::Result<Self> {
-        Self::build_with_debuginfod(run_dir, game, duration_s, None)
+        Self::build_with_debuginfod(run_dir, game, duration_s, "", None)
     }
 
-    /// As [`build`](Self::build), but with an explicit `DEBUGINFOD_URLS` for the perf-side
-    /// resolve. The wrapper's post-run analysis runs inside Steam's game-launch session,
-    /// which does NOT carry an interactive login shell's `DEBUGINFOD_URLS`, so the driver
-    /// layer (Mesa/Intel/AMD Vulkan — the only layer debuginfod can serve) would silently
-    /// resolve to anonymous addresses. Passing the URL through here makes the trace-time
-    /// resolve match a later `beisl symbols` run instead of degrading by environment.
+    /// As [`build`](Self::build), but with an explicit `record_mode` (see the field doc on
+    /// [`TraceArtifact::record_mode`]) and `DEBUGINFOD_URLS` for the perf-side resolve. The
+    /// wrapper's post-run analysis runs inside Steam's game-launch session, which does NOT
+    /// carry an interactive login shell's `DEBUGINFOD_URLS`, so the driver layer (Mesa/Intel/
+    /// AMD Vulkan — the only layer debuginfod can serve) would silently resolve to anonymous
+    /// addresses. Passing the URL through here makes the trace-time resolve match a later
+    /// `beisl symbols` run instead of degrading by environment.
     pub fn build_with_debuginfod(
         run_dir: &Path,
         game: &str,
         duration_s: f64,
+        record_mode: &str,
         debuginfod_urls: Option<&str>,
     ) -> io::Result<Self> {
         let res = symbol_resolver::resolve_perf_data_with_debuginfod(
@@ -153,6 +163,7 @@ impl TraceArtifact {
         Ok(Self::from_parts(
             game,
             duration_s,
+            record_mode,
             res,
             frame_stats,
             spikes,
@@ -163,6 +174,7 @@ impl TraceArtifact {
     fn from_parts(
         game: &str,
         duration_s: f64,
+        record_mode: &str,
         res: Resolution,
         frame_stats: Option<FrameStats>,
         spikes: Vec<Spike>,
@@ -229,6 +241,7 @@ impl TraceArtifact {
             game: game.to_string(),
             wine_flavor: res.wine_flavor.unwrap_or_else(|| "unknown".to_string()),
             gpu_vendor: res.gpu_vendor.unwrap_or_default(),
+            record_mode: record_mode.to_string(),
             duration_s,
             frame_stats,
             spikes,
@@ -297,6 +310,14 @@ impl TraceArtifact {
             let _ = writeln!(
                 o,
                 "  note: Exports tier — PE symbols are nearest-export; A/B-comparable, not full."
+            );
+        }
+        if self.record_mode == "degraded" {
+            let _ = writeln!(
+                o,
+                "  note: degraded recording (userspace-only) — the layer split below has no \
+                 kernel bar because kernel profiling wasn't available, not because the kernel \
+                 was quiet."
             );
         }
 
@@ -524,6 +545,7 @@ mod tests {
             game: "Test".into(),
             wine_flavor: "example-wine-build".into(),
             gpu_vendor: "amd".into(),
+            record_mode: "degraded".into(),
             duration_s: 42.0,
             frame_stats: None,
             spikes: vec![],
@@ -559,8 +581,41 @@ mod tests {
         assert_eq!(back.hot_symbols[0].symbol, "RtlAllocateHeap");
         assert_eq!(back.layers[0].layer, "wine");
         assert_eq!(back.layers[0].pct, 60.0);
+        assert_eq!(back.record_mode, "degraded"); // round-trips through JSON
         assert!(a.render_report().contains("Who ate the frame"));
         assert!(a.headline().contains("RtlAllocateHeap"));
+    }
+
+    /// The degraded-mode note must appear so a reader can't mistake the missing kernel bar
+    /// for a genuinely quiet kernel — and must NOT appear for full/other modes (no
+    /// behavior change there).
+    #[test]
+    fn render_report_notes_degraded_mode_but_not_full() {
+        let mut a = TraceArtifact {
+            schema_version: SCHEMA_VERSION,
+            game: "Test".into(),
+            wine_flavor: "example-wine-build".into(),
+            gpu_vendor: "amd".into(),
+            record_mode: "degraded".into(),
+            duration_s: 1.0,
+            frame_stats: None,
+            spikes: vec![],
+            timeline: vec![],
+            layers: vec![],
+            attributed_pct: 0.0,
+            hot_symbols: vec![],
+            diagnostics: Diagnostics {
+                fidelity: "Exports".into(),
+                total_samples: 0,
+                unresolved_pct: 0.0,
+                anonymous_modules: vec![],
+            },
+        };
+        assert!(a.render_report().contains("degraded recording"));
+        assert!(a.render_report().contains("no kernel bar"));
+
+        a.record_mode = "full".into();
+        assert!(!a.render_report().contains("degraded recording"));
     }
 
     #[test]
@@ -589,7 +644,7 @@ mod tests {
             wine_flavor: None,
             gpu_vendor: None,
         };
-        let a = TraceArtifact::from_parts("G", 1.0, res, None, vec![], vec![]);
+        let a = TraceArtifact::from_parts("G", 1.0, "full", res, None, vec![], vec![]);
         // The gap is disclosed as coverage, never as a peer layer.
         assert_eq!(a.attributed_pct, 60.0);
         assert!(a.layers.iter().all(|l| l.layer != "other"));
@@ -622,6 +677,7 @@ mod tests {
             game: "RoundTrip".into(),
             wine_flavor: "example-wine-build".into(),
             gpu_vendor: "amd".into(),
+            record_mode: "full".into(),
             duration_s: 12.0,
             frame_stats: None,
             spikes: vec![],

@@ -228,6 +228,7 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
                             &run_dir,
                             &sess.game,
                             sess.elapsed_secs,
+                            &sess.record_mode,
                             urls.as_deref(),
                             &mut log,
                         ) {
@@ -564,6 +565,7 @@ fn write_report(
     run_dir: &Path,
     game: &str,
     duration_s: u64,
+    record_mode: &str,
     debuginfod_urls: Option<&str>,
     log: &mut Log,
 ) -> Option<String> {
@@ -572,6 +574,7 @@ fn write_report(
         run_dir,
         game,
         duration_s as f64,
+        record_mode,
         debuginfod_urls,
     ) {
         Ok(a) => a,
