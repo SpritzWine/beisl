@@ -184,7 +184,18 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
                             "clean exit"
                         };
                         log.line(&format!("post-run: analyzing ({why})"));
-                        match write_report(&run_dir, &sess.game, sess.elapsed_secs, &mut log) {
+                        // This resolve runs inside Steam's launch session, which lacks an
+                        // interactive shell's DEBUGINFOD_URLS — set it explicitly so the
+                        // crash trace's driver layer gets symbols instead of anonymous
+                        // addresses (the whole point of auto-analyzing a crash).
+                        let urls = crate::symbols::debuginfod_urls(&cfg);
+                        match write_report(
+                            &run_dir,
+                            &sess.game,
+                            sess.elapsed_secs,
+                            urls.as_deref(),
+                            &mut log,
+                        ) {
                             Some(headline) => format!("Game exited — trace saved. {headline}"),
                             None => "Game exited — trace saved.".to_string(),
                         }
@@ -449,9 +460,20 @@ fn decide_post_run(crashed: bool, policy: preflight::CleanRunAnalysis) -> PostRu
 /// merge) + `report.txt` (human-readable) into the run dir. Best-effort — a resolution
 /// failure (no `perf` at analysis time, unreadable data) must never turn a captured trace
 /// into a wrapper error. Returns the one-line headline for the session message.
-fn write_report(run_dir: &Path, game: &str, duration_s: u64, log: &mut Log) -> Option<String> {
+fn write_report(
+    run_dir: &Path,
+    game: &str,
+    duration_s: u64,
+    debuginfod_urls: Option<&str>,
+    log: &mut Log,
+) -> Option<String> {
     log.line("post-run: resolving symbols");
-    let art = match artifact::TraceArtifact::build(run_dir, game, duration_s as f64) {
+    let art = match artifact::TraceArtifact::build_with_debuginfod(
+        run_dir,
+        game,
+        duration_s as f64,
+        debuginfod_urls,
+    ) {
         Ok(a) => a,
         Err(e) => {
             log.line(&format!("post-run: resolution failed ({e})"));

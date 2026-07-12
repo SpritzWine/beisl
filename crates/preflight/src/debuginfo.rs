@@ -16,8 +16,10 @@
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+use std::process::Command;
 
 use crate::gpu;
+use crate::Distro;
 
 /// NT_GNU_BUILD_ID note type (see `elf(5)` / `binutils/include/elf/common.h`).
 const NT_GNU_BUILD_ID: u32 = 3;
@@ -180,6 +182,81 @@ pub fn debuginfod_configured_from(env_urls: Option<&str>, config_dir: &Path) -> 
         }
     }
     false
+}
+
+/// The federated elfutils debuginfod aggregator — a catch-all fallback appended after
+/// whatever distro-specific server we recommend. `perf` tries `DEBUGINFOD_URLS` entries in
+/// order, so listing the distro server first keeps steady-state lookups local while this
+/// fallback covers gaps: SteamOS and Arch rebuild Mesa themselves, so a driver build-id
+/// minted by that rebuild can miss on the distro's own server even though the federated
+/// aggregator (which mirrors/queries multiple upstreams) still has it.
+const DEBUGINFOD_ELFUTILS_FEDERATED: &str = "https://debuginfod.elfutils.org/";
+
+/// The recommended `DEBUGINFOD_URLS` value for a distro family: its own debuginfod server
+/// (when we know one) followed by the federated elfutils aggregator as a space-separated
+/// fallback. Always returns `Some` — even on an unrecognized distro we still have the
+/// federated fallback to offer.
+pub fn distro_debuginfod_url(distro: Distro) -> Option<String> {
+    let own = match distro {
+        Distro::Fedora => Some("https://debuginfod.fedoraproject.org/"),
+        // `Distro::detect_distro` folds Ubuntu into this same variant (its `ID_LIKE`
+        // contains "debian"), so this also covers Ubuntu installs; Ubuntu ships its own
+        // debuginfod server too, but we can't tell the two apart from the enum alone and
+        // Debian's server plus the federated fallback below still resolves Ubuntu's
+        // build-ids in the common case.
+        Distro::Debian => Some("https://debuginfod.debian.net/"),
+        Distro::Arch => Some("https://debuginfod.archlinux.org/"),
+        Distro::Suse => Some("https://debuginfod.opensuse.org/"),
+        Distro::Unknown => None,
+    };
+    Some(match own {
+        Some(url) => format!("{url} {DEBUGINFOD_ELFUTILS_FEDERATED}"),
+        None => DEBUGINFOD_ELFUTILS_FEDERATED.to_string(),
+    })
+}
+
+/// Does the installed `perf` actually support debuginfod? Setting `DEBUGINFOD_URLS` is
+/// useless if `perf` itself wasn't built with `HAVE_DEBUGINFOD_SUPPORT` (a build-time
+/// dependency on `libdebuginfod`, not present on every distro's `perf` package) — this is
+/// the one part of the story beisl truly cannot paper over. Runs `perf version
+/// --build-options` and inspects the `debuginfod:` line; see
+/// [`perf_build_options_has_debuginfod`] for the parsing.
+pub fn perf_supports_debuginfod() -> bool {
+    let Ok(output) = Command::new("perf")
+        .args(["version", "--build-options"])
+        .output()
+    else {
+        // Couldn't even run `perf` here — not this check's job to report that (the
+        // separate perf-installed check owns it), so don't cry wolf about debuginfod.
+        return true;
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    perf_build_options_has_debuginfod(&text).unwrap_or(true)
+}
+
+/// Testable core of [`perf_supports_debuginfod`]. Finds the line mentioning `debuginfod`
+/// in `perf version --build-options` output (e.g. `debuginfod: [ on  ]  #
+/// HAVE_DEBUGINFOD_SUPPORT`) and reads whether it's `on` or `off`. Returns `None` when no
+/// such line exists (an older `perf` predating the feature flag, or an unrecognized
+/// format) — the caller treats "can't tell" as "assume supported" so this check never nags
+/// on a `perf` build we couldn't introspect, the same conservative stance
+/// [`unsymbolized_families_from`] takes toward manifests it can't judge.
+fn perf_build_options_has_debuginfod(output: &str) -> Option<bool> {
+    let line = output
+        .lines()
+        .find(|l| l.to_ascii_lowercase().contains("debuginfod"))?;
+    let lower = line.to_ascii_lowercase();
+    // Check "off" before "on": both `[ on  ]`/`on` and `[ OFF ]`/`off` show up bracketed
+    // or bare depending on perf's version, but "on" and "off" never appear as substrings
+    // of each other, so a plain `contains` on the lowercased line is enough — no need to
+    // pin down perf's exact column formatting.
+    if lower.contains("off") {
+        Some(false)
+    } else if lower.contains("on") {
+        Some(true)
+    } else {
+        None
+    }
 }
 
 /// The driver families (deduped, sorted) that are missing debug symbols for their x86_64
@@ -469,6 +546,42 @@ mod tests {
         .unwrap();
         let missing = unsymbolized_families_from(&manifests, &debug_root);
         assert!(missing.is_empty(), "{missing:?}");
+    }
+
+    #[test]
+    fn distro_debuginfod_url_maps_known_distros_and_falls_back_for_unknown() {
+        assert_eq!(
+            distro_debuginfod_url(Distro::Fedora).as_deref(),
+            Some("https://debuginfod.fedoraproject.org/ https://debuginfod.elfutils.org/")
+        );
+        assert_eq!(
+            distro_debuginfod_url(Distro::Arch).as_deref(),
+            Some("https://debuginfod.archlinux.org/ https://debuginfod.elfutils.org/")
+        );
+        // Unknown still returns the federated fallback alone, not `None` — beisl always
+        // has *something* to offer, just without a distro-specific first hop.
+        assert_eq!(
+            distro_debuginfod_url(Distro::Unknown).as_deref(),
+            Some("https://debuginfod.elfutils.org/")
+        );
+    }
+
+    #[test]
+    fn perf_build_options_has_debuginfod_parses_on_off_and_absent() {
+        assert_eq!(
+            perf_build_options_has_debuginfod("debuginfod: [ on  ]  # HAVE_DEBUGINFOD_SUPPORT\n"),
+            Some(true)
+        );
+        assert_eq!(
+            perf_build_options_has_debuginfod("debuginfod: [ OFF ]  # HAVE_DEBUGINFOD_SUPPORT\n"),
+            Some(false)
+        );
+        // No `debuginfod` line at all (an older perf predating the feature flag):
+        // "can't tell", not "off".
+        assert_eq!(
+            perf_build_options_has_debuginfod("dwarf: [ on ]  # HAVE_DWARF_SUPPORT\n"),
+            None
+        );
     }
 
     #[test]

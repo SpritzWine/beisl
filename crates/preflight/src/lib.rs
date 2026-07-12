@@ -77,6 +77,13 @@ pub enum CheckId {
     /// multi-step affairs, so the `why` carries the hint (see
     /// [`driver_debuginfo_check`]).
     DriverDebuginfo,
+    /// Optional, informational: the one debuginfod gap Beisl can't paper over. Beisl sets
+    /// `DEBUGINFOD_URLS` on its own `perf script` child (so a Steam-session resolve still
+    /// fetches driver symbols even where the shell didn't export it), but that only works
+    /// if the local `perf` was *built* with debuginfod support. When it wasn't, on-demand
+    /// symbol fetch is impossible regardless of config, so we say so rather than let the
+    /// driver layer silently go anonymous (see [`perf_debuginfod_check`]).
+    PerfDebuginfod,
 }
 
 /// How to repair a failing check. Turned into a concrete `pkexec` argv by [`fix_command`].
@@ -147,6 +154,7 @@ impl Check {
                 _ => Status::Ok,
             },
             CheckId::DiskSpace => return, // computed in `disk_check`
+            CheckId::PerfDebuginfod => return, // computed in `perf_debuginfod_check`
         };
     }
 }
@@ -310,6 +318,59 @@ pub fn driver_debuginfo_check() -> Check {
             Status::NeedsFix
         },
         fix: None,
+    }
+}
+
+/// The optional, informational `perf`-built-with-debuginfod advisory. Added like
+/// [`disk_check`] (constructed already-detected, so [`Check::detect`] just returns for it).
+///
+/// This is the complement to [`driver_debuginfo_check`]: that one asks "are the driver's
+/// debug files reachable?"; this asks "can `perf` fetch them at all?". Beisl injects
+/// `DEBUGINFOD_URLS` itself (see `debuginfo::distro_debuginfod_url`), so a missing *config*
+/// is no longer a gap — but a `perf` compiled without `HAVE_DEBUGINFOD_SUPPORT` can't fetch
+/// no matter what we set, and that's the one case worth surfacing. `fix` stays `None`: the
+/// remedy is a distro-specific `perf`/elfutils package, so the hint rides in the `why`.
+pub fn perf_debuginfod_check() -> Check {
+    let supported = debuginfo::perf_supports_debuginfod();
+    Check {
+        id: CheckId::PerfDebuginfod,
+        label: "perf debuginfod (optional)",
+        why: perf_debuginfod_why(supported, detect_distro()).into(),
+        blocking: false,
+        status: if supported {
+            Status::Ok
+        } else {
+            Status::NeedsFix
+        },
+        fix: None,
+    }
+}
+
+fn perf_debuginfod_why(supported: bool, distro: Distro) -> String {
+    if supported {
+        // Beisl sets DEBUGINFOD_URLS on its own resolve, so this being on means driver
+        // symbols get fetched on demand even for a trace resolved inside Steam's session.
+        "Your `perf` was built with debuginfod support, so Beisl can fetch GPU-driver \
+         debug symbols on demand during analysis — driver time gets real function names \
+         without installing anything."
+            .to_string()
+    } else {
+        let hint = match distro {
+            Distro::Fedora => "your `perf` package is unusually old — `sudo dnf upgrade perf`",
+            Distro::Debian => {
+                "install a newer `linux-perf` (the debuginfod client landed in perf 5.8+)"
+            }
+            Distro::Arch => "update `linux-tools`/`perf` (Arch builds it with debuginfod)",
+            Distro::Suse | Distro::Unknown => {
+                "install a `perf` built with debuginfod support (elfutils ≥ 0.179)"
+            }
+        };
+        format!(
+            "Your `perf` was built without debuginfod support, so Beisl can't fetch \
+             GPU-driver debug symbols on demand — driver time will show as anonymous \
+             addresses unless the debug files are installed locally. To enable on-demand \
+             fetch: {hint}. Optional — game and wine symbols are unaffected."
+        )
     }
 }
 
@@ -906,6 +967,17 @@ mod tests {
         let ok = driver_debuginfo_why(&[], Distro::Fedora);
         assert!(ok.contains("No missing debug symbols detected"));
         assert!(!ok.contains("debuginfo-install"));
+    }
+
+    #[test]
+    fn perf_debuginfod_why_reflects_support_and_names_a_distro_hint() {
+        // Supported: reassure, no install hint.
+        let ok = perf_debuginfod_why(true, Distro::Fedora);
+        assert!(ok.contains("built with debuginfod support"), "{ok}");
+        // Unsupported: name the gap and carry a distro-specific hint.
+        let bad = perf_debuginfod_why(false, Distro::Arch);
+        assert!(bad.contains("without debuginfod support"), "{bad}");
+        assert!(bad.contains("linux-tools"), "Arch hint: {bad}");
     }
 
     #[test]

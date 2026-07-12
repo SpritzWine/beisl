@@ -9,7 +9,7 @@ use std::process::ExitCode;
 use crate::out::out;
 use preflight::{
     all_checks, detect_distro, disk_check, driver_debuginfo_check, fix_command, gpu_dump_check,
-    mangohud_hotkey_check, multi_gpu_check, Status,
+    mangohud_hotkey_check, multi_gpu_check, perf_debuginfod_check, Status,
 };
 
 pub fn run() -> ExitCode {
@@ -31,6 +31,10 @@ pub fn run() -> ExitCode {
     // The driver debug-symbols row is optional and informational — the remedy is a
     // manual, distro-specific install named in the why, never a one-click fix.
     checks.push(driver_debuginfo_check());
+    // Advisory companion: whether `perf` can fetch those symbols on demand at all (built
+    // with debuginfod support). Beisl injects the URL itself, so this is the only piece it
+    // can't paper over — informational, never a one-click fix.
+    checks.push(perf_debuginfod_check());
     // Advisory: the MangoHud #2053 hotkey crash — warned about, never "fixed" by us.
     checks.push(mangohud_hotkey_check());
 

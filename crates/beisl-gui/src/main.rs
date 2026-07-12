@@ -27,8 +27,8 @@ use cosmic::{Application, Element};
 use preflight::gpu::GpuPinCandidate;
 use preflight::{
     all_checks, detect_distro, disk_check, driver_debuginfo_check, fix_command, gpu_dump_check,
-    mangohud_hotkey_check, multi_gpu_check, Check, CheckId, Config, Distro, DumpAccessPolicy, Fix,
-    GpuPin, Status,
+    mangohud_hotkey_check, multi_gpu_check, perf_debuginfod_check, Check, CheckId, Config, Distro,
+    DumpAccessPolicy, Fix, GpuPin, Status,
 };
 
 mod chart; // frametime timeline (plotters, drawn on cosmic's Canvas)
@@ -130,6 +130,9 @@ enum Message {
     /// Advanced: pick (or clear) the GPU pin. `None` = "Don't pin"; `Some(i)` indexes
     /// `AppModel::gpu_candidates`. Always a plain config write — no privilege anywhere.
     SetGpuPin(Option<usize>),
+    /// Advanced: on/off for on-demand debuginfod fetch of GPU-driver symbols. Default on;
+    /// a plain config write, same as the GPU pin — nothing privileged to run either way.
+    SetDebuginfodFetch(bool),
     ToggleAdvanced,
     /// Show the trace library (rescans on every entry — cheap, and a run finished
     /// since the last look should simply be there).
@@ -227,6 +230,10 @@ impl AppModel {
         checks.push(driver_debuginfo_check());
         // Advisory: the MangoHud #2053 hotkey crash — a workaround in the why, no fix.
         checks.push(mangohud_hotkey_check());
+        // Advisory: can the local `perf` fetch debug symbols via debuginfod at all? Distinct
+        // from `driver_debuginfo_check` (are the files reachable) — this asks whether `perf`
+        // was even built with the support Beisl's on-demand fetch depends on.
+        checks.push(perf_debuginfod_check());
         checks
     }
 
@@ -414,6 +421,13 @@ impl Application for AppModel {
                     let _ = self.config.save();
                 }
             }
+            Message::SetDebuginfodFetch(on) => {
+                // Plain config write — no privilege anywhere in this path.
+                if !self.running() {
+                    self.config.debuginfod_fetch = on;
+                    let _ = self.config.save();
+                }
+            }
             Message::ToggleAdvanced => self.show_advanced = !self.show_advanced,
             Message::ShowTraces => {
                 self.traces.refresh();
@@ -542,6 +556,11 @@ impl AppModel {
                 .push(widget::text::caption(c.why.clone().into_owned()));
         }
 
+        // Informational only — the decision lives in Advanced. A poweruser who turned it
+        // off still gets an honest read here; everyone else just sees the good default
+        // is on, with nothing to decide.
+        content = content.push(self.debuginfod_indicator());
+
         // Advanced (opt-in details): collapsed by default. No expander widget at this
         // libcosmic rev, so a plain toggle-shown section (the brief allows this).
         content = content.push(self.advanced_section());
@@ -635,6 +654,22 @@ impl AppModel {
             .into()
     }
 
+    /// Main-screen indicator for on-demand debuginfod fetch (see `Config::debuginfod_fetch`,
+    /// default on): the average user should see a reassurance, not a decision — the actual
+    /// toggle lives in Advanced (`debuginfod_toggle`). Read-only checkbox, same idiom as the
+    /// checklist rows above.
+    fn debuginfod_indicator(&self) -> Element<'_, Message> {
+        let label = if self.config.debuginfod_fetch {
+            "Debug symbols: fetched on demand ✓"
+        } else {
+            "Debug symbols: fetched on demand — off (see Advanced)"
+        };
+        widget::Row::new()
+            .spacing(12)
+            .push(widget::checkbox(self.config.debuginfod_fetch).label(label))
+            .into()
+    }
+
     /// The collapsed "Advanced" block: a toggle header, and when open, the GPU dump-access
     /// policy radios + a "Remove rule" button. The radios record intent only; the actual
     /// privileged install/remove are always the explicit Enable / Remove buttons.
@@ -685,7 +720,28 @@ impl AppModel {
         actions = actions.push(remove);
         col = col.push(actions);
 
-        col.push(self.gpu_pin_picker()).into()
+        col = col.push(self.gpu_pin_picker());
+        col.push(self.debuginfod_toggle()).into()
+    }
+
+    /// The debuginfod on-demand fetch toggle. On by default (see `preflight::Config`); the
+    /// main screen only shows that it's active (see `checks_page`) — this is the one place
+    /// a poweruser can turn it off for a fully offline/hermetic resolve.
+    fn debuginfod_toggle(&self) -> Element<'_, Message> {
+        widget::Column::new()
+            .spacing(8)
+            .push(widget::text::body("GPU-driver debug symbols"))
+            .push(widget::text::caption(
+                "Fetches driver debug symbols on demand during analysis via debuginfod — \
+                 cached locally, no privilege, no manual setup. Turn off to keep symbol \
+                 resolution fully offline.",
+            ))
+            .push(
+                widget::toggler(self.config.debuginfod_fetch)
+                    .label("Fetch on demand".to_string())
+                    .on_toggle(Message::SetDebuginfodFetch),
+            )
+            .into()
     }
 
     /// The GPU pin picker: "Don't pin (default)" plus one radio per detected candidate —

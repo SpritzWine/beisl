@@ -267,19 +267,49 @@ pub fn gpu_vendor(dso: &str) -> Option<&'static str> {
 /// perf symbolizes ELF DSOs itself; PE DLLs come back `[unknown]` and are resolved here
 /// against their on-disk export tables (each DLL parsed once, cached). Returns the hot
 /// symbols aggregated by `(module, symbol)` and a [`Diagnostics`] summary.
+///
+/// Thin back-compat wrapper: same as [`resolve_perf_data_with_debuginfod`] with no
+/// debuginfod URLs, i.e. today's behavior (the child inherits the ambient environment
+/// unchanged). New callers that want reliable driver-symbol fetch should call that
+/// function directly.
 pub fn resolve_perf_data(perf_data: &Path) -> io::Result<Resolution> {
-    let mut child = Command::new("perf")
-        .args([
-            "script",
-            "--show-mmap-events",
-            "-F",
-            "comm,pid,ip,sym,dso",
-            "-i",
-        ])
-        .arg(perf_data)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
+    resolve_perf_data_with_debuginfod(perf_data, None)
+}
+
+/// Resolve every sample in `perf_data` to a wine symbol, via `perf script`, optionally
+/// pointing `perf` at a debuginfod server for missing ELF debug symbols.
+///
+/// `perf` fetches missing ELF debuginfo on demand from debuginfod, but only if
+/// `DEBUGINFOD_URLS` is set in *its* environment — and a trace resolved inside Steam's
+/// game-launch session does not inherit an interactive login shell's exports. Left to
+/// ambient inheritance, that means driver-layer symbols (the Mesa/Intel/AMD Vulkan ICDs —
+/// the only layer debuginfod can serve; PE/JIT internals need the Full/DWARF tier
+/// regardless) silently vanish depending on *how* beisl happened to be launched, not on
+/// whether a debuginfod server is actually reachable. Passing `Some(urls)` here makes that
+/// an explicit, reproducible choice instead of an accident of the calling shell.
+///
+/// `debuginfod_urls` is the same space-separated URL list `DEBUGINFOD_URLS` takes.
+/// `None` leaves the var unset, so the child inherits the ambient environment exactly as
+/// [`resolve_perf_data`] always has.
+pub fn resolve_perf_data_with_debuginfod(
+    perf_data: &Path,
+    debuginfod_urls: Option<&str>,
+) -> io::Result<Resolution> {
+    let mut cmd = Command::new("perf");
+    cmd.args([
+        "script",
+        "--show-mmap-events",
+        "-F",
+        "comm,pid,ip,sym,dso",
+        "-i",
+    ])
+    .arg(perf_data)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null());
+    if let Some(urls) = debuginfod_urls {
+        cmd.env("DEBUGINFOD_URLS", urls);
+    }
+    let mut child = cmd.spawn()?;
     let stdout = child.stdout.take().expect("piped");
     let reader = io::BufReader::new(stdout);
 

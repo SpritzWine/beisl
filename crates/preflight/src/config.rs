@@ -82,7 +82,7 @@ pub struct GpuPin {
 
 /// The whole of Beisl's config file. Kept tiny and forward-compatible: every field is
 /// `#[serde(default)]`, so an older file (or a newer one with unknown keys) still loads.
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     #[serde(default)]
     pub dump_access_policy: DumpAccessPolicy,
@@ -93,6 +93,33 @@ pub struct Config {
     /// the raw trace in place.
     #[serde(default)]
     pub clean_run_analysis: CleanRunAnalysis,
+    /// Let `perf` fetch missing driver debug symbols on demand from a debuginfod server
+    /// (beisl sets `DEBUGINFOD_URLS` for the trace when this is on). Default **true**: for
+    /// the average gamer, resolved driver hotspots out of the box beat a silent gap; a
+    /// poweruser who doesn't want beisl reaching out to a network server can turn it off.
+    /// Named explicitly rather than via a bare `#[serde(default)]` because a plain `bool`
+    /// would otherwise default to `false` — both for an old config file missing this key
+    /// and for `Config::default()` — the opposite of what we want here.
+    #[serde(default = "default_debuginfod_fetch")]
+    pub debuginfod_fetch: bool,
+}
+
+/// Backs `debuginfod_fetch`'s default in both the serde attribute (so a config file
+/// written before this field existed loads as `true`, not `bool`'s usual `false`) and
+/// `Config`'s hand-written `Default` impl below, so the two can never drift apart.
+fn default_debuginfod_fetch() -> bool {
+    true
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            dump_access_policy: DumpAccessPolicy::default(),
+            gpu_pin: None,
+            clean_run_analysis: CleanRunAnalysis::default(),
+            debuginfod_fetch: default_debuginfod_fetch(),
+        }
+    }
 }
 
 impl Config {
@@ -162,18 +189,26 @@ mod tests {
         // Clean-run analysis defaults to `keep` (leave the raw trace in place).
         assert_eq!(Config::load().clean_run_analysis, CleanRunAnalysis::Keep);
 
+        // debuginfod fetch defaults to on — the derived-`Default` footgun this field is
+        // designed to dodge (a bare `bool` would default to `false`).
+        assert!(Config::load().debuginfod_fetch);
+        assert!(Config::default().debuginfod_fetch);
+
         let cfg = Config {
             dump_access_policy: DumpAccessPolicy::RuleInstalled,
             clean_run_analysis: CleanRunAnalysis::Discard,
+            debuginfod_fetch: false,
             ..Default::default()
         };
         cfg.save().unwrap();
         assert_eq!(Config::load(), cfg);
+        assert!(!Config::load().debuginfod_fetch);
 
         // The on-disk form is the kebab-case string, not a bare enum.
         let text = std::fs::read_to_string(Config::path()).unwrap();
         assert!(text.contains("rule-installed"), "got: {text}");
         assert!(text.contains("discard"), "kebab clean-run value: {text}");
+        assert!(text.contains("debuginfod_fetch = false"), "got: {text}");
 
         std::fs::remove_dir_all(&tmp).ok();
         unsafe {

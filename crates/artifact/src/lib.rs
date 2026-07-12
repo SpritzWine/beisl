@@ -127,7 +127,25 @@ impl TraceArtifact {
     /// the frametime CSV if one is present. `game` and `duration_s` come from the wrapper
     /// (the session); the wine flavor is inferred during resolution.
     pub fn build(run_dir: &Path, game: &str, duration_s: f64) -> io::Result<Self> {
-        let res = symbol_resolver::resolve_perf_data(&run_dir.join("perf.data"))?;
+        Self::build_with_debuginfod(run_dir, game, duration_s, None)
+    }
+
+    /// As [`build`](Self::build), but with an explicit `DEBUGINFOD_URLS` for the perf-side
+    /// resolve. The wrapper's post-run analysis runs inside Steam's game-launch session,
+    /// which does NOT carry an interactive login shell's `DEBUGINFOD_URLS`, so the driver
+    /// layer (Mesa/Intel/AMD Vulkan — the only layer debuginfod can serve) would silently
+    /// resolve to anonymous addresses. Passing the URL through here makes the trace-time
+    /// resolve match a later `beisl symbols` run instead of degrading by environment.
+    pub fn build_with_debuginfod(
+        run_dir: &Path,
+        game: &str,
+        duration_s: f64,
+        debuginfod_urls: Option<&str>,
+    ) -> io::Result<Self> {
+        let res = symbol_resolver::resolve_perf_data_with_debuginfod(
+            &run_dir.join("perf.data"),
+            debuginfod_urls,
+        )?;
         let (frame_stats, spikes, timeline) = find_csv(run_dir)
             .and_then(|csv| frames_from_csv(&csv))
             .map(|(stats, spikes, timeline)| (Some(stats), spikes, timeline))
