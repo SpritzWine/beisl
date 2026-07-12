@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "artifact"
-version = "0.0.1-alpha.2"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -13,11 +13,11 @@ dependencies = [
 
 [[package]]
 name = "assets"
-version = "0.0.1-alpha.2"
+version = "0.1.0"
 
 [[package]]
 name = "beisl"
-version = "0.0.1-alpha.2"
+version = "0.1.0"
 dependencies = [
  "artifact",
  "assets",
@@ -28,7 +28,7 @@ dependencies = [
 
 [[package]]
 name = "beisl-mcp"
-version = "0.0.1-alpha.2"
+version = "0.1.0"
 dependencies = [
  "preflight",
  "serde_json",
@@ -49,7 +49,7 @@ checksum = "abd57806937c9cc163efc8ea3910e00a62e2aeb0b8119f1793a978088f8f6b04"
 
 [[package]]
 name = "docs-gen"
-version = "0.0.1-alpha.2"
+version = "0.1.0"
 dependencies = [
  "mandown",
 ]
@@ -115,7 +115,7 @@ checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
 name = "preflight"
-version = "0.0.1-alpha.2"
+version = "0.1.0"
 dependencies = [
  "assets",
  "serde",
@@ -213,7 +213,7 @@ dependencies = [
 
 [[package]]
 name = "session"
-version = "0.0.1-alpha.2"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -221,7 +221,7 @@ dependencies = [
 
 [[package]]
 name = "symbol-resolver"
-version = "0.0.1-alpha.2"
+version = "0.1.0"
 
 [[package]]
 name = "syn"

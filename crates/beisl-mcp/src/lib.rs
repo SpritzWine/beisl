@@ -410,6 +410,66 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    #[test]
+    fn wire_identifiers_are_pinned() {
+        // These Debug strings ARE the MCP wire format: setup_status row ids and the
+        // crash summary's session state. From 0.1.0 on they're a compatibility
+        // promise — renaming a variant must be a conscious wire-format decision
+        // (breaking this test), never silent refactoring fallout.
+        use preflight::CheckId::*;
+        let ids: Vec<String> = [
+            Perf,
+            LlvmSymbolizer,
+            PerfParanoid,
+            MangoHud,
+            DiskSpace,
+            GpuDumpAccess,
+            MangoHudHotkey,
+            MultiGpu,
+            KernelSymbols,
+            DriverDebuginfo,
+            PerfDebuginfod,
+            SteamVisibleBeisl,
+        ]
+        .iter()
+        .map(|i| format!("{i:?}"))
+        .collect();
+        assert_eq!(
+            ids,
+            [
+                "Perf",
+                "LlvmSymbolizer",
+                "PerfParanoid",
+                "MangoHud",
+                "DiskSpace",
+                "GpuDumpAccess",
+                "MangoHudHotkey",
+                "MultiGpu",
+                "KernelSymbols",
+                "DriverDebuginfo",
+                "PerfDebuginfod",
+                "SteamVisibleBeisl",
+            ]
+        );
+        use session::State::*;
+        let states: Vec<String> = [Starting, Running, Recording, Stopping, Saved, Done, Error]
+            .iter()
+            .map(|s| format!("{s:?}"))
+            .collect();
+        assert_eq!(
+            states,
+            [
+                "Starting",
+                "Running",
+                "Recording",
+                "Stopping",
+                "Saved",
+                "Done",
+                "Error"
+            ]
+        );
+    }
+
     fn fixture_root(tag: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!("beisl-mcp-{tag}-{}", std::process::id()));
         std::fs::remove_dir_all(&root).ok();

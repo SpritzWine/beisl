@@ -11,7 +11,7 @@ name = "beisl-gui"
 # The one Beisl version lives in the root manifest; the binary reports it via
 # `preflight::VERSION` (see `beisl-setup --version`).
 authors = ["Florian Schaupp"]
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 description = "Beisl setup + trace GUI (COSMIC look)"
 license = "LGPL-2.1-or-later"
