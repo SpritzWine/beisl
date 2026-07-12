@@ -11,7 +11,7 @@ use preflight::{
     all_checks, detect_distro, detect_record_mode, detect_system_kind, disk_check,
     driver_debuginfo_check, fix_command, gpu_dump_check, locked_system_message,
     mangohud_hotkey_check, multi_gpu_check, ostree_install_note, perf_debuginfod_check,
-    perf_record_fix, CheckId, RecordMode, Status, SystemKind,
+    perf_record_fix, steam_visible_beisl_check, CheckId, RecordMode, Status, SystemKind,
 };
 
 pub fn run() -> ExitCode {
@@ -69,6 +69,9 @@ pub fn run() -> ExitCode {
     checks.push(perf_debuginfod_check());
     // Advisory: the MangoHud #2053 hotkey crash — warned about, never "fixed" by us.
     checks.push(mangohud_hotkey_check());
+    // Steam's containerized client scrubs the launch-option PATH — bare `beisl %command%`
+    // needs a one-time /usr/bin link (or, on immutable systems, the full path).
+    checks.push(steam_visible_beisl_check());
 
     // A genuine RecordMode::None (perf missing, or paranoid too high for even a degraded
     // trace) means the box can't record at all — that gates readiness. A below-Full tier
@@ -100,11 +103,16 @@ pub fn run() -> ExitCode {
                     cmd if cmd.is_empty() => {
                         out!("       fix:  (install manually — unknown for this distro)")
                     }
-                    // Multi-line elevated scripts (the dump-access rule) are unreadable as a
-                    // single line — summarise instead of dumping the whole heredoc.
-                    cmd if cmd.iter().any(|a| a.contains('\n')) => {
-                        out!("       fix:  enable in beisl-setup (installs a udev rule + tmpfiles entry via pkexec)")
-                    }
+                    // Multi-line elevated scripts are unreadable as a single line —
+                    // summarise per check instead of dumping the whole heredoc.
+                    cmd if cmd.iter().any(|a| a.contains('\n')) => match c.id {
+                        CheckId::SteamVisibleBeisl => out!(
+                            "       fix:  opt in via beisl-setup (installs a small /usr/bin/beisl launcher via pkexec)"
+                        ),
+                        _ => out!(
+                            "       fix:  enable in beisl-setup (installs a udev rule + tmpfiles entry via pkexec)"
+                        ),
+                    },
                     cmd => out!("       fix:  {}", cmd.join(" ")),
                 }
             }

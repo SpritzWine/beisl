@@ -130,10 +130,20 @@ fn do_uninstall() -> Result<String, String> {
             removed.push(p.display().to_string());
         }
     }
-    if removed.is_empty() {
-        Ok("Nothing to remove (beisl was not installed for this user).".into())
+    // The Steam launcher shim is root-owned (installed via pkexec in setup) —
+    // uninstall runs unprivileged, so name the leftover instead of failing on it.
+    let link_note = if fs::symlink_metadata("/usr/bin/beisl").is_ok() {
+        "\n\nnote: the system-wide launcher /usr/bin/beisl (installed so Steam finds \
+         beisl) remains — remove it with: sudo rm /usr/bin/beisl"
     } else {
-        Ok(format!("Removed:\n  {}", removed.join("\n  ")))
+        ""
+    };
+    if removed.is_empty() && link_note.is_empty() {
+        Ok("Nothing to remove (beisl was not installed for this user).".into())
+    } else if removed.is_empty() {
+        Ok(format!("Nothing to remove for this user.{link_note}"))
+    } else {
+        Ok(format!("Removed:\n  {}{link_note}", removed.join("\n  ")))
     }
 }
 

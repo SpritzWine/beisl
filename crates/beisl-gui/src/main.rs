@@ -29,8 +29,8 @@ use preflight::{
     all_checks, detect_distro, detect_record_mode, detect_system_kind, disk_check,
     driver_debuginfo_check, fix_command, gpu_dump_check, locked_system_message,
     mangohud_hotkey_check, multi_gpu_check, ostree_install_note, perf_debuginfod_check,
-    perf_record_fix, Check, CheckId, Config, Distro, DumpAccessPolicy, Fix, GpuPin, RecordMode,
-    Status, SystemKind,
+    perf_record_fix, steam_visible_beisl_check, Check, CheckId, Config, Distro, DumpAccessPolicy,
+    Fix, GpuPin, RecordMode, Status, SystemKind,
 };
 
 mod chart; // frametime timeline (plotters, drawn on cosmic's Canvas)
@@ -125,6 +125,9 @@ enum Message {
     /// The optional GPU dump-access row's OWN button — a standing privilege change, always
     /// its own explicit click, never folded into `FixAll`.
     EnableDumpCapture,
+    /// The Steam-launcher row's OWN button — writes a shim into /usr/bin (pkexec), so
+    /// like the dump row it's always its own explicit opt-in, never folded into `FixAll`.
+    InstallSteamLauncher,
     /// Advanced: remove the installed rule.
     RemoveDumpRule,
     /// Advanced: pick the persisted policy (intent only — no privilege runs here).
@@ -238,6 +241,10 @@ impl AppModel {
         // from `driver_debuginfo_check` (are the files reachable) — this asks whether `perf`
         // was even built with the support Beisl's on-demand fetch depends on.
         checks.push(perf_debuginfod_check());
+        // Steam's containerized client scrubs the launch-option PATH — bare
+        // `beisl %command%` needs a one-time /usr/bin link. Has a fix, so it joins the
+        // pkexec sweep (a symlink, not a standing privilege — no dump-style opt-in needed).
+        checks.push(steam_visible_beisl_check());
         checks
     }
 
@@ -255,11 +262,16 @@ impl AppModel {
     }
 
     /// The pkexec commands for every fixable check that still needs setup — EXCLUDING the
-    /// GPU dump-access row, whose standing privilege is only ever applied by its own button.
+    /// GPU dump-access row (a standing privilege) and the Steam launcher shim (a write
+    /// into /usr/bin): system-level changes only ever applied by their own buttons.
     fn pending_fixes(&self) -> Vec<Vec<String>> {
         self.checks
             .iter()
-            .filter(|c| c.status == Status::NeedsFix && c.id != CheckId::GpuDumpAccess)
+            .filter(|c| {
+                c.status == Status::NeedsFix
+                    && c.id != CheckId::GpuDumpAccess
+                    && c.id != CheckId::SteamVisibleBeisl
+            })
             .filter_map(|c| {
                 c.fix
                     .as_ref()
@@ -405,6 +417,23 @@ impl Application for AppModel {
             }
             Message::EnableDumpCapture => {
                 self.spawn_dump(Fix::InstallDumpAccessRule, DumpAccessPolicy::RuleInstalled);
+            }
+            Message::InstallSteamLauncher => {
+                // One explicit click, one pkexec prompt; nothing to persist — success is
+                // simply /usr/bin/beisl existing, which the post-worker re-detect sees.
+                if !self.running() {
+                    let cmd = fix_command(&Fix::InstallSteamShim, self.distro, self.system);
+                    if !cmd.is_empty() {
+                        for c in self.checks.iter_mut() {
+                            if c.id == CheckId::SteamVisibleBeisl {
+                                c.status = Status::Fixing;
+                            }
+                        }
+                        self.log.clear();
+                        self.error = None;
+                        self.worker = Some(spawn_fixer(vec![cmd]));
+                    }
+                }
             }
             Message::RemoveDumpRule => {
                 self.spawn_dump(Fix::RemoveDumpAccessRule, DumpAccessPolicy::WarnOnly);
@@ -606,6 +635,14 @@ impl AppModel {
                 let mut btn = widget::button::standard("Enable");
                 if !self.running() {
                     btn = btn.on_press(Message::EnableDumpCapture);
+                }
+                row = row.push(btn);
+            } else if c.id == CheckId::SteamVisibleBeisl && !is_ok && c.fix.is_some() {
+                // Same opt-in stance for the /usr/bin launcher shim (no fix on immutable
+                // systems — the why carries the full-path fallback, so no button either).
+                let mut btn = widget::button::standard("Install launcher");
+                if !self.running() {
+                    btn = btn.on_press(Message::InstallSteamLauncher);
                 }
                 row = row.push(btn);
             } else {

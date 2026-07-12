@@ -84,6 +84,15 @@ pub enum CheckId {
     /// symbol fetch is impossible regardless of config, so we say so rather than let the
     /// driver layer silently go anonymous (see [`perf_debuginfod_check`]).
     PerfDebuginfod,
+    /// Steam's containerized client (the steamrt rollout, 2026) executes launch options on
+    /// the host but with the container's scrubbed `PATH=/usr/bin:/bin` — so a bare
+    /// `beisl %command%` fails with "command not found" even though `~/.local/bin` is on
+    /// the user's PATH everywhere else (mangohud survives only because distros package it
+    /// straight into `/usr/bin`). The fix installs a tiny root-owned shim at
+    /// `/usr/bin/beisl` that forwards to the *invoking* user's `~/.local/bin/beisl` —
+    /// per-user at run time, so multi-user systems stay correct and updates flow through
+    /// without touching the shim (see [`steam_visible_beisl_check`]).
+    SteamVisibleBeisl,
 }
 
 /// How to repair a failing check. Turned into a concrete `pkexec` argv by [`fix_command`].
@@ -106,6 +115,9 @@ pub enum Fix {
     InstallDumpAccessRule,
     /// Remove the same two files and reload udev.
     RemoveDumpAccessRule,
+    /// Install the root-owned `/usr/bin/beisl` forwarder shim so Steam's scrubbed launch
+    /// PATH can resolve a bare `beisl %command%` (see [`CheckId::SteamVisibleBeisl`]).
+    InstallSteamShim,
 }
 
 #[derive(Clone, Debug)]
@@ -155,6 +167,7 @@ impl Check {
             },
             CheckId::DiskSpace => return, // computed in `disk_check`
             CheckId::PerfDebuginfod => return, // computed in `perf_debuginfod_check`
+            CheckId::SteamVisibleBeisl => return, // computed in `steam_visible_beisl_check`
         };
     }
 }
@@ -251,6 +264,10 @@ pub const DUMP_TMPFILES_PATH: &str = "/etc/tmpfiles.d/beisl-gpu-dump.conf";
 /// in the repo stay the single source of truth. Written verbatim by [`fix_command`].
 const DUMP_RULE_BODY: &str = assets::gpu_dump::UDEV_RULES;
 const DUMP_TMPFILES_BODY: &str = assets::gpu_dump::TMPFILES_CONF;
+
+/// The `/usr/bin/beisl` launcher shim body (see [`CheckId::SteamVisibleBeisl`]),
+/// embedded like the dump-access rule so the repo file stays the single source of truth.
+const STEAM_SHIM_BODY: &str = assets::steam_shim::SHIM;
 
 /// The optional, opt-in "GPU crash-dump capture" check. Kept OUT of [`all_checks`] so the
 /// blocking "set everything up" sweep never installs a standing privilege; the caller adds
@@ -447,6 +464,101 @@ fn mangohud_hotkey_why(version: Option<&str>) -> String {
               hotkey."
             .to_string(),
     }
+}
+
+/// The "Steam can find beisl" check. Kept OUT of [`all_checks`] like [`gpu_dump_check`];
+/// the caller adds it (constructed already-detected, so [`Check::detect`] just returns).
+///
+/// Steam's containerized client executes launch options on the host but with the
+/// container's scrubbed `PATH=/usr/bin:/bin` (verified 2026-07-12: `/bin/sh: line 1:
+/// beisl: command not found` in Steam's console log, while the very same trace works
+/// with a full path — and mangohud keeps working only because distros put it in
+/// `/usr/bin`). Upstream this is ValveSoftware/steam-for-linux#13389, acknowledged as
+/// the containerized client mishandling in- vs out-of-container environments — a bug,
+/// so it may get fixed; the shim stays harmless after (a restored user PATH puts
+/// `~/.local/bin` first again). Non-blocking: a full-path launch option always works.
+/// Like [`gpu_dump_check`], NEVER part of the one-click sweep — writing to `/usr/bin`
+/// is a system-level change that deserves its own explicit opt-in click. The fix is a
+/// one-time root-owned shim at `/usr/bin/beisl` that forwards to the invoking user's
+/// `~/.local/bin/beisl` — the stable location every install channel (tarball, bundle, a
+/// future AppImage's `beisl install`) refreshes, so it never goes stale. A shim, not a
+/// symlink into one user's home: per-user resolution keeps multi-user systems correct
+/// and no user-writable file sits behind a system path. On immutable systems `/usr` is
+/// read-only; the `why` carries the full-path fallback instead of a fix.
+pub fn steam_visible_beisl_check() -> Check {
+    let system = detect_system_kind();
+    let installed = user_beisl_path().is_file();
+    let status = steam_visible_status(
+        steam_client_scrubs_path(),
+        installed,
+        Path::new("/usr/bin/beisl").exists(),
+    );
+    // Only a mutable /usr can take the shim; elsewhere the why explains the fallback.
+    let fix = (status == Status::NeedsFix && system == SystemKind::Mutable)
+        .then_some(Fix::InstallSteamShim);
+    Check {
+        id: CheckId::SteamVisibleBeisl,
+        label: "Steam can find beisl",
+        why: steam_visible_why(&status, system).into(),
+        blocking: false,
+        status,
+        fix,
+    }
+}
+
+/// Pure decision: warn only when all three line up — a PATH-scrubbing Steam client, a
+/// per-user beisl install for the shim to forward to, and no `/usr/bin/beisl` yet
+/// (`exists()` follows symlinks, so a dangling leftover from an older link-style
+/// install counts as "not there" and the fix replaces it).
+fn steam_visible_status(scrubbing_client: bool, beisl_installed: bool, in_usr_bin: bool) -> Status {
+    if scrubbing_client && beisl_installed && !in_usr_bin {
+        Status::NeedsFix
+    } else {
+        Status::Ok
+    }
+}
+
+fn steam_visible_why(status: &Status, system: SystemKind) -> String {
+    match status {
+        Status::NeedsFix if system == SystemKind::Mutable => {
+            "A recent Steam update changed how games launch: Steam now only finds tools \
+             installed system-wide, so `beisl %command%` in a game's launch options \
+             stops working. Enable this to add a small system launcher for beisl (one \
+             admin prompt) — Steam finds beisl again, updates keep working, and every \
+             user on this machine gets their own beisl. (Valve tracks the underlying \
+             bug as steam-for-linux #13389; the launcher stays harmless once it's fixed.)"
+                .to_string()
+        }
+        Status::NeedsFix => format!(
+            "A recent Steam update changed how games launch: Steam now only finds tools \
+             installed system-wide — and this system's /usr is read-only, so no launcher \
+             can be added there. Use the full path in the launch options instead: \
+             {} %command%",
+            user_beisl_path().display()
+        ),
+        _ => "Steam's launch options resolve `beisl %command%` here — either beisl is \
+              reachable from Steam's minimal PATH (/usr/bin) or this Steam still passes \
+              your full PATH through."
+            .to_string(),
+    }
+}
+
+/// The stable per-user install location (`beisl install`'s destination) — the one path
+/// every distribution channel refreshes, which is what the `/usr/bin` launcher runs.
+fn user_beisl_path() -> PathBuf {
+    PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/bin/beisl")
+}
+
+/// Does the installed Steam launch games through the PATH-scrubbing containerized client?
+/// The `steamrt64` client tree is that rollout's on-disk marker; the classic client
+/// (no such dir) passes the user's full PATH to launch options, where `~/.local/bin`
+/// already works. No Steam at all also returns false — nothing to integrate with.
+/// (Flatpak Steam is out of scope: its sandbox can't see /usr/bin either way.)
+fn steam_client_scrubs_path() -> bool {
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    [".local/share/Steam", ".steam/steam"]
+        .iter()
+        .any(|root| home.join(root).join("steamrt64").is_dir())
 }
 
 fn driver_debuginfo_status() -> Status {
@@ -701,6 +813,17 @@ pub fn fix_command(fix: &Fix, distro: Distro, system: SystemKind) -> Vec<String>
             "-c".into(),
             dump_remove_script(),
         ],
+        // Only a mutable /usr can take the shim; immutable systems get the full-path
+        // fallback in the check's why instead of a command that would fail.
+        Fix::InstallSteamShim => match system {
+            SystemKind::Mutable => vec![
+                "pkexec".into(),
+                "sh".into(),
+                "-c".into(),
+                steam_shim_install_script(),
+            ],
+            _ => vec![],
+        },
         Fix::InstallPackage { role } => {
             let pkgs = package_for(role, distro);
             if pkgs.is_empty() {
@@ -756,6 +879,20 @@ fn dump_install_script() -> String {
 
 /// The body of the elevated shell that removes the rule + tmpfiles entry and reloads udev.
 /// (The sysfs perms it set persist until the next boot/rebind; we don't undo them live.)
+/// The body of the elevated shell that installs the `/usr/bin/beisl` launcher shim.
+/// The `rm -f` first is load-bearing: `cat >` writes *through* an existing symlink, so
+/// a leftover link-style install would get its target — the user's real binary —
+/// clobbered with shell text instead of being replaced. `-e` aborts on the first
+/// failure so a half-install can't linger.
+fn steam_shim_install_script() -> String {
+    format!(
+        "set -e\n\
+         rm -f /usr/bin/beisl\n\
+         cat > /usr/bin/beisl <<'BEISL_SHIM_EOF'\n{STEAM_SHIM_BODY}BEISL_SHIM_EOF\n\
+         chmod 0755 /usr/bin/beisl\n"
+    )
+}
+
 fn dump_remove_script() -> String {
     format!(
         "rm -f '{rule}' '{tmpf}'\nudevadm control --reload-rules\n",
@@ -1063,6 +1200,54 @@ mod tests {
         // Crucially NOT in all_checks() — the "set everything up" sweep must never install
         // a standing privilege on its own.
         assert!(all_checks().iter().all(|c| c.id != CheckId::GpuDumpAccess));
+    }
+
+    #[test]
+    fn steam_visible_status_warns_only_when_all_three_line_up() {
+        use Status::*;
+        // (scrubbing client, beisl installed, /usr/bin/beisl present) -> status
+        let matrix = [
+            ((true, true, false), NeedsFix), // the real case: containerized Steam, no link
+            ((true, true, true), Ok),        // already linked
+            ((true, false, false), Ok),      // nothing installed to link to yet
+            ((false, true, false), Ok),      // classic client passes the full PATH through
+            ((false, false, false), Ok),     // no Steam at all
+        ];
+        for ((scrub, inst, linked), want) in matrix {
+            assert_eq!(
+                steam_visible_status(scrub, inst, linked),
+                want,
+                "scrub={scrub} installed={inst} linked={linked}"
+            );
+        }
+    }
+
+    #[test]
+    fn steam_visible_check_is_advisory_and_out_of_all_checks() {
+        assert!(all_checks()
+            .iter()
+            .all(|c| c.id != CheckId::SteamVisibleBeisl));
+        let c = steam_visible_beisl_check();
+        assert!(!c.blocking, "a full-path launch option always works");
+        assert!(!c.why.is_empty());
+    }
+
+    #[test]
+    fn steam_shim_fix_writes_the_shim_on_mutable_and_nothing_elsewhere() {
+        let cmd = fix_command(&Fix::InstallSteamShim, Distro::Fedora, SystemKind::Mutable);
+        assert_eq!(&cmd[..3], &["pkexec", "sh", "-c"]);
+        let script = &cmd[3];
+        assert!(script.contains("#!/bin/sh"), "embeds the shim body");
+        // rm -f before cat >: a leftover symlink-style install must be replaced, not
+        // written through (which would clobber the user's real binary).
+        assert!(script.contains("rm -f /usr/bin/beisl"));
+        assert!(script.contains("chmod 0755 /usr/bin/beisl"));
+        // The multi-user guarantee: nothing user-specific baked into the shim.
+        assert!(!script.contains("/home/"), "script: {script}");
+        // Immutable /usr can't take the shim — the why carries the fallback instead.
+        for system in [SystemKind::OstreeAtomic, SystemKind::Locked] {
+            assert!(fix_command(&Fix::InstallSteamShim, Distro::Fedora, system).is_empty());
+        }
     }
 
     #[test]

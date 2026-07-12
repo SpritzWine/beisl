@@ -174,6 +174,7 @@ impl Server {
         checks.push(preflight::driver_debuginfo_check());
         checks.push(preflight::perf_debuginfod_check());
         checks.push(preflight::mangohud_hotkey_check());
+        checks.push(preflight::steam_visible_beisl_check());
 
         let rows: Vec<Value> = checks
             .iter()

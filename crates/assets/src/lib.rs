@@ -18,6 +18,15 @@ pub mod gpu_dump {
     pub const TMPFILES_CONF: &str = include_str!("../data/tmpfiles/beisl-gpu-dump.conf");
 }
 
+/// The `/usr/bin/beisl` launcher shim for Steam's PATH-scrubbed launch options
+/// (installed via pkexec by the caller). A root-owned forwarder to the *invoking*
+/// user's `~/.local/bin/beisl` — deliberately NOT a symlink into one user's home:
+/// per-user resolution keeps multi-user systems correct, nothing user-writable sits
+/// behind a system path, and updates flow through without touching the shim.
+pub mod steam_shim {
+    pub const SHIM: &str = include_str!("../data/shim/beisl-steam-shim.sh");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -28,5 +37,9 @@ mod tests {
         assert!(icons::SYMBOLIC.trim_start().starts_with("<svg"));
         assert!(gpu_dump::UDEV_RULES.contains("devcoredump"));
         assert!(!gpu_dump::TMPFILES_CONF.trim().is_empty());
+        assert!(steam_shim::SHIM.starts_with("#!/bin/sh"));
+        // The multi-user guarantee: the shim resolves $HOME at run time and must
+        // never bake in the installing user's path.
+        assert!(!steam_shim::SHIM.contains("/home/"));
     }
 }
