@@ -960,6 +960,21 @@ fn main() -> cosmic::iced::Result {
                 println!("beisl-setup {}", preflight::VERSION);
                 return Ok(());
             }
+            "--help" | "-h" | "help" => {
+                println!(
+                    "beisl-setup — GUI: setup checklist with one-click fixes, install/update, \
+                     trace library\n\n\
+                     usage:\n  \
+                     beisl-setup                    open the setup window\n  \
+                     beisl-setup --session <dir>    open the live session window for a trace run\n  \
+                     beisl-setup --payload <dir>    (dev) install page against an extracted dist tree\n  \
+                     beisl-setup --version          print the version\n  \
+                     beisl-setup --help             this help\n\n\
+                     The headless twin is `beisl --check`; traces live in \
+                     ~/.local/share/beisl/traces/."
+                );
+                return Ok(());
+            }
             "--session" => {
                 let dir = PathBuf::from(args.next().unwrap_or_default());
                 // Golden-ratio landscape (≈1.618:1): the results view's monospaced function /
