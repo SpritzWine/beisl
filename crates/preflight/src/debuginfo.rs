@@ -199,12 +199,8 @@ const DEBUGINFOD_ELFUTILS_FEDERATED: &str = "https://debuginfod.elfutils.org/";
 pub fn distro_debuginfod_url(distro: Distro) -> Option<String> {
     let own = match distro {
         Distro::Fedora => Some("https://debuginfod.fedoraproject.org/"),
-        // `Distro::detect_distro` folds Ubuntu into this same variant (its `ID_LIKE`
-        // contains "debian"), so this also covers Ubuntu installs; Ubuntu ships its own
-        // debuginfod server too, but we can't tell the two apart from the enum alone and
-        // Debian's server plus the federated fallback below still resolves Ubuntu's
-        // build-ids in the common case.
         Distro::Debian => Some("https://debuginfod.debian.net/"),
+        Distro::Ubuntu => Some("https://debuginfod.ubuntu.com/"),
         Distro::Arch => Some("https://debuginfod.archlinux.org/"),
         Distro::Suse => Some("https://debuginfod.opensuse.org/"),
         Distro::Unknown => None,
@@ -557,6 +553,11 @@ mod tests {
         assert_eq!(
             distro_debuginfod_url(Distro::Arch).as_deref(),
             Some("https://debuginfod.archlinux.org/ https://debuginfod.elfutils.org/")
+        );
+        // Ubuntu gets its own server, not Debian's (the split's whole point).
+        assert_eq!(
+            distro_debuginfod_url(Distro::Ubuntu).as_deref(),
+            Some("https://debuginfod.ubuntu.com/ https://debuginfod.elfutils.org/")
         );
         // Unknown still returns the federated fallback alone, not `None` — beisl always
         // has *something* to offer, just without a distro-specific first hop.

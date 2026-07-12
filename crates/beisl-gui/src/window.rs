@@ -23,7 +23,7 @@ use cosmic::widget;
 use cosmic::{Application, Element};
 
 use artifact::{TraceArtifact, SCHEMA_VERSION};
-use preflight::{detect_distro, fix_command, Config, DumpAccessPolicy, Fix};
+use preflight::{detect_distro, detect_system_kind, fix_command, Config, DumpAccessPolicy, Fix};
 use session::{Session, State};
 
 #[derive(Debug, Clone)]
@@ -189,7 +189,11 @@ impl Application for SessionApp {
             }
             Msg::EnableDumpCapture => {
                 if self.enabling.is_none() {
-                    let cmd = fix_command(&Fix::InstallDumpAccessRule, detect_distro());
+                    let cmd = fix_command(
+                        &Fix::InstallDumpAccessRule,
+                        detect_distro(),
+                        detect_system_kind(),
+                    );
                     if !cmd.is_empty() {
                         self.enable_note = Some("Enabling capture…".to_string());
                         self.enabling = Some(spawn_enable(cmd));

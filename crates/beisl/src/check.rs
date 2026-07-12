@@ -8,13 +8,27 @@ use std::process::ExitCode;
 
 use crate::out::out;
 use preflight::{
-    all_checks, detect_distro, disk_check, driver_debuginfo_check, fix_command, gpu_dump_check,
-    mangohud_hotkey_check, multi_gpu_check, perf_debuginfod_check, Status,
+    all_checks, detect_distro, detect_system_kind, disk_check, driver_debuginfo_check, fix_command,
+    gpu_dump_check, locked_system_message, mangohud_hotkey_check, multi_gpu_check,
+    ostree_install_note, perf_debuginfod_check, Status, SystemKind,
 };
 
 pub fn run() -> ExitCode {
     let distro = detect_distro();
+    let system = detect_system_kind();
+
+    // A locked immutable system (SteamOS) can't get a host `perf` — say so plainly and point
+    // the user at a box where beisl works, instead of walking a checklist that can't pass.
+    if system == SystemKind::Locked {
+        out!("{}", locked_system_message());
+        return ExitCode::from(1);
+    }
+
     out!("Beisl preflight  (distro family: {distro:?})\n");
+    // On an ostree box the install fixes below are layered and need a reboot — flag it once.
+    if system == SystemKind::OstreeAtomic {
+        out!("{}\n", ostree_install_note());
+    }
 
     let mut checks = all_checks();
     for c in checks.iter_mut() {
@@ -57,7 +71,7 @@ pub fn run() -> ExitCode {
 
         if c.status == Status::NeedsFix {
             if let Some(fix) = &c.fix {
-                match fix_command(fix, distro) {
+                match fix_command(fix, distro, system) {
                     cmd if cmd.is_empty() => {
                         out!("       fix:  (install manually — unknown for this distro)")
                     }

@@ -163,6 +163,7 @@ impl Server {
     /// MCP's job, privilege stays behind the GUI's pkexec click (the consent stance).
     fn setup_status(&self) -> String {
         let distro = preflight::detect_distro();
+        let system = preflight::detect_system_kind();
         let mut checks = preflight::all_checks();
         for c in checks.iter_mut() {
             c.detect();
@@ -184,7 +185,7 @@ impl Server {
                     other => format!("{other:?}"),
                 };
                 let fix = c.fix.as_ref().map(|f| {
-                    let cmd = preflight::fix_command(f, distro);
+                    let cmd = preflight::fix_command(f, distro, system);
                     if cmd.is_empty() {
                         Value::String("(install manually — unknown for this distro)".into())
                     } else {

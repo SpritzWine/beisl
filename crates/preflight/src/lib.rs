@@ -360,6 +360,9 @@ fn perf_debuginfod_why(supported: bool, distro: Distro) -> String {
             Distro::Debian => {
                 "install a newer `linux-perf` (the debuginfod client landed in perf 5.8+)"
             }
+            Distro::Ubuntu => {
+                "install a newer `linux-tools-generic` (the debuginfod client landed in perf 5.8+)"
+            }
             Distro::Arch => "update `linux-tools`/`perf` (Arch builds it with debuginfod)",
             Distro::Suse | Distro::Unknown => {
                 "install a `perf` built with debuginfod support (elfutils ≥ 0.179)"
@@ -463,7 +466,7 @@ fn driver_debuginfo_why(families: &[String], distro: Distro) -> String {
         // debug-package hint is always applicable here.
         let hint = match distro {
             Distro::Fedora => "sudo dnf debuginfo-install mesa-vulkan-drivers",
-            Distro::Debian => {
+            Distro::Debian | Distro::Ubuntu => {
                 "install mesa-vulkan-drivers-dbgsym (needs the ddebs.ubuntu.com / \
                  debian-debug repository)"
             }
@@ -565,6 +568,9 @@ fn readable(path: &Path) -> bool {
 pub enum Distro {
     Fedora,
     Debian,
+    /// Distinct from [`Distro::Debian`]: Ubuntu's perf ships in `linux-tools-*` (Debian's
+    /// is `linux-perf`) and it runs its own debuginfod server.
+    Ubuntu,
     Arch,
     Suse,
     Unknown,
@@ -584,7 +590,10 @@ pub fn detect_distro() -> Distro {
     let hay = format!("{} {}", field("ID="), field("ID_LIKE="));
     if hay.contains("fedora") || hay.contains("rhel") || hay.contains("centos") {
         Distro::Fedora
-    } else if hay.contains("debian") || hay.contains("ubuntu") {
+    } else if hay.contains("ubuntu") {
+        // Before Debian: Ubuntu/Mint/Pop carry `ID_LIKE=debian` but package perf their way.
+        Distro::Ubuntu
+    } else if hay.contains("debian") {
         Distro::Debian
     } else if hay.contains("arch") {
         Distro::Arch
@@ -595,9 +604,57 @@ pub fn detect_distro() -> Distro {
     }
 }
 
+/// How (or whether) beisl can obtain `perf` here — orthogonal to [`Distro`], which is only
+/// the package *name* axis. Immutable systems change the install transaction or rule it out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SystemKind {
+    /// Normal read-write system: `pkexec <pm> install` applies immediately.
+    Mutable,
+    /// Fedora Atomic / ostree (Bazzite, Bluefin, Aurora, Silverblue, Kinoite): packages are
+    /// *layered* with `rpm-ostree install` and take effect only after a reboot.
+    OstreeAtomic,
+    /// Locked-down immutable (SteamOS): a read-only, wiped-on-update root we can't durably
+    /// install `perf` into, so beisl can't run — surface a redirect, not a broken fix.
+    Locked,
+}
+
+/// Detect the [`SystemKind`]. SteamOS is checked first (a Deck is a locked A/B system, not
+/// merely immutable); `/run/ostree-booted` is the one marker every Fedora Atomic derivative
+/// sets, so a single check covers Bazzite/Silverblue/Bluefin/… without listing them.
+pub fn detect_system_kind() -> SystemKind {
+    let os = std::fs::read_to_string("/etc/os-release")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if os.contains("steamos") {
+        SystemKind::Locked
+    } else if Path::new("/run/ostree-booted").exists() {
+        SystemKind::OstreeAtomic
+    } else {
+        SystemKind::Mutable
+    }
+}
+
+/// The plain-language redirect for a [`SystemKind::Locked`] system (SteamOS): beisl needs a
+/// host `perf` it can't install or keep there, so point at a box where it works.
+pub fn locked_system_message() -> &'static str {
+    "beisl needs `perf`, which SteamOS's read-only system won't let it install or keep. \
+     The Deck is great to play on — but do your tracing on a regular desktop Linux, or an \
+     immutable gaming distro like Bazzite (Fedora Atomic). Launch the same game there with \
+     `beisl %command%`."
+}
+
+/// One-line note for a [`SystemKind::OstreeAtomic`] system: layered installs need a reboot.
+pub fn ostree_install_note() -> &'static str {
+    "Immutable (ostree) system: install fixes are layered with rpm-ostree and take effect \
+     after a reboot."
+}
+
 /// Distro package name(s) for a role, or empty if we don't know it for this distro.
 pub fn package_for(role: &str, distro: Distro) -> Vec<&'static str> {
     match (role, distro) {
+        // Ubuntu has no `linux-perf`; perf rides in linux-tools (`-generic` pulls the
+        // running kernel's versioned tools, `-common` gives the `perf` wrapper).
+        ("perf", Distro::Ubuntu) => vec!["linux-tools-generic", "linux-tools-common"],
         ("perf", Distro::Debian) => vec!["linux-perf"],
         ("perf", _) => vec!["perf"],
         ("llvm", _) => vec!["llvm"], // provides llvm-symbolizer on the major distros
@@ -608,7 +665,7 @@ pub fn package_for(role: &str, distro: Distro) -> Vec<&'static str> {
 
 /// The exact privileged command the caller runs (via `pkexec`) to apply a fix.
 /// Empty means "we can't do it automatically here — tell the user".
-pub fn fix_command(fix: &Fix, distro: Distro) -> Vec<String> {
+pub fn fix_command(fix: &Fix, distro: Distro, system: SystemKind) -> Vec<String> {
     match fix {
         Fix::Sysctl { key, value } => vec![
             "pkexec".into(),
@@ -642,14 +699,28 @@ pub fn fix_command(fix: &Fix, distro: Distro) -> Vec<String> {
             if pkgs.is_empty() {
                 return vec![];
             }
-            let mut cmd: Vec<String> = vec!["pkexec".into()];
-            match distro {
-                Distro::Fedora => cmd.extend(["dnf", "install", "-y"].map(String::from)),
-                Distro::Debian => cmd.extend(["apt-get", "install", "-y"].map(String::from)),
-                Distro::Arch => cmd.extend(["pacman", "-S", "--noconfirm"].map(String::from)),
-                Distro::Suse => cmd.extend(["zypper", "install", "-y"].map(String::from)),
-                Distro::Unknown => return vec![],
-            }
+            // The install *verb* is the system's, the package *names* are the distro's: an
+            // ostree box layers with rpm-ostree (applies after reboot); a locked box can't
+            // install at all (the caller redirects instead of running anything).
+            let mut cmd: Vec<String> = match system {
+                SystemKind::Locked => return vec![],
+                SystemKind::OstreeAtomic => {
+                    vec!["pkexec".into(), "rpm-ostree".into(), "install".into()]
+                }
+                SystemKind::Mutable => {
+                    let mut c = vec!["pkexec".to_string()];
+                    match distro {
+                        Distro::Fedora => c.extend(["dnf", "install", "-y"].map(String::from)),
+                        Distro::Debian | Distro::Ubuntu => {
+                            c.extend(["apt-get", "install", "-y"].map(String::from))
+                        }
+                        Distro::Arch => c.extend(["pacman", "-S", "--noconfirm"].map(String::from)),
+                        Distro::Suse => c.extend(["zypper", "install", "-y"].map(String::from)),
+                        Distro::Unknown => return vec![],
+                    }
+                    c
+                }
+            };
             cmd.extend(pkgs.into_iter().map(String::from));
             cmd
         }
@@ -823,6 +894,7 @@ mod tests {
                 value: "-1",
             },
             Distro::Fedora,
+            SystemKind::Mutable,
         );
         assert_eq!(cmd[0], "pkexec");
         assert!(cmd.contains(&"kernel.perf_event_paranoid=-1".to_string()));
@@ -831,21 +903,47 @@ mod tests {
     #[test]
     fn install_maps_per_distro() {
         assert_eq!(package_for("perf", Distro::Debian), vec!["linux-perf"]);
+        // Ubuntu diverges from Debian: no `linux-perf`, perf lives in linux-tools.
+        assert_eq!(
+            package_for("perf", Distro::Ubuntu),
+            vec!["linux-tools-generic", "linux-tools-common"]
+        );
         assert_eq!(package_for("perf", Distro::Fedora), vec!["perf"]);
-        let arch = fix_command(&Fix::InstallPackage { role: "mangohud" }, Distro::Arch);
+        let arch = fix_command(
+            &Fix::InstallPackage { role: "mangohud" },
+            Distro::Arch,
+            SystemKind::Mutable,
+        );
         assert_eq!(
             arch,
             vec!["pkexec", "pacman", "-S", "--noconfirm", "mangohud"]
         );
         // Unknown distro: no automatic command.
-        assert!(fix_command(&Fix::InstallPackage { role: "perf" }, Distro::Unknown).is_empty());
+        assert!(fix_command(
+            &Fix::InstallPackage { role: "perf" },
+            Distro::Unknown,
+            SystemKind::Mutable
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn install_verb_follows_system_kind() {
+        let perf = || Fix::InstallPackage { role: "perf" };
+        // ostree keeps the Fedora package name but layers it with rpm-ostree.
+        assert_eq!(
+            fix_command(&perf(), Distro::Fedora, SystemKind::OstreeAtomic),
+            vec!["pkexec", "rpm-ostree", "install", "perf"]
+        );
+        // A locked system (SteamOS) has no install command at all — the caller redirects.
+        assert!(fix_command(&perf(), Distro::Arch, SystemKind::Locked).is_empty());
     }
 
     #[test]
     fn setcap_fix_targets_the_perf_binary_when_present() {
         // Only assert shape when perf exists on the test host.
         if let Some(p) = perf_path() {
-            let cmd = fix_command(&Fix::SetcapPerfmon, Distro::Fedora);
+            let cmd = fix_command(&Fix::SetcapPerfmon, Distro::Fedora, SystemKind::Mutable);
             assert_eq!(cmd[0], "pkexec");
             assert_eq!(cmd[1], "setcap");
             assert!(cmd.last().unwrap().contains(&*p.to_string_lossy()));
@@ -860,7 +958,11 @@ mod tests {
 
     #[test]
     fn dump_access_fix_is_one_pkexec_shell() {
-        let cmd = fix_command(&Fix::InstallDumpAccessRule, Distro::Fedora);
+        let cmd = fix_command(
+            &Fix::InstallDumpAccessRule,
+            Distro::Fedora,
+            SystemKind::Mutable,
+        );
         assert_eq!(cmd[0], "pkexec");
         assert_eq!(cmd[1], "sh");
         assert_eq!(cmd[2], "-c");
@@ -873,7 +975,11 @@ mod tests {
         // The embedded rule body rode along verbatim.
         assert!(script.contains("SUBSYSTEM==\"devcoredump\""));
 
-        let rm = fix_command(&Fix::RemoveDumpAccessRule, Distro::Fedora);
+        let rm = fix_command(
+            &Fix::RemoveDumpAccessRule,
+            Distro::Fedora,
+            SystemKind::Mutable,
+        );
         assert_eq!(rm[0], "pkexec");
         assert!(rm[3].contains("rm -f"));
         assert!(rm[3].contains(DUMP_RULE_PATH));

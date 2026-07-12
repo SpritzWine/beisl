@@ -26,9 +26,10 @@ use cosmic::{Application, Element};
 
 use preflight::gpu::GpuPinCandidate;
 use preflight::{
-    all_checks, detect_distro, disk_check, driver_debuginfo_check, fix_command, gpu_dump_check,
-    mangohud_hotkey_check, multi_gpu_check, perf_debuginfod_check, Check, CheckId, Config, Distro,
-    DumpAccessPolicy, Fix, GpuPin, Status,
+    all_checks, detect_distro, detect_system_kind, disk_check, driver_debuginfo_check, fix_command,
+    gpu_dump_check, locked_system_message, mangohud_hotkey_check, multi_gpu_check,
+    ostree_install_note, perf_debuginfod_check, Check, CheckId, Config, Distro, DumpAccessPolicy,
+    Fix, GpuPin, Status, SystemKind,
 };
 
 mod chart; // frametime timeline (plotters, drawn on cosmic's Canvas)
@@ -151,6 +152,8 @@ struct Flags {
 struct AppModel {
     core: Core,
     distro: Distro,
+    /// Package-mutability of this system — picks the install verb (or the SteamOS redirect).
+    system: SystemKind,
     page: Page,
     /// The dist tree the install page installs from (`Some` iff launched from one).
     payload: Option<PathBuf>,
@@ -256,7 +259,11 @@ impl AppModel {
         self.checks
             .iter()
             .filter(|c| c.status == Status::NeedsFix && c.id != CheckId::GpuDumpAccess)
-            .filter_map(|c| c.fix.as_ref().map(|f| fix_command(f, self.distro)))
+            .filter_map(|c| {
+                c.fix
+                    .as_ref()
+                    .map(|f| fix_command(f, self.distro, self.system))
+            })
             .filter(|cmd| !cmd.is_empty())
             .collect()
     }
@@ -283,7 +290,7 @@ impl AppModel {
         if self.running() {
             return;
         }
-        let cmd = fix_command(&fix, self.distro);
+        let cmd = fix_command(&fix, self.distro, self.system);
         if cmd.is_empty() {
             return;
         }
@@ -322,6 +329,7 @@ impl Application for AppModel {
         let app = AppModel {
             core,
             distro: detect_distro(),
+            system: detect_system_kind(),
             page: if flags.payload.is_some() {
                 Page::Install
             } else {
@@ -516,6 +524,19 @@ impl Application for AppModel {
 
 impl AppModel {
     fn checks_page(&self) -> Element<'_, Message> {
+        // A locked immutable system (SteamOS) can't get a host `perf` — show the redirect
+        // instead of a checklist that can't pass, matching `beisl --check`.
+        if self.system == SystemKind::Locked {
+            return widget::container(
+                widget::Column::new()
+                    .spacing(14)
+                    .push(widget::text::title1("beisl can't run here"))
+                    .push(widget::text::body(locked_system_message())),
+            )
+            .padding(24)
+            .into();
+        }
+
         let title = if self.ready() {
             "You're ready to trace"
         } else {
@@ -531,6 +552,11 @@ impl AppModel {
                 "Traces will be saved to {}",
                 self.trace_dir.display()
             )));
+
+        // ostree systems layer fixes with rpm-ostree — they apply after a reboot.
+        if self.system == SystemKind::OstreeAtomic {
+            content = content.push(widget::text::caption(ostree_install_note()));
+        }
 
         for c in &self.checks {
             let is_ok = c.status == Status::Ok;
