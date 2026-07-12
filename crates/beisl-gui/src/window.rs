@@ -228,8 +228,11 @@ impl Application for SessionApp {
                 }
             }
             Msg::OpenFolder => {
+                // Quiet the child: KDE's kioclient chats on stderr and reads like an error.
                 let _ = std::process::Command::new("xdg-open")
                     .arg(&self.dir)
+                    .stderr(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
                     .spawn();
             }
             Msg::Close => std::process::exit(0),

@@ -70,7 +70,13 @@ impl TracesTab {
             }
             Msg::OpenFolder(i) => {
                 if let Some(run) = self.runs.get(i) {
-                    let _ = std::process::Command::new("xdg-open").arg(&run.dir).spawn();
+                    // Quiet the child: KDE's kioclient chats on stderr (env-var
+                    // forwarding notes) and reads like an error in a terminal.
+                    let _ = std::process::Command::new("xdg-open")
+                        .arg(&run.dir)
+                        .stderr(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .spawn();
                 }
             }
             Msg::Delete(i) => self.confirm_delete = Some(i),

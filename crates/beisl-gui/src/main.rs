@@ -426,6 +426,8 @@ impl Application for AppModel {
                 // means no window opens — nothing beisl should abort or prompt over.
                 let _ = std::process::Command::new("xdg-open")
                     .arg(STEAM_PATH_ISSUE_URL)
+                    .stderr(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
                     .spawn();
             }
             Message::InstallSteamLauncher => {
