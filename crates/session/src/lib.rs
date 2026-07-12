@@ -63,6 +63,10 @@ pub struct Session {
     /// (what `beisl symbols` runs). Crashes are auto-analyzed and never set this.
     #[serde(default)]
     pub analysis_offer: bool,
+    /// Which perf record mode this run used ("full" | "degraded" | "none"); empty on
+    /// legacy runs. A downstream artifact step will read it to mark a degraded trace.
+    #[serde(default)]
+    pub record_mode: String,
 }
 
 impl Session {
@@ -220,6 +224,7 @@ mod tests {
             game: "Blood West.exe".into(),
             state: State::Recording,
             warnings: vec!["perf can record needs setup".into()],
+            record_mode: "degraded".into(),
             ..Default::default()
         };
         s.write(&dir).unwrap();
@@ -227,6 +232,7 @@ mod tests {
         assert_eq!(back.game, "Blood West.exe");
         assert_eq!(back.state, State::Recording);
         assert_eq!(back.warnings.len(), 1);
+        assert_eq!(back.record_mode, "degraded");
         std::fs::remove_dir_all(&dir).ok();
     }
 

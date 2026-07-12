@@ -346,7 +346,12 @@ Investigated against a real Flatpak Lutris install. The findings:
     sysctl (fixable through `flatpak-spawn --host pkexec …` — the session-bus talk
     permission for `org.freedesktop.Flatpak` exists on the inspected install), or a
     fallback to child-tree-only recording (works at paranoid ≤ 2, loses kernel
-    samples and the system-wide view).
+    samples and the system-wide view). This child-tree fallback is the
+    implemented **degraded mode** (`perf record -- <game>`, perf as the game's
+    parent); its one blind spot is a launcher that double-forks/reparents the
+    game *out* of perf's subtree — Full `-a` is immune to that escape, degraded
+    is not, so a real Proton/umu title on a paranoid ≤ 2 box is the check that
+    matters before trusting it.
   - The runtime ships no `perf`; the extension must bundle it.
   - Alternative worth prototyping first: **keep perf on the host entirely** —
     beisl-in-sandbox only orchestrates (env, MangoHud, session.json) and starts the

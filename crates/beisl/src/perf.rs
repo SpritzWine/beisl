@@ -26,13 +26,55 @@ extern "C" fn handle_term(_sig: libc::c_int) {
 
 /// Install teardown handlers so a SIGTERM/SIGINT/SIGHUP to beisl (e.g. Steam's Stop
 /// button, or Ctrl-C) stops perf and lets it flush before we exit. SIGKILL can't be
-/// caught — the `PR_SET_PDEATHSIG` set in [`Recorder::start`] is the backstop for that.
+/// caught — the `PR_SET_PDEATHSIG` set in [`arm_pdeathsig`] is the backstop for that.
 pub fn install_teardown() {
     unsafe {
         for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
             libc::signal(sig, handle_term as *const () as libc::sighandler_t);
         }
     }
+}
+
+/// Make `cmd`'s child die with us: if beisl is killed — even SIGKILL by Steam — the
+/// kernel sends SIGINT to it, so a `perf` in that slot flushes `perf.data` instead of
+/// recording forever. Shared by [`Recorder::start`] (perf as our direct child) and the
+/// degraded-mode launch (`perf` spawned by `run.rs` wrapping the game).
+pub fn arm_pdeathsig(cmd: &mut Command) {
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGINT as libc::c_ulong) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // Close the fork/exec race: if beisl already exited, don't start recording.
+            if libc::getppid() == 1 {
+                libc::_exit(0);
+            }
+            Ok(())
+        });
+    }
+}
+
+/// Publish `pid` as the running `perf`'s PID, so the async-signal-safe teardown handler
+/// ([`install_teardown`]) can reach it. `0` clears it (no perf to signal).
+pub fn set_perf_pid(pid: u32) {
+    PERF_PID.store(pid as i32, Ordering::SeqCst);
+}
+
+/// The `perf record` args for a degraded (userspace-only, per-command) capture: own
+/// process's cycles at ~499 Hz, no `-a` (that needs the privilege Degraded mode lacks).
+/// The caller appends the game's argv (with a `--` separator) — this only builds the
+/// perf-side flags.
+pub fn degraded_args(perf_data: &Path) -> Vec<String> {
+    vec![
+        "record".to_string(),
+        "-q".to_string(),
+        "-e".to_string(),
+        "cycles:u".to_string(),
+        "-F".to_string(),
+        "499".to_string(),
+        "-o".to_string(),
+        perf_data.display().to_string(),
+    ]
 }
 
 pub struct Recorder {
@@ -66,22 +108,11 @@ impl Recorder {
             .stderr(stderr);
         // Make perf die with us: if beisl is killed — even SIGKILL by Steam — the kernel
         // sends SIGINT to perf, so it flushes perf.data instead of recording forever.
-        unsafe {
-            cmd.pre_exec(|| {
-                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGINT as libc::c_ulong) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                // Close the fork/exec race: if beisl already exited, don't start recording.
-                if libc::getppid() == 1 {
-                    libc::_exit(0);
-                }
-                Ok(())
-            });
-        }
+        arm_pdeathsig(&mut cmd);
         let child = cmd
             .spawn()
             .map_err(|e| format!("perf couldn't start ({e}) — run beisl-setup"))?;
-        PERF_PID.store(child.id() as i32, Ordering::SeqCst);
+        set_perf_pid(child.id());
         self.child = Some(child);
         Ok(())
     }
@@ -96,5 +127,25 @@ impl Recorder {
                 .status();
             let _ = child.wait();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn degraded_args_are_userspace_only_no_system_wide_flag() {
+        let path = Path::new("/tmp/beisl-test/perf.data");
+        let args = degraded_args(path);
+        assert!(args.contains(&"-q".to_string()));
+        assert!(args.windows(2).any(|w| w == ["-e", "cycles:u"]));
+        assert!(args.windows(2).any(|w| w == ["-F", "499"]));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "-o" && w[1] == path.display().to_string()));
+        // Degraded mode must NOT ask for system-wide capture — that's the privileged bit
+        // it's specifically working around.
+        assert!(!args.contains(&"-a".to_string()));
     }
 }
