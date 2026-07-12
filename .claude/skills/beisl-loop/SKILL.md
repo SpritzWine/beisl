@@ -154,9 +154,15 @@ Append to `.loop/REVIEW-QUEUE.md`:
 
 ### 9. Loop control, digest, landing on main
 
-Running under /loop: ScheduleWakeup (~900–1800 s pacing; the same /loop
-prompt) unless a stop condition hit — backlog empty or two consecutive
-blocked iterations. **On every stop, and on the `review` arg:** post the
+Running under /loop: ScheduleWakeup with the same /loop prompt, pacing
+matched to what's actually next — don't idle when there's work:
+- **Completed an item and actionable backlog remains → re-fire promptly
+  (~120 s).** Back-to-back iterations are the point when the queue is full;
+  a long gap here just wastes wall-clock between items.
+- **Idle (nothing actionable to pick up) or re-checking after a block →
+  the long ~900–1800 s pacing.** That range is for waiting, not for work.
+Stop instead of scheduling when a stop condition hits — backlog empty or
+two consecutive blocked iterations. **On every stop, and on the `review` arg:** post the
 "what lately was done" digest as the final message — per queued item: title,
 what/why, diffstat, verification evidence, fit verdict, flags/dependencies;
 plus anything `[blocked]` and what the loop learned.
