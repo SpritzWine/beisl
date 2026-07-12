@@ -11,21 +11,19 @@
 use std::io;
 use std::process::ExitCode;
 
-/// One screen — a server binary's help is mostly "how do I wire this in".
-const HELP: &str = "\
-beisl-mcp — read-only MCP server over recorded beisl traces (JSON-RPC on stdio)
+/// The user docs are the single source of truth: this is the man-page source
+/// (rendered by `docs-gen` into `man beisl-mcp`), and `--help` prints its top —
+/// cut at the help-end marker, `# ` section markers stripped for the terminal.
+const DOC: &str = include_str!("../../../docs/beisl-mcp.1.md");
 
-usage:
-  beisl-mcp             serve on stdin/stdout (an AI client starts this; it
-                        opens no ports and touches nothing without a client)
-  beisl-mcp --version   print the version
-  beisl-mcp --help      this help
-
-Wire it into an AI client's config:
-  { \"mcpServers\": { \"beisl\": { \"command\": \"beisl-mcp\" } } }
-
-Tools: list_traces, get_setup_status, get_artifact, get_report, get_log,
-get_crash_summary — all read-only; analyzing and deleting stay in the app.";
+fn help_text() -> String {
+    let top = DOC.split("<!-- help-end -->").next().unwrap_or(DOC);
+    let lines: Vec<&str> = top
+        .lines()
+        .map(|l| l.strip_prefix("# ").unwrap_or(l))
+        .collect();
+    lines.join("\n").trim().to_string()
+}
 
 fn main() -> ExitCode {
     match std::env::args().nth(1).as_deref() {
@@ -34,7 +32,7 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Some("--help" | "-h" | "help") => {
-            println!("{HELP}");
+            println!("{}", help_text());
             return ExitCode::SUCCESS;
         }
         _ => {}

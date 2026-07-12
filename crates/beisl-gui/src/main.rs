@@ -961,18 +961,15 @@ fn main() -> cosmic::iced::Result {
                 return Ok(());
             }
             "--help" | "-h" | "help" => {
-                println!(
-                    "beisl-setup — GUI: setup checklist with one-click fixes, install/update, \
-                     trace library\n\n\
-                     usage:\n  \
-                     beisl-setup                    open the setup window\n  \
-                     beisl-setup --session <dir>    open the live session window for a trace run\n  \
-                     beisl-setup --payload <dir>    (dev) install page against an extracted dist tree\n  \
-                     beisl-setup --version          print the version\n  \
-                     beisl-setup --help             this help\n\n\
-                     The headless twin is `beisl --check`; traces live in \
-                     ~/.local/share/beisl/traces/."
-                );
+                // Single source with the man page: docs/beisl-setup.1.md's top,
+                // cut at the help-end marker, `# ` section markers stripped.
+                let doc = include_str!("../../../docs/beisl-setup.1.md");
+                let top = doc.split("<!-- help-end -->").next().unwrap_or(doc);
+                let lines: Vec<&str> = top
+                    .lines()
+                    .map(|l| l.strip_prefix("# ").unwrap_or(l))
+                    .collect();
+                println!("{}", lines.join("\n").trim());
                 return Ok(());
             }
             "--session" => {

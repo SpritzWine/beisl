@@ -45,7 +45,10 @@ Then add Beisl to a game's launch options — **Steam → Properties → Launch 
 beisl %command%
 ```
 
-Play, then close the game; the trace lands in `~/.local/share/beisl/traces/`. Works the
+Play, then close the game; the trace lands in `~/.local/share/beisl/traces/`.
+Usage documentation lives in [`docs/`](docs/) — one markdown file per binary, and the
+single source of truth: the same files render each binary's `--help` and the man pages
+(`man beisl` works after install). Works the
 same way as `mangohud %command%`, and with any Proton/Wine — not just SpritzWine. Mid-game
 you can also hit "Stop & save" in the session window: the recorder stops and the trace is
 saved while the game keeps running, so you don't have to quit to keep a capture.

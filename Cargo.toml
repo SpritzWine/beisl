@@ -8,6 +8,8 @@ members = [
     "crates/symbol-resolver", # perf.data addresses -> wine symbols (tiered fidelity)
     "crates/artifact",        # the merged, exportable trace (frametimes ⋈ samples)
     "crates/beisl-mcp",       # MCP server binary over the trace library (opt-in, stdio)
+    "crates/docs-gen",        # docs/*.1.md -> man pages (packaging tool; runtime binaries
+                              #   embed the same files for --help — single source of truth)
 ]
 
 # beisl-gui is a standalone workspace (its own lockfile): the heavy libcosmic/wgpu tree

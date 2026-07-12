@@ -20,7 +20,7 @@ ARCH    := $(shell uname -m)
 DIST    := dist
 BUNDLE  := beisl-$(VERSION)
 
-.PHONY: all build build-cli build-gui package clean distclean
+.PHONY: all build build-cli build-gui man package clean distclean
 
 all: package
 
@@ -32,18 +32,24 @@ build-cli:
 build-gui:
 	cd crates/beisl-gui && cargo build --release
 
-package: build
+# docs/*.1.md -> man/*.1 — pure cargo (the docs-gen crate), so CI needs no
+# distro markdown tool. The same files feed the binaries' --help via include_str!.
+man:
+	cargo run --release -p docs-gen
+
+package: build man
 	rm -rf $(DIST)/$(BUNDLE)
-	mkdir -p $(DIST)/$(BUNDLE)
+	mkdir -p $(DIST)/$(BUNDLE)/man
 	install -m755 target/release/beisl $(DIST)/$(BUNDLE)/
 	install -m755 target/release/beisl-mcp $(DIST)/$(BUNDLE)/
 	install -m755 crates/beisl-gui/target/release/beisl-setup $(DIST)/$(BUNDLE)/
 	install -m644 README.md LICENSE $(DIST)/$(BUNDLE)/
+	install -m644 man/*.1 $(DIST)/$(BUNDLE)/man/
 	tar -C $(DIST) -czf $(DIST)/$(BUNDLE)-$(ARCH).tar.gz $(BUNDLE)
 	@echo "packaged: $(DIST)/$(BUNDLE)-$(ARCH).tar.gz"
 
 clean:
-	rm -rf $(DIST)
+	rm -rf $(DIST) man
 
 # From-scratch: also drop both cargo target dirs so nothing stale survives a
 # branch switch. Slower — the beisl-gui git-dep tree recompiles from zero.

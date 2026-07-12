@@ -1,0 +1,10 @@
+[package]
+name = "docs-gen"
+version.workspace = true
+edition.workspace = true
+
+# The one workspace member allowed a markdown dep: renders docs/*.1.md into man
+# pages at build/package time. The runtime binaries never link any of this —
+# their --help embeds the same files via include_str!.
+[dependencies]
+mandown = "1.1" # markdown -> roff; tree is just pulldown-cmark + deunicode

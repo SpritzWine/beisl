@@ -57,13 +57,24 @@ fn bin_dir() -> PathBuf {
     home().join(".local/bin")
 }
 
-fn applications_dir() -> PathBuf {
+fn data_home() -> PathBuf {
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| home().join(".local/share"))
-        .join("applications")
 }
+
+fn applications_dir() -> PathBuf {
+    data_home().join("applications")
+}
+
+/// `~/.local/share/man/man1` — on the default MANPATH, so `man beisl` works
+/// after an unprivileged install.
+fn man1_dir() -> PathBuf {
+    data_home().join("man/man1")
+}
+
+const MAN_PAGES: [&str; 3] = ["beisl.1", "beisl-setup.1", "beisl-mcp.1"];
 
 fn do_install() -> Result<String, String> {
     let exe = std::env::current_exe().map_err(|e| format!("cannot find own path: {e}"))?;
@@ -90,6 +101,25 @@ fn do_install() -> Result<String, String> {
         install_file(&mcp_src, &bindir.join("beisl-mcp"))?;
         extra.push_str("\n  + beisl-mcp (MCP server for AI clients; see the README)");
     }
+    // Man pages ride along in the bundle's man/ (rendered from docs/*.1.md — the
+    // same files the binaries embed for --help). Per-user manpath, no root.
+    let man_src = here.join("man");
+    if man_src.is_dir() {
+        let man_dst = man1_dir();
+        fs::create_dir_all(&man_dst).map_err(|e| format!("mkdir {}: {e}", man_dst.display()))?;
+        let mut copied = 0;
+        for page in MAN_PAGES {
+            let src = man_src.join(page);
+            if src.is_file() {
+                fs::copy(&src, man_dst.join(page))
+                    .map_err(|e| format!("copy man page {page}: {e}"))?;
+                copied += 1;
+            }
+        }
+        if copied > 0 {
+            extra.push_str("\n  + man pages (try `man beisl`)");
+        }
+    }
 
     let path_note = if on_path(&bindir) {
         String::new()
@@ -114,7 +144,7 @@ fn do_install() -> Result<String, String> {
 fn do_uninstall() -> Result<String, String> {
     let mut removed = Vec::new();
     let icons = home().join(".local/share/icons/hicolor");
-    for p in [
+    let mut targets = vec![
         bin_dir().join("beisl"),
         bin_dir().join("beisl-setup"),
         bin_dir().join("beisl-mcp"),
@@ -124,7 +154,9 @@ fn do_uninstall() -> Result<String, String> {
         icons.join(format!("scalable/apps/{ICON_NAME}.svg")),
         icons.join(format!("scalable/apps/{SESSION_ICON_NAME}.svg")),
         icons.join(format!("symbolic/apps/{ICON_NAME}-symbolic.svg")),
-    ] {
+    ];
+    targets.extend(MAN_PAGES.iter().map(|p| man1_dir().join(p)));
+    for p in targets {
         if p.exists() {
             fs::remove_file(&p).map_err(|e| format!("rm {}: {e}", p.display()))?;
             removed.push(p.display().to_string());
