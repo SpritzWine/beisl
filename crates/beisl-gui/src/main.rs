@@ -30,7 +30,7 @@ use preflight::{
     driver_debuginfo_check, fix_command, gpu_dump_check, locked_system_message,
     mangohud_hotkey_check, multi_gpu_check, ostree_install_note, perf_debuginfod_check,
     perf_record_fix, steam_visible_beisl_check, Check, CheckId, Config, Distro, DumpAccessPolicy,
-    Fix, GpuPin, RecordMode, Status, SystemKind,
+    Fix, GpuPin, RecordMode, Status, SystemKind, STEAM_PATH_ISSUE_URL,
 };
 
 mod chart; // frametime timeline (plotters, drawn on cosmic's Canvas)
@@ -128,6 +128,8 @@ enum Message {
     /// The Steam-launcher row's OWN button — writes a shim into /usr/bin (pkexec), so
     /// like the dump row it's always its own explicit opt-in, never folded into `FixAll`.
     InstallSteamLauncher,
+    /// Open the upstream Valve bug behind the Steam-launcher row in the browser.
+    OpenSteamPathIssue,
     /// Advanced: remove the installed rule.
     RemoveDumpRule,
     /// Advanced: pick the persisted policy (intent only — no privilege runs here).
@@ -241,10 +243,11 @@ impl AppModel {
         // from `driver_debuginfo_check` (are the files reachable) — this asks whether `perf`
         // was even built with the support Beisl's on-demand fetch depends on.
         checks.push(perf_debuginfod_check());
-        // Steam's containerized client scrubs the launch-option PATH — bare
-        // `beisl %command%` needs a one-time /usr/bin link. Has a fix, so it joins the
-        // pkexec sweep (a symlink, not a standing privilege — no dump-style opt-in needed).
-        checks.push(steam_visible_beisl_check());
+        // Steam's containerized client scrubs the launch-option PATH — without the
+        // /usr/bin launcher, `beisl %command%` (the tool's whole entry point) silently
+        // fails. That makes this the most actionable row on the page, so it goes FIRST
+        // (right under the record-tier ladder), not buried below the advisories.
+        checks.insert(0, steam_visible_beisl_check());
         checks
     }
 
@@ -417,6 +420,13 @@ impl Application for AppModel {
             }
             Message::EnableDumpCapture => {
                 self.spawn_dump(Fix::InstallDumpAccessRule, DumpAccessPolicy::RuleInstalled);
+            }
+            Message::OpenSteamPathIssue => {
+                // Fire-and-forget: the portal/desktop handles the browser; a failure just
+                // means no window opens — nothing beisl should abort or prompt over.
+                let _ = std::process::Command::new("xdg-open")
+                    .arg(STEAM_PATH_ISSUE_URL)
+                    .spawn();
             }
             Message::InstallSteamLauncher => {
                 // One explicit click, one pkexec prompt; nothing to persist — success is
@@ -651,6 +661,13 @@ impl AppModel {
             content = content
                 .push(row)
                 .push(widget::text::caption(c.why.clone().into_owned()));
+            // The why cites Valve's bug number — make it a real link, not a dead end.
+            if c.id == CheckId::SteamVisibleBeisl && !is_ok {
+                content = content.push(
+                    widget::button::link("steam-for-linux #13389 \u{2197}")
+                        .on_press(Message::OpenSteamPathIssue),
+                );
+            }
         }
 
         // Informational only — the decision lives in Advanced. A poweruser who turned it
@@ -676,13 +693,15 @@ impl AppModel {
         }
 
         // Scrollable content fills the space; the rotating tip and the footer stay pinned
-        // and always visible at the bottom. A little right padding inside the scroll region
-        // keeps the rows off the scrollbar (mirrors the session window, window.rs).
+        // and always visible at the bottom. Right padding inside the scroll region keeps
+        // the rows — and especially their trailing Enable/Install buttons — clear of the
+        // scrollbar (wider than the session window's 14: this page puts interactive
+        // targets at the right edge, and a button under a scrollbar feels cramped).
         widget::Column::new()
             .spacing(14)
             .push(
                 widget::scrollable(
-                    widget::container(content).padding(cosmic::iced::Padding::from([0, 14, 0, 0])),
+                    widget::container(content).padding(cosmic::iced::Padding::from([0, 28, 0, 0])),
                 )
                 .width(Length::Fill)
                 .height(Length::Fill),

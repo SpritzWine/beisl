@@ -69,9 +69,10 @@ pub fn run() -> ExitCode {
     checks.push(perf_debuginfod_check());
     // Advisory: the MangoHud #2053 hotkey crash — warned about, never "fixed" by us.
     checks.push(mangohud_hotkey_check());
-    // Steam's containerized client scrubs the launch-option PATH — bare `beisl %command%`
-    // needs a one-time /usr/bin link (or, on immutable systems, the full path).
-    checks.push(steam_visible_beisl_check());
+    // Steam's containerized client scrubs the launch-option PATH — without the /usr/bin
+    // launcher, `beisl %command%` (the tool's whole entry point) silently fails. Most
+    // actionable row on the list, so it renders first, mirroring the setup page.
+    checks.insert(0, steam_visible_beisl_check());
 
     // A genuine RecordMode::None (perf missing, or paranoid too high for even a degraded
     // trace) means the box can't record at all — that gates readiness. A below-Full tier
@@ -106,9 +107,13 @@ pub fn run() -> ExitCode {
                     // Multi-line elevated scripts are unreadable as a single line —
                     // summarise per check instead of dumping the whole heredoc.
                     cmd if cmd.iter().any(|a| a.contains('\n')) => match c.id {
-                        CheckId::SteamVisibleBeisl => out!(
-                            "       fix:  opt in via beisl-setup (installs a small /usr/bin/beisl launcher via pkexec)"
-                        ),
+                        CheckId::SteamVisibleBeisl => {
+                            out!(
+                                "       fix:  opt in via beisl-setup (installs a small /usr/bin/beisl launcher via pkexec)"
+                            );
+                            // Terminals linkify URLs — the bug reference stays clickable here too.
+                            out!("       bug:  {}", preflight::STEAM_PATH_ISSUE_URL);
+                        }
                         _ => out!(
                             "       fix:  enable in beisl-setup (installs a udev rule + tmpfiles entry via pkexec)"
                         ),

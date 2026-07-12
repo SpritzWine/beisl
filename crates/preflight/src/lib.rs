@@ -506,6 +506,12 @@ pub fn steam_visible_beisl_check() -> Check {
     }
 }
 
+/// The upstream bug behind [`CheckId::SteamVisibleBeisl`] — the setup GUI renders it as
+/// a clickable link and `beisl --check` prints it (terminals linkify URLs), so the
+/// "#13389" in the why is never a dead end.
+pub const STEAM_PATH_ISSUE_URL: &str =
+    "https://github.com/ValveSoftware/steam-for-linux/issues/13389";
+
 /// Pure decision: warn only when all three line up — a PATH-scrubbing Steam client, a
 /// per-user beisl install for the shim to forward to, and no `/usr/bin/beisl` yet
 /// (`exists()` follows symlinks, so a dangling leftover from an older link-style
