@@ -822,6 +822,58 @@ fn read_paranoid() -> Option<i32> {
         .ok()
 }
 
+/// How beisl can record CPU samples for a session, given the kernel's `perf_event_paranoid`
+/// and whether `perf` carries CAP_PERFMON. The wrapper reads this at launch to pick the
+/// `perf record` invocation; the setup UI reads it to tell the user what *declining* the
+/// privilege fix actually costs (a userspace-only trace, not no trace).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordMode {
+    /// System-wide (`perf record -a`): kernel + every process. Needs `perf_event_paranoid
+    /// <= 0` (see [`PARANOID_MAX`]) or `perf` carrying CAP_PERFMON — the full-fidelity path.
+    Full,
+    /// Per-command, userspace only (`perf record -e cycles:u -- <game>`): the game's own
+    /// process subtree, no privilege. Unprivileged users may profile the userspace of
+    /// processes they launch at `perf_event_paranoid <= 2` (the common default, and
+    /// SteamOS); kernel samples are dropped. Keeps the game/dxvk/wine/**userspace-driver**
+    /// layers — the driver's hot Vulkan code runs in-process — losing only the kernel bar.
+    Degraded,
+    /// No recording: `perf` is missing, or paranoia is high enough (a Debian-style
+    /// `perf_event_paranoid=3`) to deny even own-process profiling without CAP_PERFMON.
+    /// The game runs un-traced (the caller warns and lets it launch).
+    None,
+}
+
+impl RecordMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RecordMode::Full => "full",
+            RecordMode::Degraded => "degraded",
+            RecordMode::None => "none",
+        }
+    }
+}
+
+/// The [`RecordMode`] for a trace on this machine right now.
+pub fn detect_record_mode() -> RecordMode {
+    record_mode_from(which("perf").is_some(), perf_has_perfmon(), read_paranoid())
+}
+
+/// Testable core of [`detect_record_mode`]. Full needs CPU-wide (`-a`) access — CAP_PERFMON
+/// or `paranoid <= 0`. Degraded needs only own-process userspace profiling, allowed at
+/// `paranoid <= 2`; an unreadable sysctl is treated as permissive (absent on stripped
+/// kernels where the restriction usually isn't enforced), degrading rather than giving up.
+fn record_mode_from(perf_present: bool, has_perfmon: bool, paranoid: Option<i32>) -> RecordMode {
+    if !perf_present {
+        RecordMode::None
+    } else if has_perfmon || matches!(paranoid, Some(v) if v <= PARANOID_MAX) {
+        RecordMode::Full
+    } else if paranoid.is_none() || matches!(paranoid, Some(v) if v <= 2) {
+        RecordMode::Degraded
+    } else {
+        RecordMode::None
+    }
+}
+
 /// Reality probe for kernel-symbol visibility: does `/proc/kallsyms` show us real
 /// addresses? The gate is two knobs deep — `kptr_restrict` must be 0 AND
 /// `perf_event_paranoid <= 1` (the kernel's `kallsyms_for_perf()` gate) — and checking
@@ -1073,6 +1125,25 @@ mod tests {
         let ok = driver_debuginfo_why(&[], Distro::Fedora);
         assert!(ok.contains("No missing debug symbols detected"));
         assert!(!ok.contains("debuginfo-install"));
+    }
+
+    #[test]
+    fn record_mode_matrix() {
+        use RecordMode::*;
+        // No perf at all → nothing to record with, regardless of the knobs.
+        assert_eq!(record_mode_from(false, true, Some(0)), None);
+        // CAP_PERFMON → full even under a locked-down paranoid.
+        assert_eq!(record_mode_from(true, true, Some(3)), Full);
+        // paranoid <= 0 (no cap) → full.
+        assert_eq!(record_mode_from(true, false, Some(0)), Full);
+        assert_eq!(record_mode_from(true, false, Some(-1)), Full);
+        // paranoid 1..=2 (no cap) → degraded (userspace-only). 2 is the common default/SteamOS.
+        assert_eq!(record_mode_from(true, false, Some(1)), Degraded);
+        assert_eq!(record_mode_from(true, false, Some(2)), Degraded);
+        // Unreadable sysctl → treat as permissive, degrade rather than give up.
+        assert_eq!(record_mode_from(true, false, Option::None), Degraded);
+        // Debian-style paranoid=3 (no cap) → even own-process profiling is denied.
+        assert_eq!(record_mode_from(true, false, Some(3)), None);
     }
 
     #[test]
