@@ -8,9 +8,10 @@ use std::process::ExitCode;
 
 use crate::out::out;
 use preflight::{
-    all_checks, detect_distro, detect_system_kind, disk_check, driver_debuginfo_check, fix_command,
-    gpu_dump_check, locked_system_message, mangohud_hotkey_check, multi_gpu_check,
-    ostree_install_note, perf_debuginfod_check, Status, SystemKind,
+    all_checks, detect_distro, detect_record_mode, detect_system_kind, disk_check,
+    driver_debuginfo_check, fix_command, gpu_dump_check, locked_system_message,
+    mangohud_hotkey_check, multi_gpu_check, ostree_install_note, perf_debuginfod_check, Status,
+    SystemKind,
 };
 
 pub fn run() -> ExitCode {
@@ -25,6 +26,10 @@ pub fn run() -> ExitCode {
     }
 
     out!("Beisl preflight  (distro family: {distro:?})\n");
+    // Say up front what a trace on this box actually captures right now — the PerfParanoid
+    // check below no longer means "record or nothing," so surface the real fallback.
+    let mode = detect_record_mode();
+    out!("Record mode: {} ({})\n", mode.as_str(), mode.describe());
     // On an ostree box the install fixes below are layered and need a reboot — flag it once.
     if system == SystemKind::OstreeAtomic {
         out!("{}\n", ostree_install_note());

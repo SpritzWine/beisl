@@ -182,8 +182,11 @@ pub fn all_checks() -> Vec<Check> {
         Check {
             id: CheckId::PerfParanoid,
             label: "perf can record",
-            why: "The kernel restricts profiling by default; we grant perf the CAP_PERFMON \
-                  capability so it can record without weakening the whole system."
+            why: "Granting perf the CAP_PERFMON capability gets a full system-wide trace \
+                  (kernel included) without weakening the whole system. Without it, on a \
+                  kernel that still lets you profile your own processes \
+                  (`perf_event_paranoid` <= 2), beisl falls back to a userspace-only trace \
+                  — game, DXVK, wine, and GPU-driver time, just no kernel layer."
                 .into(),
             blocking: true,
             status: Status::Pending,
@@ -851,6 +854,16 @@ impl RecordMode {
             RecordMode::None => "none",
         }
     }
+
+    /// A short human note for the setup UI / MCP advisor — what the mode actually costs,
+    /// so declining the CAP_PERFMON fix reads as a tradeoff rather than a dead end.
+    pub fn describe(self) -> &'static str {
+        match self {
+            RecordMode::Full => "system-wide — kernel + userspace",
+            RecordMode::Degraded => "userspace-only — no kernel layer (grant CAP_PERFMON for full)",
+            RecordMode::None => "unavailable — the game runs un-traced",
+        }
+    }
 }
 
 /// The [`RecordMode`] for a trace on this machine right now.
@@ -1144,6 +1157,30 @@ mod tests {
         assert_eq!(record_mode_from(true, false, Option::None), Degraded);
         // Debian-style paranoid=3 (no cap) → even own-process profiling is denied.
         assert_eq!(record_mode_from(true, false, Some(3)), None);
+    }
+
+    #[test]
+    fn record_mode_describe_names_the_tradeoff() {
+        assert_eq!(
+            RecordMode::Full.describe(),
+            "system-wide — kernel + userspace"
+        );
+        assert!(RecordMode::Degraded.describe().contains("userspace-only"));
+        assert!(RecordMode::Degraded.describe().contains("CAP_PERFMON"));
+        assert!(RecordMode::None.describe().contains("un-traced"));
+    }
+
+    #[test]
+    fn perf_paranoid_why_mentions_the_degraded_fallback() {
+        // The check used to imply "grant this or you can't record" — no longer true now
+        // that a degraded userspace-only trace exists, so the why must say so.
+        let why = &all_checks()
+            .into_iter()
+            .find(|c| c.id == CheckId::PerfParanoid)
+            .unwrap()
+            .why;
+        assert!(why.contains("userspace"), "{why}");
+        assert!(why.contains("CAP_PERFMON"), "{why}");
     }
 
     #[test]

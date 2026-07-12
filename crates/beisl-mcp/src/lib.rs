@@ -202,9 +202,14 @@ impl Server {
                 })
             })
             .collect();
+        // Surfaced separately from the PerfParanoid row: that check's why now explains the
+        // degraded fallback in prose, but an advisor asking "can it record right now" wants
+        // the answer as data, not text-mined out of a sentence.
+        let mode = preflight::detect_record_mode();
         json!({
             "distro_family": format!("{distro:?}"),
             "checks": rows,
+            "record_mode": { "mode": mode.as_str(), "note": mode.describe() },
             "note": "fix_command is advice for the user to run themselves (or via the \
                      setup app) — this server never executes anything."
         })
@@ -538,6 +543,10 @@ mod tests {
             assert!(c["label"].is_string() && c["status"].is_string() && c["why"].is_string());
         }
         assert!(status["distro_family"].is_string());
+        // Record mode is host-dependent too, but the shape (and a known-mode string) isn't.
+        let mode = status["record_mode"]["mode"].as_str().unwrap();
+        assert!(["full", "degraded", "none"].contains(&mode), "{mode}");
+        assert!(status["record_mode"]["note"].is_string());
     }
 
     #[test]
