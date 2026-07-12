@@ -188,7 +188,11 @@ pub fn all_checks() -> Vec<Check> {
                   (`perf_event_paranoid` <= 2), beisl falls back to a userspace-only trace \
                   — game, DXVK, wine, and GPU-driver time, just no kernel layer."
                 .into(),
-            blocking: true,
+            // Not blocking: without CAP_PERFMON, beisl still records a degraded
+            // (userspace-only) trace at paranoid <= 2 — declining is a fidelity choice,
+            // not "can't trace". `beisl --check` renders this as a record-tier ladder;
+            // only a genuine `RecordMode::None` (perf missing / paranoid too high) blocks.
+            blocking: false,
             status: Status::Pending,
             fix: Some(perf_record_fix()),
         },
@@ -762,7 +766,7 @@ fn dump_remove_script() -> String {
 
 /// Prefer CAP_PERFMON (surgical) where `perf` is a real ELF binary; on a wrapper script
 /// (Debian) or a missing perf, fall back to lowering the sysctl.
-fn perf_record_fix() -> Fix {
+pub fn perf_record_fix() -> Fix {
     match perf_path() {
         Some(p) if is_elf(&p) => Fix::SetcapPerfmon,
         _ => Fix::Sysctl {
@@ -1066,14 +1070,20 @@ mod tests {
         let checks = all_checks();
         assert_eq!(checks.len(), 5);
         assert!(checks.iter().all(|c| !c.why.is_empty()));
-        // Kernel symbols and MangoHud are advisory; everything else gates a trace.
+        // Advisory (non-blocking): PerfParanoid (declining CAP_PERFMON still gives a
+        // degraded userspace-only trace, so it's a fidelity choice, not a hard gate),
+        // KernelSymbols, and MangoHud. Everything else gates a trace.
         assert_eq!(
             checks
                 .iter()
                 .filter(|c| !c.blocking)
                 .map(|c| c.id)
                 .collect::<Vec<_>>(),
-            vec![CheckId::KernelSymbols, CheckId::MangoHud]
+            vec![
+                CheckId::PerfParanoid,
+                CheckId::KernelSymbols,
+                CheckId::MangoHud
+            ]
         );
     }
 

@@ -10,8 +10,8 @@ use crate::out::out;
 use preflight::{
     all_checks, detect_distro, detect_record_mode, detect_system_kind, disk_check,
     driver_debuginfo_check, fix_command, gpu_dump_check, locked_system_message,
-    mangohud_hotkey_check, multi_gpu_check, ostree_install_note, perf_debuginfod_check, Status,
-    SystemKind,
+    mangohud_hotkey_check, multi_gpu_check, ostree_install_note, perf_debuginfod_check,
+    perf_record_fix, CheckId, RecordMode, Status, SystemKind,
 };
 
 pub fn run() -> ExitCode {
@@ -26,10 +26,23 @@ pub fn run() -> ExitCode {
     }
 
     out!("Beisl preflight  (distro family: {distro:?})\n");
-    // Say up front what a trace on this box actually captures right now — the PerfParanoid
-    // check below no longer means "record or nothing," so surface the real fallback.
+    // What a trace captures on this box, as a fidelity ladder with the current tier marked —
+    // the "perf can record" check folds into this: declining CAP_PERFMON isn't "broken", it's
+    // the degraded tier. Only a genuine `none` (perf missing / paranoid too high) can't trace.
     let mode = detect_record_mode();
-    out!("Record mode: {} ({})\n", mode.as_str(), mode.describe());
+    out!("Perf record tier — what a trace captures here:");
+    for tier in [RecordMode::Full, RecordMode::Degraded, RecordMode::None] {
+        let mark = if tier == mode { "[x]" } else { "[ ]" };
+        out!("  {mark} {:<9} {}", tier.as_str(), tier.describe());
+    }
+    // Below Full: show how to reach it (grant CAP_PERFMON — described here, never run).
+    if mode != RecordMode::Full {
+        let cmd = fix_command(&perf_record_fix(), distro, system);
+        if !cmd.is_empty() {
+            out!("      \u{2192} for full: {}", cmd.join(" "));
+        }
+    }
+    out!();
     // On an ostree box the install fixes below are layered and need a reboot — flag it once.
     if system == SystemKind::OstreeAtomic {
         out!("{}\n", ostree_install_note());
@@ -57,9 +70,16 @@ pub fn run() -> ExitCode {
     // Advisory: the MangoHud #2053 hotkey crash — warned about, never "fixed" by us.
     checks.push(mangohud_hotkey_check());
 
-    let mut blocking_missing = false;
+    // A genuine RecordMode::None (perf missing, or paranoid too high for even a degraded
+    // trace) means the box can't record at all — that gates readiness. A below-Full tier
+    // (degraded) does not: a userspace-only trace is still a trace.
+    let mut blocking_missing = mode == RecordMode::None;
 
     for c in &checks {
+        // The perf-record capability is shown as the tier ladder above, not a binary row.
+        if c.id == CheckId::PerfParanoid {
+            continue;
+        }
         let mark = match &c.status {
             Status::Ok => "[x]",
             Status::Failed(_) => "[!]",
