@@ -27,6 +27,10 @@ Main workspace (`Cargo.toml`, crates.io deps only, mostly std):
 - `crates/artifact` — merged exportable trace, frametimes ⋈ samples.
 - `crates/beisl-mcp` — `beisl-mcp` binary: read-only MCP server (JSON-RPC over stdio,
   hand-rolled — no async runtime) over the trace library; opt-in, ships in the bundle.
+- `crates/docs-gen` — packaging tool: renders `docs/*.1.md` into man pages (mandown).
+  `docs/*.1.md` are the SINGLE SOURCE for user-facing usage text: each binary embeds
+  its file via `include_str!` and prints everything above the `<!-- help-end -->`
+  marker as `--help`; `make man` renders the full files for the bundle.
 - `crates/beisl-gui` — `beisl-setup` binary (libcosmic): preflight checklist, plus an
   install/update page shown first when run from an extracted dist tree (a tiny fork of
   the SpritzWine installer wizard over `beisl install`). **Excluded** from the main
@@ -45,6 +49,7 @@ cargo test --workspace           # inline unit tests (all main-workspace crates)
 cargo clippy --workspace
 cargo fmt
 cargo check -p beisl             # or -p preflight, -p session, ...
+make man                         # docs/*.1.md -> man/*.1 (cargo run -p docs-gen)
 (cd crates/beisl-gui && cargo check)   # GUI: separate workspace; heavy git deps,
                                        # slow first build — skip unless GUI changed
 make                             # release-build BOTH workspaces + package the bundle
