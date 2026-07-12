@@ -3,7 +3,12 @@
 #
 #   make            # build everything + produce dist/beisl-<version>-<arch>.tar.gz
 #   make build      # just compile both workspaces (release)
-#   make clean      # remove dist/ (cargo targets are left alone; use cargo clean)
+#   make clean      # remove dist/ only (cargo targets kept — cheap; incremental
+#                   #   rebuilds still pick up source changes on the current branch)
+#   make distclean  # clean + drop BOTH cargo target dirs, forcing a from-scratch
+#                   #   rebuild. Use after a branch switch if you don't trust the
+#                   #   incremental state — `make distclean && make`. Slower: the
+#                   #   ~48-crate beisl-gui git tree recompiles.
 #
 # The tarball is the "extracted tree" the README's install section talks about:
 # beisl and beisl-setup side by side, which is the layout `beisl install` expects.
@@ -15,7 +20,7 @@ ARCH    := $(shell uname -m)
 DIST    := dist
 BUNDLE  := beisl-$(VERSION)
 
-.PHONY: all build build-cli build-gui package clean
+.PHONY: all build build-cli build-gui package clean distclean
 
 all: package
 
@@ -39,3 +44,9 @@ package: build
 
 clean:
 	rm -rf $(DIST)
+
+# From-scratch: also drop both cargo target dirs so nothing stale survives a
+# branch switch. Slower — the beisl-gui git-dep tree recompiles from zero.
+distclean: clean
+	cargo clean
+	cd crates/beisl-gui && cargo clean
