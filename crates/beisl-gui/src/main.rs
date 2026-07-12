@@ -605,13 +605,16 @@ impl AppModel {
         }
 
         // Scrollable content fills the space; the rotating tip and the footer stay pinned
-        // and always visible at the bottom.
+        // and always visible at the bottom. A little right padding inside the scroll region
+        // keeps the rows off the scrollbar (mirrors the session window, window.rs).
         widget::Column::new()
             .spacing(14)
             .push(
-                widget::scrollable(content)
-                    .width(Length::Fill)
-                    .height(Length::Fill),
+                widget::scrollable(
+                    widget::container(content).padding(cosmic::iced::Padding::from([0, 14, 0, 0])),
+                )
+                .width(Length::Fill)
+                .height(Length::Fill),
             )
             .push(widget::container(widget::text::body(TIPS[self.tip])).padding(12))
             .push(self.footer())
