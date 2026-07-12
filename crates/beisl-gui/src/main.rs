@@ -26,10 +26,11 @@ use cosmic::{Application, Element};
 
 use preflight::gpu::GpuPinCandidate;
 use preflight::{
-    all_checks, detect_distro, detect_system_kind, disk_check, driver_debuginfo_check, fix_command,
-    gpu_dump_check, locked_system_message, mangohud_hotkey_check, multi_gpu_check,
-    ostree_install_note, perf_debuginfod_check, Check, CheckId, Config, Distro, DumpAccessPolicy,
-    Fix, GpuPin, Status, SystemKind,
+    all_checks, detect_distro, detect_record_mode, detect_system_kind, disk_check,
+    driver_debuginfo_check, fix_command, gpu_dump_check, locked_system_message,
+    mangohud_hotkey_check, multi_gpu_check, ostree_install_note, perf_debuginfod_check,
+    perf_record_fix, Check, CheckId, Config, Distro, DumpAccessPolicy, Fix, GpuPin, RecordMode,
+    Status, SystemKind,
 };
 
 mod chart; // frametime timeline (plotters, drawn on cosmic's Canvas)
@@ -558,7 +559,40 @@ impl AppModel {
             content = content.push(widget::text::caption(ostree_install_note()));
         }
 
+        // Perf record tier — full/degraded/none with the current one marked, mirroring
+        // `beisl --check`. Declining CAP_PERFMON isn't "broken", it's the degraded tier, so
+        // this ladder replaces the old binary "perf can record" row (skipped in the loop
+        // below). Computed here rather than stored: detection is cheap and always current
+        // (a granted/revoked capability shows immediately on the next render).
+        let mode = detect_record_mode();
+        let mut tier = widget::Column::new().spacing(4).push(widget::text::body(
+            "Perf record tier — what a trace captures here:",
+        ));
+        for t in [RecordMode::Full, RecordMode::Degraded, RecordMode::None] {
+            tier = tier.push(
+                widget::Row::new()
+                    .spacing(10)
+                    .push(widget::checkbox(t == mode).label(t.as_str()))
+                    .push(widget::text::caption(t.describe())),
+            );
+        }
+        // Below Full: show the grant-CAP_PERFMON command (described, run via the fix flow).
+        if mode != RecordMode::Full {
+            let cmd = fix_command(&perf_record_fix(), self.distro, self.system);
+            if !cmd.is_empty() {
+                tier = tier.push(widget::text::caption(format!(
+                    "\u{2192} for full: {}",
+                    cmd.join(" ")
+                )));
+            }
+        }
+        content = content.push(tier);
+
         for c in &self.checks {
+            // The perf-record capability is shown as the tier ladder above, not a binary row.
+            if c.id == CheckId::PerfParanoid {
+                continue;
+            }
             let is_ok = c.status == Status::Ok;
             // Read-only checkbox (no on_toggle) = the status indicator.
             let mut row = widget::Row::new()
