@@ -14,7 +14,7 @@ on:
 
 jobs:
   check:
-    runs-on: codeberg-small
+    runs-on: beisl-local
     container:
       image: docker.io/library/rust:1
     steps:
