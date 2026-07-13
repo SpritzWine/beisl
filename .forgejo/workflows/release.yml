@@ -26,15 +26,28 @@ on:
 
 jobs:
   release:
-    # The GUI workspace builds ~630 crates (libcosmic/wgpu tree) from cold —
-    # far beyond the regular runners' minutes-scale slots. The lazy lane is
-    # low-priority but may run for hours, which is the trade we want for a
-    # tag-rare release build.
-    runs-on: codeberg-medium-lazy
+    # Self-hosted runner (ci/runner/), NOT a Codeberg hosted one.
+    #
+    # Codeberg's hosted runners cap a job at 2/5/10 minutes (tiny/small/medium);
+    # `-lazy` only delays when a job STARTS (it may sit in the queue for up to 24h),
+    # it does not extend the runtime. That misreading is what silently killed the
+    # v0.1.0 release build: ~630 crates (libcosmic/wgpu) with thin LTO cannot compile
+    # in 10 minutes on 4 cores, and no cache fixes that -- the cold build has to fit
+    # in the cap at least once, and it never can.
+    #
+    # The self-hosted runner has no cap and keeps CARGO_HOME + both target dirs on a
+    # bind-mounted cache disk, so only the first release build is cold.
+    runs-on: beisl-local
     # Official Rust image: toolchain + gcc/make preinstalled. The GUI needs no
     # build-time system libs — winit/xkbcommon load via dlopen at runtime.
     container:
       image: docker.io/library/rust:1
+    env:
+      # /cache is bind-mounted into every job container by the runner (see
+      # ci/runner/data/config.template.yml). The Makefile takes CLI_TARGET/GUI_TARGET.
+      CARGO_HOME: /cache/cargo
+      CLI_TARGET: /cache/target-cli
+      GUI_TARGET: /cache/target-gui
     steps:
       # No actions at all in this job: the runner executes actions (and their nested
       # steps) inside the job container, and bare rust:1 has no node — which rules out

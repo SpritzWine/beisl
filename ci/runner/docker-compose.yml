@@ -1,0 +1,53 @@
+# Self-hosted Forgejo runner for Codeberg — the machine that builds beisl releases.
+#
+# Why this exists: Codeberg's hosted runners cap a job at 2/5/10 minutes
+# (tiny/small/medium). The "-lazy" variants only delay the START of a job (they may
+# queue it for up to 24h); they do NOT extend its runtime. The GUI workspace is ~630
+# crates (libcosmic/wgpu) with thin LTO and cannot build in 10 minutes on 4 cores, so
+# hosted runners simply cannot cut a beisl release. This runner has no cap, uses all
+# the host's cores, and keeps the cargo registry + both target dirs on a disk of your
+# choosing (CACHE_DIR), which makes every release build after the first incremental.
+#
+# Deploy: copy this directory to the build host, then see README.md.
+
+services:
+  runner:
+    # v12+ is declarative: the uuid/token from Codeberg's "Create new runner" go
+    # straight into the config. `forgejo-runner register` is deprecated -- there is
+    # no registration step and no .runner state file; this container is stateless.
+    image: data.forgejo.org/forgejo/runner:12
+    container_name: ${RUNNER_NAME:-beisl-runner}
+    restart: unless-stopped
+    # Root, so it can reach the docker socket without hunting for the host's docker
+    # gid. Mounting that socket is already root-equivalent on this host (see README),
+    # so this adds no meaningful privilege -- it just avoids a gid mismatch.
+    user: "0:0"
+    volumes:
+      - ./data:/data                              # the config template (no secrets)
+      - /var/run/docker.sock:/var/run/docker.sock # spawns sibling job containers
+    environment:
+      CACHE_DIR: ${CACHE_DIR:?set CACHE_DIR in .env — host dir for the build cache}
+      FORGEJO_URL: ${FORGEJO_URL:-https://codeberg.org/}
+      FORGEJO_UUID: ${FORGEJO_UUID:?set FORGEJO_UUID in .env — from Codeberg's runner dialog}
+      FORGEJO_TOKEN: ${FORGEJO_TOKEN:?set FORGEJO_TOKEN in .env — from Codeberg's runner dialog}
+      RUNNER_LABELS: ${RUNNER_LABELS:-beisl-local:docker://docker.io/library/rust:1}
+    working_dir: /data
+    # Render the config at start:
+    #   * the token is injected from the environment and written to a container-local
+    #     tmp file, so the secret never lands in the bind-mounted ./data on disk;
+    #   * CACHE_DIR must be substituted as a HOST path -- the runner drives the host's
+    #     docker daemon through the socket above, so docker resolves -v against the
+    #     host, not against this container's filesystem.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        umask 077
+        sed -e "s#@CACHE_DIR@#$${CACHE_DIR}#g" \
+            -e "s#@FORGEJO_URL@#$${FORGEJO_URL}#g" \
+            -e "s#@FORGEJO_UUID@#$${FORGEJO_UUID}#g" \
+            -e "s#@FORGEJO_TOKEN@#$${FORGEJO_TOKEN}#g" \
+            -e "s#@RUNNER_LABELS@#$${RUNNER_LABELS}#g" \
+            /data/config.template.yml > /tmp/runner-config.yml
+        exec forgejo-runner daemon --config /tmp/runner-config.yml

@@ -20,6 +20,15 @@ ARCH    := $(shell uname -m)
 DIST    := dist
 BUNDLE  := beisl-$(VERSION)
 
+# Target dirs, overridable so a build can put them somewhere persistent -- e.g. CI on
+# the self-hosted runner points them at a bind-mounted cache disk (ci/runner/), which
+# is what makes a release build after the first one incremental instead of recompiling
+# the ~630-crate libcosmic/wgpu tree from cold. Two dirs because the GUI is its own
+# workspace (own lockfile) and must not drag that tree into the light CLI build.
+# Defaults are the in-tree paths, so a plain `make` behaves exactly as before.
+CLI_TARGET ?= target
+GUI_TARGET ?= crates/beisl-gui/target
+
 .PHONY: all build build-cli build-gui man package clean distclean
 
 all: package
@@ -27,22 +36,24 @@ all: package
 build: build-cli build-gui
 
 build-cli:
-	cargo build --release --workspace
+	cargo build --release --workspace --target-dir $(CLI_TARGET)
 
+# --target-dir is resolved relative to the cwd cargo runs in, so pass it absolute:
+# this recipe has already cd'd into the GUI workspace.
 build-gui:
-	cd crates/beisl-gui && cargo build --release
+	cd crates/beisl-gui && cargo build --release --target-dir $(abspath $(GUI_TARGET))
 
 # docs/*.1.md -> man/*.1 — pure cargo (the docs-gen crate), so CI needs no
 # distro markdown tool. The same files feed the binaries' --help via include_str!.
 man:
-	cargo run --release -p docs-gen
+	cargo run --release -p docs-gen --target-dir $(CLI_TARGET)
 
 package: build man
 	rm -rf $(DIST)/$(BUNDLE)
 	mkdir -p $(DIST)/$(BUNDLE)/man
-	install -m755 target/release/beisl $(DIST)/$(BUNDLE)/
-	install -m755 target/release/beisl-mcp $(DIST)/$(BUNDLE)/
-	install -m755 crates/beisl-gui/target/release/beisl-setup $(DIST)/$(BUNDLE)/
+	install -m755 $(CLI_TARGET)/release/beisl $(DIST)/$(BUNDLE)/
+	install -m755 $(CLI_TARGET)/release/beisl-mcp $(DIST)/$(BUNDLE)/
+	install -m755 $(GUI_TARGET)/release/beisl-setup $(DIST)/$(BUNDLE)/
 	install -m644 README.md LICENSE $(DIST)/$(BUNDLE)/
 	install -m644 man/*.1 $(DIST)/$(BUNDLE)/man/
 	tar -C $(DIST) -czf $(DIST)/$(BUNDLE)-$(ARCH).tar.gz $(BUNDLE)

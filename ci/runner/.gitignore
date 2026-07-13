@@ -1,0 +1,4 @@
+# runner secrets + registration state — never commit
+.env
+data/.runner
+data/config.yml

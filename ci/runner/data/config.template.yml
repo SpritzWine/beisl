@@ -1,0 +1,54 @@
+# Forgejo runner config template (schema: forgejo-runner v12).
+#
+# The @PLACEHOLDERS@ are substituted at container start from .env (see
+# docker-compose.yml). This template holds NO secrets and is safe to commit; the
+# rendered file lands in the container's /tmp, never on the host disk.
+
+log:
+  level: info
+
+server:
+  # Declarative registration: uuid + token come from Codeberg's
+  # Settings -> Actions -> Runners -> "Create new runner" dialog. There is no
+  # `forgejo-runner register` step any more (that command is deprecated).
+  connections:
+    codeberg:
+      url: "@FORGEJO_URL@"
+      uuid: "@FORGEJO_UUID@"
+      token: "@FORGEJO_TOKEN@"
+      # Labels are per-connection and mandatory in v12. `runs-on: beisl-local` in
+      # .forgejo/workflows/release.yml selects this runner; the part after docker://
+      # is the fallback image for jobs that do not name their own container (the
+      # release job names rust:1 explicitly).
+      labels:
+        - "@RUNNER_LABELS@"
+
+runner:
+  # One job at a time: a release build wants every core, and two concurrent cargo
+  # builds sharing a target dir would only block on the same lock.
+  capacity: 1
+  # The cap the hosted runners could not give us. A cold ~630-crate libcosmic/wgpu
+  # build is comfortably inside this; a warm one is minutes.
+  timeout: 6h
+  shutdown_timeout: 3h
+  fetch_timeout: 5s
+
+cache:
+  # The runner's own actions/cache server -- deliberately off. The release job's
+  # container is bare rust:1, which has no Node, so Node-based actions (actions/cache)
+  # cannot run in it at all. Persistence comes from the bind mount below instead,
+  # which needs no action, no network, and no cache protocol.
+  enabled: false
+
+container:
+  # Bind the persistent build cache into EVERY job container:
+  #   /cache/cargo       -> CARGO_HOME (registry + git checkouts)
+  #   /cache/target-cli  -> CLI workspace target dir  (~37 crates)
+  #   /cache/target-gui  -> GUI workspace target dir  (~630 crates, the bulk)
+  # The workflow exports these; the Makefile takes CLI_TARGET/GUI_TARGET.
+  options: -v @CACHE_DIR@:/cache
+  valid_volumes:
+    - "@CACHE_DIR@"
+  network: bridge
+  privileged: false
+  force_pull: false
