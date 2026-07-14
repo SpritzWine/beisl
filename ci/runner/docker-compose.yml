@@ -31,6 +31,11 @@ services:
       FORGEJO_UUID: ${FORGEJO_UUID:?set FORGEJO_UUID in .env — from Codeberg's runner dialog}
       FORGEJO_TOKEN: ${FORGEJO_TOKEN:?set FORGEJO_TOKEN in .env — from Codeberg's runner dialog}
       RUNNER_LABELS: ${RUNNER_LABELS:-beisl-local:docker://docker.io/library/rust:1}
+      # Defaults keep a beisl-only runner behaving exactly as before. A runner that also
+      # builds SpritzWine-Prater overrides CONTAINER_OPTIONS to add `--device /dev/ntsync`
+      # (see ci/runner/README.md) and raises JOB_TIMEOUT for cold Proton builds.
+      CONTAINER_OPTIONS: ${CONTAINER_OPTIONS:--v @CACHE_DIR@:/cache}
+      JOB_TIMEOUT: ${JOB_TIMEOUT:-6h}
     working_dir: /data
     # Render the config at start:
     #   * the token is injected from the environment and written to a container-local
@@ -44,10 +49,37 @@ services:
       - |
         set -eu
         umask 077
-        sed -e "s#@CACHE_DIR@#$${CACHE_DIR}#g" \
+        # Two passes.
+        #
+        # sed does the scalars. CONTAINER_OPTIONS must expand FIRST, because its own value
+        # may contain @CACHE_DIR@ (the default does) and sed applies -e expressions in order
+        # per line -- a later @CACHE_DIR@ rule would never see text this rule had not yet
+        # inserted.
+        #
+        # awk then expands RUNNER_LABELS, because `labels:` is a YAML *list* and this is a
+        # comma-separated string: substituting it as one scalar would produce a single,
+        # absurd label ("beisl-local:docker://...,prater-local:docker://...") that no
+        # `runs-on:` can ever match -- and Forgejo does not reject an unmatched label, it
+        # just never claims the job, so the failure looks like a queue that never moves.
+        # One list item per label instead.
+        sed -e "s#@CONTAINER_OPTIONS@#$${CONTAINER_OPTIONS}#g" \
+            -e "s#@CACHE_DIR@#$${CACHE_DIR}#g" \
+            -e "s#@JOB_TIMEOUT@#$${JOB_TIMEOUT}#g" \
             -e "s#@FORGEJO_URL@#$${FORGEJO_URL}#g" \
             -e "s#@FORGEJO_UUID@#$${FORGEJO_UUID}#g" \
             -e "s#@FORGEJO_TOKEN@#$${FORGEJO_TOKEN}#g" \
-            -e "s#@RUNNER_LABELS@#$${RUNNER_LABELS}#g" \
-            /data/config.template.yml > /tmp/runner-config.yml
+            /data/config.template.yml \
+        | awk -v labels="$${RUNNER_LABELS}" '
+            /@RUNNER_LABELS@/ {
+              match($$0, /^[ \t]*/)
+              indent = substr($$0, 1, RLENGTH)
+              n = split(labels, a, ",")
+              for (i = 1; i <= n; i++) {
+                gsub(/^[ \t]+|[ \t]+$$/, "", a[i])
+                if (a[i] != "") printf "%s- \"%s\"\n", indent, a[i]
+              }
+              next
+            }
+            { print }
+          ' > /tmp/runner-config.yml
         exec forgejo-runner daemon --config /tmp/runner-config.yml

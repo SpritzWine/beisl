@@ -1,6 +1,8 @@
-# Self-hosted release runner
+# Self-hosted runner
 
-Builds beisl releases for Codeberg on your own hardware.
+Builds beisl releases for Codeberg on your own hardware — and, if you point the labels at
+them, the rest of the SpritzWine org too (SpritzWine and SpritzWine-Prater). It lives in
+this repo because beisl needed it first, not because it is beisl's alone.
 
 ## Why
 
@@ -23,9 +25,21 @@ registry + target dirs — which is the caching we actually wanted, without `act
 
 ## Setup
 
-1. **Enable Actions** on the repo: Codeberg → beisl → Settings → Units → Actions.
-2. **Create the runner**: Settings → Actions → Runners → *Create new runner*. Codeberg
-   hands you a **uuid** and a **token**:
+1. **Enable Actions**: Codeberg → the repo → Settings → Units → Actions. (Per repo, for
+   each repo this runner should serve.)
+2. **Create the runner** — and mind *where* you create it, because the scope is fixed at
+   registration and **no label can widen it later**:
+
+   | created from | serves |
+   |---|---|
+   | a **repo**'s Settings → Actions → Runners | that repo, and nothing else |
+   | the **org**'s Settings → Actions → Runners | *every* repo in the org |
+
+   A repo-scoped runner does not reject another repo's jobs — it simply never claims
+   them, and they queue forever with no error anywhere. If this box is meant to build
+   more than beisl, register it from the **organisation** page.
+
+   Either way Codeberg hands you a **uuid** and a **token**:
 
    ```yaml
    server:
@@ -43,14 +57,37 @@ registry + target dirs — which is the caching we actually wanted, without `act
 
    ```sh
    cp .env.example .env
-   $EDITOR .env          # CACHE_DIR (a disk with ~10-15 GB free) + FORGEJO_UUID + FORGEJO_TOKEN
+   $EDITOR .env          # CACHE_DIR + FORGEJO_UUID + FORGEJO_TOKEN + RUNNER_LABELS
    docker compose up -d
    ```
 
    The entrypoint renders the config from `data/config.template.yml`, injecting the
    token from the environment into a **container-local** `/tmp` file — so the secret
    never lands on the host disk, only in `.env` (gitignored).
-4. Check it appears under Settings → Actions → Runners with the label `beisl-local`.
+4. Check it appears under Settings → Actions → Runners with the labels you configured.
+
+## Serving the whole org
+
+`RUNNER_LABELS` is a comma-separated list, so one daemon can serve every repo. `capacity: 1`
+means they never race each other for cores — or, in Prater's case, for its warm work tree.
+
+```
+RUNNER_LABELS=beisl-local:docker://docker.io/library/rust:1,\
+spritzwine-local:docker://spritzwine-build:fedora44,\
+prater-local:docker://spritzwine-prater-build:steamrt4
+```
+
+Two things the other repos need from the host, both set in `.env`:
+
+- **`CONTAINER_OPTIONS`** must add `--device /dev/ntsync` for Prater. Its smoke gate runs the
+  PE sync fixtures under *both* wine sync backends; without the device the ntsync lane skips
+  (loudly, but without failing) and the sync backend goes unguarded — which is exactly the
+  thing that has already been misdiagnosed once here. Wants a **≥ 6.14 kernel**.
+- **`JOB_TIMEOUT`** wants raising (12h): a *cold* Proton build is hours, not minutes.
+
+The two build images are **local tags** — `force_pull: false` means they are used as-is and
+never pulled — so they must exist on this host. Build each from its own repo; see the
+comments in `.env.example`, and Prater's `prater/ci/README.md` for its cache layout.
 
 ## Cutting a release
 

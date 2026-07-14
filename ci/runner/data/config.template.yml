@@ -25,11 +25,14 @@ server:
 
 runner:
   # One job at a time: a release build wants every core, and two concurrent cargo
-  # builds sharing a target dir would only block on the same lock.
+  # builds sharing a target dir would only block on the same lock. It is also what
+  # keeps the Prater jobs (which share a persistent work tree) from racing it.
   capacity: 1
   # The cap the hosted runners could not give us. A cold ~630-crate libcosmic/wgpu
-  # build is comfortably inside this; a warm one is minutes.
-  timeout: 6h
+  # build is comfortably inside 6h; a warm one is minutes. Raise it via JOB_TIMEOUT
+  # if this runner also builds Prater -- a cold Proton tree (wine x2 arches, dxvk,
+  # vkd3d-proton, ffmpeg, icu) is hours, not minutes.
+  timeout: "@JOB_TIMEOUT@"
   shutdown_timeout: 3h
   fetch_timeout: 5s
 
@@ -41,12 +44,19 @@ cache:
   enabled: false
 
 container:
-  # Bind the persistent build cache into EVERY job container:
+  # Options handed to EVERY job container. The default (see .env.example) binds the
+  # persistent build cache:
   #   /cache/cargo       -> CARGO_HOME (registry + git checkouts)
   #   /cache/target-cli  -> CLI workspace target dir  (~37 crates)
   #   /cache/target-gui  -> GUI workspace target dir  (~630 crates, the bulk)
-  # The workflow exports these; the Makefile takes CLI_TARGET/GUI_TARGET.
-  options: -v @CACHE_DIR@:/cache
+  #   /cache/prater/*    -> Prater's warm work tree + ccache, when this runner builds it
+  # The workflows export these; beisl's Makefile takes CLI_TARGET/GUI_TARGET.
+  #
+  # Parameterised because a runner that also builds SpritzWine-Prater must pass
+  # `--device /dev/ntsync` through to the job, or Prater's smoke gate cannot exercise
+  # its ntsync lane and skips it. Kept out of this template so beisl does not have to
+  # know about Prater's kernel needs -- set CONTAINER_OPTIONS in .env instead.
+  options: "@CONTAINER_OPTIONS@"
   valid_volumes:
     - "@CACHE_DIR@"
   network: bridge
