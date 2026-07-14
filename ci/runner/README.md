@@ -86,8 +86,35 @@ Two things the other repos need from the host, both set in `.env`:
 - **`JOB_TIMEOUT`** wants raising (12h): a *cold* Proton build is hours, not minutes.
 
 The two build images are **local tags** — `force_pull: false` means they are used as-is and
-never pulled — so they must exist on this host. Build each from its own repo; see the
-comments in `.env.example`, and Prater's `prater/ci/README.md` for its cache layout.
+never pulled — so they must exist on this host. Build each from its own repo (`./ci/rebuild.sh`
+in SpritzWine, `./prater/ci/rebuild.sh` in Prater).
+
+### Keeping them current (`image-sync.sh`)
+
+A local tag has no upstream, so nothing can pull it and nothing notices it went stale. The CI
+jobs *detect* it — they compare the stamp baked into the image against the stamp in the commit
+and fail in seconds — but detection alone makes "rebuild the image" a chore a human must
+remember, and until they do, **every lane is red**.
+
+`image-sync.sh` is the fixer. Run it on this host after pushing a change to either build image:
+
+```sh
+./image-sync.sh
+```
+
+It fetches both branches, compares each repo's stamp against the stamp baked into the local
+image, and rebuilds **only on drift** — docker caches every unchanged layer, so a no-op costs
+seconds. Safe to run while a job is building: the job's container already exists from the old
+image, and `docker image prune` only touches dangling (unreferenced) images.
+
+**No timer, on purpose.** Polling the forge every few minutes for something that changes about
+twice a year is a poor way to treat a donation-funded host, and it buys little — a stale image
+is already a *five-second* failure that prints the exact command to fix it. If you want a safety
+net regardless, wrap this script in a systemd timer with a **daily** interval.
+
+The stamp itself hashes the Dockerfile **with comments stripped** (`ci/stamp.sh` /
+`prater/ci/stamp.sh`), so editing documentation does not invalidate a 7.7 GB image on every
+host that carries it — which it did, twice, on this CI's first day.
 
 ## Cutting a release
 
