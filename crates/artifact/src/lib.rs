@@ -286,11 +286,20 @@ impl TraceArtifact {
         }
     }
 
-    /// Serialize to `path` as pretty JSON.
+    /// Serialize to `path` as pretty JSON. Staged as a sibling temp file and renamed into
+    /// place: a re-analyze overwrites a good artifact, and a truncating write that dies
+    /// midway would destroy it — rename swaps whole files or not at all.
     pub fn write_json(&self, path: &Path) -> io::Result<()> {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        std::fs::write(path, json)
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".tmp");
+        let tmp = std::path::PathBuf::from(tmp);
+        let staged = std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, path));
+        if staged.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        staged
     }
 
     /// Read a previously written `artifact.json`. Keeps deserialization inside this crate so
@@ -1043,7 +1052,36 @@ mod tests {
         assert_eq!(back.game, "RoundTrip");
         assert_eq!(back.attributed_pct, 88.0);
         assert_eq!(back.layers[0].symbol_pct, 50.0);
+        // Overwriting via the staged rename leaves no temp behind.
+        a.write_json(&p).unwrap();
+        let mut tmp = p.as_os_str().to_owned();
+        tmp.push(".tmp");
+        assert!(!Path::new(&tmp).exists(), "staging file left behind");
         std::fs::remove_file(&p).ok();
+    }
+
+    /// A write that fails after staging (rename onto a directory) must clean its temp and
+    /// leave the obstruction untouched — the point of the staged write is that a failed
+    /// overwrite can't destroy what's at the destination.
+    #[test]
+    fn a_failed_write_cleans_its_staging_file() {
+        let json = r#"{
+            "schema_version": 1, "game": "Tmp", "wine_flavor": "unknown",
+            "duration_s": 1.0, "frame_stats": null, "spikes": [], "hot_symbols": [],
+            "diagnostics": {"fidelity": "Exports", "total_samples": 0,
+                            "unresolved_pct": 0.0, "anonymous_modules": []}
+        }"#;
+        let a: TraceArtifact = serde_json::from_str(json).unwrap();
+        let dir = std::env::temp_dir().join(format!("beisl-art-dir-{}", std::process::id()));
+        let dst = dir.join("dst-is-a-dir");
+        std::fs::create_dir_all(&dst).unwrap();
+        assert!(a.write_json(&dst).is_err());
+        assert!(
+            !dir.join("dst-is-a-dir.tmp").exists(),
+            "staging file survived a failed rename"
+        );
+        assert!(dst.is_dir(), "obstruction was disturbed");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// An artifact written before the `layers` field must still deserialize (schema stayed
