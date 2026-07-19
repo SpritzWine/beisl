@@ -133,6 +133,32 @@ pub mod library {
                 _ => &self.id,
             }
         }
+
+        /// Whether the recorder or the game itself might still own this run's directory.
+        /// `delete_run` itself stays policy-free — it only ever checks containment (a
+        /// run-* dir directly under the root) — because the session window's own
+        /// single-run Discard legitimately removes a `Saved` run's dir while the game is
+        /// still up (that IS its "stop capturing this session" flow). It's the CALLER —
+        /// any bulk or list surface that presents "you can delete this" as a standing
+        /// option, like the traces library page — that must gate its own selection/delete
+        /// UI on this. `Starting..=Stopping` and `Saved` (its own doc comment: the game is
+        /// STILL RUNNING even though the recorder finished) all mean *something* live has
+        /// a hand in the dir; only `Done`/`Error` are settled. `session: None` means an old
+        /// dir with a missing/corrupt `session.json` — the wrapper writes that file at
+        /// launch, so an unreadable one is a damaged relic of a run that's long over, not a
+        /// live one, and must not be treated as undeletable.
+        pub fn is_live(&self) -> bool {
+            matches!(
+                self.session.as_ref().map(|s| s.state),
+                Some(
+                    super::State::Starting
+                        | super::State::Running
+                        | super::State::Recording
+                        | super::State::Stopping
+                        | super::State::Saved
+                )
+            )
+        }
     }
 
     /// `$XDG_DATA_HOME/beisl` (falls back to `~/.local/share/beisl`) — the same
@@ -313,6 +339,57 @@ mod tests {
         let root = std::env::temp_dir().join(format!("beisl-lib-gone-{}", std::process::id()));
         std::fs::remove_dir_all(&root).ok();
         assert!(library::scan(&root).is_empty());
+    }
+
+    #[test]
+    fn is_live_covers_recorder_and_game_owned_states() {
+        let live = [
+            State::Starting,
+            State::Running,
+            State::Recording,
+            State::Stopping,
+            State::Saved, // recorder is done, but the game is still running
+        ];
+        for state in live {
+            let entry = library::RunEntry {
+                dir: PathBuf::new(),
+                id: "run-1".into(),
+                started: 1,
+                session: Some(Session {
+                    state,
+                    ..Default::default()
+                }),
+                has_artifact: false,
+                has_report: false,
+            };
+            assert!(entry.is_live(), "{state:?} should be live");
+        }
+
+        for state in [State::Done, State::Error] {
+            let entry = library::RunEntry {
+                dir: PathBuf::new(),
+                id: "run-1".into(),
+                started: 1,
+                session: Some(Session {
+                    state,
+                    ..Default::default()
+                }),
+                has_artifact: false,
+                has_report: false,
+            };
+            assert!(!entry.is_live(), "{state:?} should not be live");
+        }
+
+        // A damaged/missing session.json is a relic, not a live run.
+        let entry = library::RunEntry {
+            dir: PathBuf::new(),
+            id: "run-1".into(),
+            started: 1,
+            session: None,
+            has_artifact: false,
+            has_report: false,
+        };
+        assert!(!entry.is_live());
     }
 
     #[test]

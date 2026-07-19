@@ -7,6 +7,8 @@
 //! The parent maps [`Msg`] into its own message type and handles only [`Msg::Back`]
 //! (navigation is the parent's business; everything else is ours).
 
+use std::collections::HashSet;
+
 use cosmic::iced::Length;
 use cosmic::{widget, Element};
 use session::library::{self, RunEntry};
@@ -25,10 +27,113 @@ pub enum Msg {
     Delete(usize),
     CancelDelete,
     ConfirmDelete,
+    /// Flip one row's checkbox (refused for a live run — see `RunEntry::is_live`).
+    ToggleSelect(usize),
+    /// Selection helpers: ADD every matching non-live row to the selection. They never
+    /// remove — re-clicking one after hand-deselecting a row should not fight the user.
+    SelectAll,
+    SelectUnanalyzed,
+    SelectAnalyzed,
+    ClearSelection,
+    /// Arm the bulk-delete confirm (the file-manager pattern's deliberate second click).
+    DeleteSelected,
+    CancelBulk,
+    ConfirmBulk,
+    /// A row's info column was clicked; toggles selection only while Ctrl is held (a
+    /// plain click stays inert — `Open` is its own button, not the row itself).
+    RowPressed(usize),
+    /// From the parent's modifier-tracking subscription: is Ctrl currently held.
+    Modifiers(bool),
 }
 
-/// The library's own state: the scanned rows plus the two bits of view state that
-/// belong to this page alone.
+/// Which rows a selection helper adds. Live rows never match any rule — the recorder
+/// or the game itself might still own the directory (the bug bulk delete must not
+/// reintroduce; see `RunEntry::is_live`).
+#[derive(Clone, Copy)]
+enum SelectRule {
+    All,
+    Unanalyzed,
+    Analyzed,
+}
+
+impl SelectRule {
+    fn matches(self, run: &RunEntry) -> bool {
+        if run.is_live() {
+            return false;
+        }
+        match self {
+            SelectRule::All => true,
+            SelectRule::Unanalyzed => !run.has_artifact,
+            SelectRule::Analyzed => run.has_artifact,
+        }
+    }
+}
+
+/// A selection helper button: add every non-live row matching `rule` to `selected` —
+/// pure and widget-free so it's directly testable (see the tests below).
+fn select_by_rule(runs: &[RunEntry], rule: SelectRule, selected: &mut HashSet<String>) {
+    selected.extend(
+        runs.iter()
+            .filter(|r| rule.matches(r))
+            .map(|r| r.id.clone()),
+    );
+}
+
+/// One row's checkbox/Ctrl-click: flip its membership in `selected`, refusing a live
+/// row outright (checked or not, it must never end up selected).
+fn toggle_select(runs: &[RunEntry], i: usize, selected: &mut HashSet<String>) {
+    let Some(run) = runs.get(i) else { return };
+    if run.is_live() {
+        return;
+    }
+    if !selected.remove(&run.id) {
+        selected.insert(run.id.clone());
+    }
+}
+
+/// Resolve selected ids to their run dirs against `entries`, skipping anything live —
+/// used by `ConfirmBulk` against a FRESH rescan (not the page's cached rows), so a run
+/// that went live between being selected and the confirm click is never deleted. This
+/// closes the startup race: the wrapper creates the run dir before it writes
+/// `session.json` (`crates/beisl/src/run.rs`), so a scan can briefly read a brand-new
+/// run as `session: None` -> not-live, long enough to select it in that window.
+fn resolve_deletable(entries: &[RunEntry], ids: &HashSet<String>) -> Vec<std::path::PathBuf> {
+    entries
+        .iter()
+        .filter(|r| ids.contains(&r.id) && !r.is_live())
+        .map(|r| r.dir.clone())
+        .collect()
+}
+
+/// The row caption's state word. Live states are named honestly — Starting/Running/
+/// Recording/Stopping, or Saved's own "still running" — so a live row never reads like
+/// a finished one (e.g. a Recording run must not say "not analyzed" while its checkbox
+/// is inert and its Delete button hidden, with nothing explaining why). Settled runs
+/// (`Done`/`Error`) fall back to the analysis-state word.
+fn state_word(run: &RunEntry) -> &'static str {
+    if run.is_live() {
+        return match run.session.as_ref().map(|s| s.state) {
+            Some(session::State::Starting) => "starting",
+            Some(session::State::Running) => "running",
+            Some(session::State::Recording) => "recording",
+            Some(session::State::Stopping) => "stopping",
+            // Saved's own doc comment: the recorder stopped, but the game is still
+            // running — say so, rather than reading like a finished run.
+            Some(session::State::Saved) => "in use — game still running",
+            // Unreachable: is_live() above already narrowed to exactly these states.
+            _ => "recording",
+        };
+    }
+    match &run.session {
+        _ if run.has_artifact => "analyzed",
+        Some(s) if s.elapsed_secs > 0 => "not analyzed",
+        Some(_) => "incomplete",
+        None => "no session data",
+    }
+}
+
+/// The library's own state: the scanned rows plus the view state that belongs to this
+/// page alone.
 #[derive(Default)]
 pub struct TracesTab {
     runs: Vec<RunEntry>,
@@ -37,6 +142,15 @@ pub struct TracesTab {
     error: Option<String>,
     /// Row index with an armed delete confirm, if any.
     confirm_delete: Option<usize>,
+    /// Run ids checked via the row checkboxes or Ctrl+click — ids (not indexes) so a
+    /// selection survives a rescan reordering the list.
+    selected: HashSet<String>,
+    /// The bulk "Delete selected (N)" confirm is armed (mutually exclusive with
+    /// `confirm_delete` — arming one cancels the other).
+    confirm_bulk: bool,
+    /// Live from the parent's modifier subscription: is Ctrl currently held. Drives
+    /// whether a row click (`Msg::RowPressed`) toggles its checkbox.
+    ctrl_held: bool,
 }
 
 impl TracesTab {
@@ -46,6 +160,18 @@ impl TracesTab {
         self.runs = library::scan(&library::default_root());
         self.error = None;
         self.confirm_delete = None;
+        self.confirm_bulk = false;
+        // Drop selected ids the scan no longer lists, AND any that are now live. The
+        // latter matters because of the startup race: the wrapper creates the run dir
+        // before it writes session.json (crates/beisl/src/run.rs), so a scan can
+        // briefly read a brand-new run as not-live and let it get selected; once
+        // session.json lands its checkbox renders unchecked (disabled) here, so a
+        // stale id must not keep inflating "Delete selected (N)" in the footer.
+        // ConfirmBulk/ConfirmDelete re-check liveness against their own fresh scan
+        // regardless — this just keeps what's displayed honest in the meantime.
+        let runs = &self.runs;
+        self.selected
+            .retain(|id| runs.iter().any(|r| &r.id == id && !r.is_live()));
     }
 
     pub fn update(&mut self, msg: Msg) {
@@ -79,18 +205,98 @@ impl TracesTab {
                         .spawn();
                 }
             }
-            Msg::Delete(i) => self.confirm_delete = Some(i),
-            Msg::CancelDelete => self.confirm_delete = None,
-            Msg::ConfirmDelete => {
-                if let Some(run) = self.confirm_delete.take().and_then(|i| self.runs.get(i)) {
-                    // delete_run is the safety boundary: it refuses anything that isn't
-                    // a run-* dir directly under the traces root.
-                    if let Err(e) = library::delete_run(&library::default_root(), &run.dir) {
-                        self.error = Some(format!("couldn't delete the trace: {e}"));
-                    }
-                    self.runs = library::scan(&library::default_root());
+            Msg::Delete(i) => {
+                // Defense in depth: the view no longer renders a Delete button on a
+                // live row, but refuse arming the confirm here too rather than trust
+                // that alone.
+                if !self.runs.get(i).is_some_and(RunEntry::is_live) {
+                    self.confirm_delete = Some(i);
+                    // Mutually exclusive with the bulk confirm — arming one cancels
+                    // the other.
+                    self.confirm_bulk = false;
                 }
             }
+            Msg::CancelDelete => self.confirm_delete = None,
+            Msg::ConfirmDelete => {
+                if let Some(id) = self
+                    .confirm_delete
+                    .take()
+                    .and_then(|i| self.runs.get(i))
+                    .map(|r| r.id.clone())
+                {
+                    let root = library::default_root();
+                    // Re-resolve against a FRESH scan, not the cached self.runs: the
+                    // same startup race ConfirmBulk closes (see `resolve_deletable`)
+                    // — the armed confirm can be stale by the time of this second
+                    // click. delete_run itself is policy-free (containment only —
+                    // see RunEntry::is_live's doc comment: a Saved run's *legitimate*
+                    // discard is the session window's own Discard button, not this
+                    // list), so the liveness gate has to live here.
+                    let fresh = library::scan(&root);
+                    if let Some(run) = fresh.iter().find(|r| r.id == id) {
+                        if run.is_live() {
+                            self.error =
+                                Some("that trace just went live — refusing to delete".into());
+                        } else if let Err(e) = library::delete_run(&root, &run.dir) {
+                            self.error = Some(format!("couldn't delete the trace: {e}"));
+                        }
+                    }
+                    self.runs = library::scan(&root);
+                }
+            }
+            Msg::ToggleSelect(i) => toggle_select(&self.runs, i, &mut self.selected),
+            Msg::SelectAll => select_by_rule(&self.runs, SelectRule::All, &mut self.selected),
+            Msg::SelectUnanalyzed => {
+                select_by_rule(&self.runs, SelectRule::Unanalyzed, &mut self.selected)
+            }
+            Msg::SelectAnalyzed => {
+                select_by_rule(&self.runs, SelectRule::Analyzed, &mut self.selected)
+            }
+            Msg::ClearSelection => {
+                self.selected.clear();
+                self.confirm_bulk = false;
+            }
+            Msg::DeleteSelected => {
+                if !self.selected.is_empty() {
+                    self.confirm_bulk = true;
+                    // Mutually exclusive with the per-row confirm — arming one cancels
+                    // the other.
+                    self.confirm_delete = None;
+                }
+            }
+            Msg::CancelBulk => self.confirm_bulk = false,
+            Msg::ConfirmBulk => {
+                self.confirm_bulk = false;
+                let root = library::default_root();
+                // Resolve against a FRESH scan, not the cached self.runs: the wrapper
+                // creates the run dir before it writes session.json
+                // (crates/beisl/src/run.rs ~line 18 vs ~123) — a >100ms window where a
+                // scan reads session:None -> not-live. Re-checking against stale
+                // self.runs would still delete a row that has since started
+                // recording; resolve_deletable's is_live skip has to see reality as
+                // of right now.
+                let fresh = library::scan(&root);
+                let dirs = resolve_deletable(&fresh, &self.selected);
+                for dir in &dirs {
+                    // delete_run is the one containment-checked boundary — every
+                    // deletion (single or bulk) routes through it, no new filesystem
+                    // path here. Keep going on error so one bad entry doesn't strand
+                    // the rest of the batch; remember only the first error.
+                    if let Err(e) = library::delete_run(&root, dir) {
+                        if self.error.is_none() {
+                            self.error = Some(format!("couldn't delete the trace: {e}"));
+                        }
+                    }
+                }
+                self.selected.clear();
+                self.runs = library::scan(&root);
+            }
+            Msg::RowPressed(i) => {
+                if self.ctrl_held {
+                    toggle_select(&self.runs, i, &mut self.selected);
+                }
+            }
+            Msg::Modifiers(ctrl) => self.ctrl_held = ctrl,
         }
     }
 
@@ -111,6 +317,20 @@ impl TracesTab {
                 "No traces yet. Run a game with `beisl %command%` in its launch options \
                  and it will show up here.",
             ));
+        } else {
+            // Selection helpers: "All" / "Unanalyzed" / "Analyzed" check matching rows
+            // and leave the rest for the user to refine by hand — never a replace.
+            let mut helpers = widget::Row::new()
+                .spacing(8)
+                .align_y(cosmic::iced::Alignment::Center)
+                .push(widget::text::caption("Select:"))
+                .push(widget::button::text("All").on_press(Msg::SelectAll))
+                .push(widget::button::text("Unanalyzed").on_press(Msg::SelectUnanalyzed))
+                .push(widget::button::text("Analyzed").on_press(Msg::SelectAnalyzed));
+            if !self.selected.is_empty() {
+                helpers = helpers.push(widget::button::text("Clear").on_press(Msg::ClearSelection));
+            }
+            content = content.push(helpers);
         }
         for (i, run) in self.runs.iter().enumerate() {
             let when = if run.started > 0 {
@@ -118,12 +338,7 @@ impl TracesTab {
             } else {
                 run.id.clone()
             };
-            let state = match &run.session {
-                _ if run.has_artifact => "analyzed",
-                Some(s) if s.elapsed_secs > 0 => "not analyzed",
-                Some(_) => "incomplete",
-                None => "no session data",
-            };
+            let state = state_word(run);
             let mut caption = format!("{when}   \u{b7}   {state}");
             if let Some(sess) = &run.session {
                 if sess.elapsed_secs > 0 {
@@ -133,17 +348,33 @@ impl TracesTab {
                     );
                 }
             }
+            let live = run.is_live();
+            // Interactive checkbox for a selectable row; a live run gets a display-only
+            // one (always unchecked, no on_toggle) — same "read-only = status" idiom as
+            // the checklist page's checkboxes.
+            let checkbox = if live {
+                widget::checkbox(false)
+            } else {
+                let checked = self.selected.contains(&run.id);
+                widget::checkbox(checked).on_toggle(move |_| Msg::ToggleSelect(i))
+            };
+            // The info column is wrapped in a mouse_area so Ctrl+click toggles selection
+            // without turning a plain click into a picker — that stays the row's own
+            // Open button.
+            let info = widget::mouse_area(
+                widget::Column::new()
+                    .spacing(2)
+                    .push(widget::text::body(run.title().to_string()))
+                    .push(widget::text::caption(caption))
+                    .width(Length::Fill),
+            )
+            .on_press(Msg::RowPressed(i));
             let mut row = widget::Row::new()
                 .spacing(12)
                 .align_y(cosmic::iced::Alignment::Center)
-                .push(
-                    widget::Column::new()
-                        .spacing(2)
-                        .push(widget::text::body(run.title().to_string()))
-                        .push(widget::text::caption(caption))
-                        .width(Length::Fill),
-                );
-            if self.confirm_delete == Some(i) {
+                .push(checkbox)
+                .push(info);
+            if !live && self.confirm_delete == Some(i) {
                 // The confirm pair replaces this row's actions, so the destructive
                 // click is a deliberate second one — same idiom as the session
                 // window's Discard.
@@ -151,10 +382,17 @@ impl TracesTab {
                     .push(widget::button::standard("Cancel").on_press(Msg::CancelDelete))
                     .push(widget::button::destructive("Delete trace").on_press(Msg::ConfirmDelete));
             } else {
-                row = row
-                    .push(widget::button::text("Folder").on_press(Msg::OpenFolder(i)))
-                    .push(widget::button::text("Delete").on_press(Msg::Delete(i)))
-                    .push(widget::button::standard("Open").on_press(Msg::Open(i)));
+                row = row.push(widget::button::text("Folder").on_press(Msg::OpenFolder(i)));
+                // No Delete button on a live row: a "protected" inert checkbox next to
+                // an active Delete button on the same recording row would be
+                // incoherent. A Saved run's legitimate discard path stays the session
+                // window's own Discard button (reached via Open) — that view is
+                // explicit about the game still running; this list isn't, so it just
+                // doesn't offer delete here.
+                if !live {
+                    row = row.push(widget::button::text("Delete").on_press(Msg::Delete(i)));
+                }
+                row = row.push(widget::button::standard("Open").on_press(Msg::Open(i)));
             }
             content = content.push(row);
         }
@@ -163,11 +401,25 @@ impl TracesTab {
             content = content.push(widget::text::body(format!("Something went wrong: {e}")));
         }
 
-        let footer = widget::Row::new()
+        let mut footer = widget::Row::new()
             .spacing(8)
             .push(widget::button::text("Back").on_press(Msg::Back))
-            .push(widget::Space::new().width(Length::Fill))
-            .push(widget::button::standard("Refresh").on_press(Msg::Refresh));
+            .push(widget::Space::new().width(Length::Fill));
+        if self.confirm_bulk {
+            // Same deliberate-second-click idiom as the per-row confirm, naming the count.
+            footer = footer
+                .push(widget::button::standard("Cancel").on_press(Msg::CancelBulk))
+                .push(
+                    widget::button::destructive(format!("Delete {} traces", self.selected.len()))
+                        .on_press(Msg::ConfirmBulk),
+                );
+        } else if !self.selected.is_empty() {
+            footer = footer.push(
+                widget::button::destructive(format!("Delete selected ({})", self.selected.len()))
+                    .on_press(Msg::DeleteSelected),
+            );
+        }
+        footer = footer.push(widget::button::standard("Refresh").on_press(Msg::Refresh));
 
         widget::Column::new()
             .spacing(14)
@@ -212,6 +464,8 @@ fn fmt_duration(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use session::Session;
+    use std::path::PathBuf;
 
     #[test]
     fn unix_ts_formats_civil_utc() {
@@ -227,5 +481,167 @@ mod tests {
         assert_eq!(fmt_duration(38), "38s");
         assert_eq!(fmt_duration(47 * 60 + 12), "47m");
         assert_eq!(fmt_duration(3_720), "1h02m");
+    }
+
+    // -- selection helpers ---------------------------------------------------------------
+
+    fn run(id: &str, state: session::State, has_artifact: bool) -> RunEntry {
+        RunEntry {
+            dir: PathBuf::from(id),
+            id: id.to_string(),
+            started: 1,
+            session: Some(Session {
+                state,
+                ..Default::default()
+            }),
+            has_artifact,
+            has_report: false,
+        }
+    }
+
+    /// A run with no session.json at all — an old, unanalyzed dir; never live.
+    fn run_no_session(id: &str) -> RunEntry {
+        RunEntry {
+            dir: PathBuf::from(id),
+            id: id.to_string(),
+            started: 1,
+            session: None,
+            has_artifact: false,
+            has_report: false,
+        }
+    }
+
+    #[test]
+    fn select_all_adds_every_non_live_row_and_skips_live_ones() {
+        let runs = [
+            run("run-1", session::State::Done, false),
+            run("run-2", session::State::Recording, false), // live: must be skipped
+            run_no_session("run-3"),
+        ];
+        let mut selected = HashSet::new();
+        select_by_rule(&runs, SelectRule::All, &mut selected);
+        assert_eq!(
+            selected,
+            HashSet::from(["run-1".to_string(), "run-3".to_string()])
+        );
+    }
+
+    #[test]
+    fn select_unanalyzed_vs_analyzed_split_and_dont_overlap() {
+        let runs = [
+            run("run-1", session::State::Done, false), // finished, not analyzed
+            run("run-2", session::State::Done, true),  // finished, analyzed
+            run("run-3", session::State::Saved, false), // live (game still running)
+        ];
+
+        let mut unanalyzed = HashSet::new();
+        select_by_rule(&runs, SelectRule::Unanalyzed, &mut unanalyzed);
+        assert_eq!(unanalyzed, HashSet::from(["run-1".to_string()]));
+
+        let mut analyzed = HashSet::new();
+        select_by_rule(&runs, SelectRule::Analyzed, &mut analyzed);
+        assert_eq!(analyzed, HashSet::from(["run-2".to_string()]));
+    }
+
+    #[test]
+    fn selection_helpers_only_add_never_remove() {
+        let runs = [run("run-1", session::State::Done, false)];
+        // Pre-seed with an id that will not match this run's rule.
+        let mut selected: HashSet<String> = HashSet::from(["run-9".to_string()]);
+        select_by_rule(&runs, SelectRule::Analyzed, &mut selected);
+        // run-1 doesn't match Analyzed, so it's not added, but run-9 must survive.
+        assert_eq!(selected, HashSet::from(["run-9".to_string()]));
+    }
+
+    #[test]
+    fn toggle_select_flips_membership_but_refuses_live_rows() {
+        let runs = [
+            run("run-1", session::State::Done, false),
+            run("run-2", session::State::Running, false), // live
+        ];
+        let mut selected = HashSet::new();
+
+        toggle_select(&runs, 0, &mut selected);
+        assert!(selected.contains("run-1"));
+        toggle_select(&runs, 0, &mut selected);
+        assert!(!selected.contains("run-1"));
+
+        // A live row never enters the selection, no matter how it's clicked.
+        toggle_select(&runs, 1, &mut selected);
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn resolve_deletable_skips_ids_that_are_live_in_the_fresh_scan() {
+        // The startup race this guards: `run-2` was selected while it still read
+        // not-live, but the fresh scan passed to resolve_deletable now shows it
+        // Recording — it must be excluded even though its id is still `selected`.
+        let fresh = [
+            run("run-1", session::State::Done, false),
+            run("run-2", session::State::Recording, false),
+            run("run-3", session::State::Done, true),
+        ];
+        let selected: HashSet<String> = ["run-1", "run-2", "run-3"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let dirs = resolve_deletable(&fresh, &selected);
+        let mut got: Vec<_> = dirs.iter().map(|p| p.to_str().unwrap()).collect();
+        got.sort_unstable();
+        assert_eq!(got, ["run-1", "run-3"]);
+    }
+
+    #[test]
+    fn resolve_deletable_ignores_ids_not_in_the_fresh_scan() {
+        // An id that vanished from the fresh scan entirely (deleted elsewhere between
+        // selection and confirm) must not produce a dir either.
+        let fresh = [run("run-1", session::State::Done, false)];
+        let selected: HashSet<String> =
+            ["run-1", "run-404"].into_iter().map(String::from).collect();
+        let dirs = resolve_deletable(&fresh, &selected);
+        assert_eq!(dirs, vec![PathBuf::from("run-1")]);
+    }
+
+    #[test]
+    fn state_word_names_live_states_honestly() {
+        assert_eq!(
+            state_word(&run("r", session::State::Starting, false)),
+            "starting"
+        );
+        assert_eq!(
+            state_word(&run("r", session::State::Running, false)),
+            "running"
+        );
+        assert_eq!(
+            state_word(&run("r", session::State::Recording, false)),
+            "recording"
+        );
+        assert_eq!(
+            state_word(&run("r", session::State::Stopping, false)),
+            "stopping"
+        );
+        // Saved: recorder done, game still running — must not read like "finished".
+        assert_eq!(
+            state_word(&run("r", session::State::Saved, false)),
+            "in use — game still running"
+        );
+    }
+
+    #[test]
+    fn state_word_falls_back_to_analysis_state_once_settled() {
+        assert_eq!(
+            state_word(&run("r", session::State::Done, true)),
+            "analyzed"
+        );
+        // Done, no artifact, elapsed_secs still 0 (the `run` fixture's default).
+        assert_eq!(
+            state_word(&run("r", session::State::Done, false)),
+            "incomplete"
+        );
+        assert_eq!(state_word(&run_no_session("r")), "no session data");
+
+        let mut not_analyzed = run("r", session::State::Done, false);
+        not_analyzed.session.as_mut().unwrap().elapsed_secs = 42;
+        assert_eq!(state_word(&not_analyzed), "not analyzed");
     }
 }

@@ -546,8 +546,19 @@ impl Application for AppModel {
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {
-        // Tick for the worker log and to rotate tips.
-        cosmic::iced::time::every(Duration::from_millis(120)).map(|_| Message::Tick)
+        // Tick for the worker log and to rotate tips, plus Ctrl-tracking for the trace
+        // library's Ctrl+click row selection (see `traces::Msg::RowPressed`) — the
+        // library page has no keyboard focus of its own, so the modifier state has to
+        // come from a window-level subscription instead.
+        Subscription::batch([
+            cosmic::iced::time::every(Duration::from_millis(120)).map(|_| Message::Tick),
+            cosmic::iced::event::listen_with(|event, _status, _window| match event {
+                cosmic::iced::Event::Keyboard(cosmic::iced::keyboard::Event::ModifiersChanged(
+                    modifiers,
+                )) => Some(Message::Traces(traces::Msg::Modifiers(modifiers.control()))),
+                _ => None,
+            }),
+        ])
     }
 
     fn view(&self) -> Element<'_, Self::Message> {
