@@ -179,15 +179,27 @@ fn do_uninstall() -> Result<String, String> {
     }
 }
 
-/// Copy `src` to `dst` (0755), unless they are already the same file.
+/// Copy `src` to `dst` (0755), unless they are already the same file. Staged as a
+/// sibling temp file and renamed into place: copying straight over a *running* binary
+/// fails with ETXTBSY — beisl-mcp typically is running (an AI session holds it open) —
+/// while rename atomically swaps the path and lets the old inode live on.
 fn install_file(src: &Path, dst: &Path) -> Result<(), String> {
     if same_file(src, dst) {
         return Ok(());
     }
-    fs::copy(src, dst).map_err(|e| format!("copy to {}: {e}", dst.display()))?;
-    fs::set_permissions(dst, fs::Permissions::from_mode(0o755))
-        .map_err(|e| format!("chmod {}: {e}", dst.display()))?;
-    Ok(())
+    let mut tmp = dst.as_os_str().to_owned();
+    tmp.push(".tmp-install");
+    let tmp = PathBuf::from(tmp);
+    let staged = (|| -> Result<(), String> {
+        fs::copy(src, &tmp).map_err(|e| format!("copy to {}: {e}", tmp.display()))?;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("chmod {}: {e}", tmp.display()))?;
+        fs::rename(&tmp, dst).map_err(|e| format!("rename to {}: {e}", dst.display()))
+    })();
+    if staged.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    staged
 }
 
 fn same_file(a: &Path, b: &Path) -> bool {
@@ -277,5 +289,44 @@ mod tests {
         // means a generic gear in the app menu.
         assert_eq!(format!("{ICON_NAME}.desktop"), DESKTOP_FILE);
         assert_eq!(format!("{SESSION_ICON_NAME}.desktop"), SESSION_DESKTOP_FILE);
+    }
+
+    #[test]
+    fn install_file_replaces_an_existing_destination_without_leftovers() {
+        let dir = std::env::temp_dir().join(format!("beisl-install-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src");
+        let dst = dir.join("dst");
+        fs::write(&src, b"new").unwrap();
+        fs::write(&dst, b"old").unwrap();
+        install_file(&src, &dst).unwrap();
+        assert_eq!(fs::read(&dst).unwrap(), b"new");
+        assert_eq!(
+            fs::metadata(&dst).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert!(
+            !dir.join("dst.tmp-install").exists(),
+            "staging file left behind"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn install_file_failure_cleans_its_staging_file() {
+        // dst is a directory: the copy to dst.tmp-install succeeds, the rename onto a
+        // directory fails — the staged temp must not survive that late failure.
+        let dir = std::env::temp_dir().join(format!("beisl-install-gone-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src");
+        fs::write(&src, b"new").unwrap();
+        let dst = dir.join("dst-is-a-dir");
+        fs::create_dir_all(&dst).unwrap();
+        assert!(install_file(&src, &dst).is_err());
+        assert!(
+            !dir.join("dst-is-a-dir.tmp-install").exists(),
+            "staging file survived a failed rename"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }
