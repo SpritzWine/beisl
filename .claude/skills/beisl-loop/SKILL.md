@@ -35,6 +35,12 @@ human-editable):
 - **Git hygiene.** Direct commits only on `loop/*` branches; `agent-dev`
   receives merges only; main receives only human-approved landings (step 9).
   No history rewriting outside an unmerged `loop/*` branch.
+- **Git identity.** Before the iteration's FIRST commit, verify
+  `git var GIT_COMMITTER_IDENT` resolves to the spritzwine profile
+  (`fschaupp <spritzwine.absently488@passinbox.com>` — what Florian's own
+  beisl commits carry). A session env leak once overrode it with the
+  personal identity (caught 2026-07-19; three beisl + eight vault commits
+  needed rewriting). Mismatch → fix the environment first, don't commit.
 - **The main checkout is Florian's.** Never `git checkout`, `reset`, or
   `merge` in it — he may be mid-work there (e.g. the MCP crate) and the loop
   must not switch branches under him (this bit us on 2026-07-11: a landing
