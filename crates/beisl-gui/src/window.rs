@@ -7,7 +7,9 @@
 //! 2. **The ask** — a *kept* clean run the wrapper left un-analyzed (`analysis_offer`,
 //!    no `artifact.json`): "Analyze" (resolve on a background thread) or "Discard".
 //! 3. **The results view** — an `artifact.json` exists (a crash auto-analyzed, or the
-//!    user hit Analyze): the layer split + frametime health + issues.
+//!    user hit Analyze): the layer split + frametime health + issues, plus a modest
+//!    "Re-analyze" to re-run the pipeline in place (a resolver fix landing is the only
+//!    other way an old artifact would ever improve, short of hand-deleting the file).
 //!
 //! The window does *no* analysis itself: surfaces 2→3 run and render `artifact::Trace-
 //! Artifact`, the same code path `beisl symbols` and the crash teardown use. It only
@@ -37,6 +39,12 @@ pub enum Msg {
     EnableDumpCapture,
     /// The ask: resolve the kept trace now (background thread), then show the results.
     Analyze,
+    /// Results view: re-run the same pipeline on an already-analyzed run's raw trace —
+    /// the only way to pick up a resolver improvement (e.g. a wine-flavor scoping fix)
+    /// without hand-deleting `artifact.json`. Shares `start_analyze`/`poll_analyze` with
+    /// `Analyze`; a failed retry leaves the artifact already on screen untouched (see
+    /// `poll_analyze`'s error arm — it never clears `self.artifact`).
+    Reanalyze,
     /// The ask: throw the trace away — a two-step, since it deletes the run dir.
     Discard,
     ConfirmDiscard,
@@ -250,6 +258,29 @@ impl Application for SessionApp {
                     self.analyzing = Some(self.start_analyze());
                 }
             }
+            Msg::Reanalyze => {
+                // Same "one worker at a time" rule as Analyze/InstallDebuginfo; the
+                // `artifact.is_some()` half keeps this button's effect scoped to the
+                // results view (Analyze already owns the no-artifact case above).
+                // `raw_present` matters too: artifact-present + perf.data-gone is a
+                // designed state (the trace was discarded per the user's own
+                // preference, or perf.data cleaned up some other way), and re-running
+                // would always fail. Worse, `mark_invalid` fingerprints a missing
+                // perf.data as (0, 0), which `invalid_of` matches forever — a sticky
+                // false "invalid" on an otherwise fine run that no future write can
+                // ever clear.
+                if self.analyzing.is_none()
+                    && self.installing.is_none()
+                    && self.artifact.is_some()
+                    && self.raw_present
+                {
+                    self.analyze_note = Some("Re-analyzing the trace…".to_string());
+                    // Drop a stale debuginfo-install caption — this run is now under a
+                    // fresh, unrelated re-analyze.
+                    self.install_note = None;
+                    self.analyzing = Some(self.start_analyze());
+                }
+            }
             Msg::InstallDebuginfo(target) => {
                 // Ignore the press while another install or an analyze is already running
                 // — same "one worker at a time" rule as Analyze/EnableDumpCapture.
@@ -443,6 +474,10 @@ impl SessionApp {
                         // rewritten later (see `mark_invalid`'s doc comment).
                         let _ = session::library::mark_invalid(&self.dir, &err);
                         self.analyze_note = Some(format!("Couldn't analyze: {err}"));
+                        // A post-install re-analyze may have just failed; its "…
+                        // re-analyzing…" caption would otherwise sit right above this
+                        // failure, claiming work still in progress that already lost.
+                        self.install_note = None;
                     }
                     None => {
                         self.artifact = load_artifact(&self.dir);
@@ -476,6 +511,9 @@ impl SessionApp {
                     None if self.raw_present => {
                         self.install_note =
                             Some("Installed — re-analyzing to name the new symbols…".to_string());
+                        // Drop a stale manual-Reanalyze failure caption — this run is now
+                        // under this fresh, unrelated re-analyze.
+                        self.analyze_note = None;
                         self.analyzing = Some(self.start_analyze());
                     }
                     None => {
@@ -490,7 +528,8 @@ impl SessionApp {
     /// Spawn the background re-resolve, passing the session's record mode and the
     /// debuginfod URL policy through explicitly — see `spawn_analyze`'s doc comment for
     /// why (the worker thread stays env-free; this is where env/config gets read).
-    /// Shared by `Msg::Analyze` (the ask surface) and `poll_install`'s post-install rerun.
+    /// Shared by `Msg::Analyze` (the ask surface), `Msg::Reanalyze` (the results view's
+    /// button), and `poll_install`'s post-install rerun.
     fn start_analyze(&mut self) -> Arc<Mutex<Analyze>> {
         spawn_analyze(
             self.dir.clone(),
@@ -969,6 +1008,17 @@ impl SessionApp {
             col = col.push(widget::text::caption(note.clone()));
         }
 
+        // The Re-analyze button's busy/result state — same body+caption pairing the ask
+        // surface uses for its own Analyze (see `ask_content`).
+        if self.analyzing.is_some() {
+            col = col.push(widget::text::body(
+                "Re-analyzing the trace… (this takes a few seconds)",
+            ));
+        }
+        if let Some(note) = &self.analyze_note {
+            col = col.push(widget::text::caption(note.clone()));
+        }
+
         if self.confirm_discard {
             col = col.push(widget::text::body(
                 "Delete this trace? This permanently deletes the run directory.",
@@ -994,10 +1044,24 @@ impl SessionApp {
                 .push(widget::Space::new().width(Length::Fill))
                 .into();
         }
-        widget::Row::new()
+        // Modest and secondary — a text button, same idiom as "Open folder" and the
+        // per-row "Install" buttons, grouped with the other non-destructive action
+        // rather than competing with Close for attention. Disabled (not hidden, so the
+        // row doesn't jump) while a worker already owns the trace, same rule as
+        // `InstallDebuginfo`. Hidden entirely without `raw_present` — no perf.data means
+        // no possible re-analyze, and a permanently-dead disabled button would be worse
+        // than absent (the ask surface makes the same no-raw call).
+        let mut row = widget::Row::new()
             .spacing(8)
-            .push(widget::button::text("Open folder").on_press(Msg::OpenFolder))
-            .push(widget::button::destructive("Delete").on_press(Msg::Discard))
+            .push(widget::button::text("Open folder").on_press(Msg::OpenFolder));
+        if self.raw_present {
+            let mut reanalyze = widget::button::text("Re-analyze");
+            if self.analyzing.is_none() && self.installing.is_none() {
+                reanalyze = reanalyze.on_press(Msg::Reanalyze);
+            }
+            row = row.push(reanalyze);
+        }
+        row.push(widget::button::destructive("Delete").on_press(Msg::Discard))
             .push(widget::Space::new().width(Length::Fill))
             .push(widget::button::suggested("Close").on_press(Msg::Close))
             .into()
