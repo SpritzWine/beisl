@@ -118,6 +118,13 @@ pub enum Fix {
     /// Install the root-owned `/usr/bin/beisl` forwarder shim so Steam's scrubbed launch
     /// PATH can resolve a bare `beisl %command%` (see [`CheckId::SteamVisibleBeisl`]).
     InstallSteamShim,
+    /// Install a driver's separate debug-symbol package for `role` (from
+    /// [`debuginfo::debuginfo_role_for_module`], e.g. `"mesa-vulkan"`) — the per-module
+    /// "Install debuginfo" button on an Issues-panel anonymous sample, as opposed to
+    /// [`CheckId::DriverDebuginfo`]'s advisory whole-system scan. Narrower than
+    /// [`Fix::InstallPackage`]: most distros need a repo-enablement consent step
+    /// [`fix_command`] refuses to automate on its own (see its `InstallDebuginfo` arm).
+    InstallDebuginfo { role: &'static str },
 }
 
 #[derive(Clone, Debug)]
@@ -788,6 +795,19 @@ pub fn package_for(role: &str, distro: Distro) -> Vec<&'static str> {
     }
 }
 
+/// Distro package name for a debuginfo `role` (from
+/// [`debuginfo::debuginfo_role_for_module`]), or `None` if we don't have — or won't
+/// automate — an install for this distro. Kept separate from [`package_for`]: that maps
+/// the *driver* package; this maps its separate debug-symbol companion, which only
+/// Fedora ships as a plain installable package (`dnf debuginfo-install`) — see
+/// [`fix_command`]'s `InstallDebuginfo` arm for why every other distro stays `None`.
+pub fn debuginfo_package_for(role: &str, distro: Distro) -> Option<&'static str> {
+    match (role, distro) {
+        ("mesa-vulkan", Distro::Fedora) => Some("mesa-vulkan-drivers"),
+        _ => None,
+    }
+}
+
 /// The exact privileged command the caller runs (via `pkexec`) to apply a fix.
 /// Empty means "we can't do it automatically here — tell the user".
 pub fn fix_command(fix: &Fix, distro: Distro, system: SystemKind) -> Vec<String> {
@@ -860,6 +880,29 @@ pub fn fix_command(fix: &Fix, distro: Distro, system: SystemKind) -> Vec<String>
             cmd.extend(pkgs.into_iter().map(String::from));
             cmd
         }
+        Fix::InstallDebuginfo { role } => match system {
+            // rpm-ostree can't layer from a disabled debuginfo repo, and Locked/Atomic
+            // boxes are already served by `debuginfo::fetch_urls`'s debuginfod injection
+            // — nothing this fix could add either way.
+            SystemKind::OstreeAtomic | SystemKind::Locked => vec![],
+            SystemKind::Mutable => match debuginfo_package_for(role, distro) {
+                // Fedora's `dnf debuginfo-install` transparently enables the matching
+                // *-debuginfo repos itself (they ship enabled=0), so it's a true
+                // one-liner with no repo configuration asked of the user. Every other distro
+                // stays empty: Debian/Ubuntu's dbgsym needs the ddebs/debian-debug repo
+                // enabled first (a consent question, not a one-liner); Arch ships no
+                // debug packages at all (debuginfod is the only mechanism); Suse's
+                // debug repo is disabled by default.
+                Some(pkg) => vec![
+                    "pkexec".into(),
+                    "dnf".into(),
+                    "debuginfo-install".into(),
+                    "-y".into(),
+                    pkg.into(),
+                ],
+                None => vec![],
+            },
+        },
     }
 }
 
@@ -1149,6 +1192,32 @@ mod tests {
         );
         // A locked system (SteamOS) has no install command at all — the caller redirects.
         assert!(fix_command(&perf(), Distro::Arch, SystemKind::Locked).is_empty());
+    }
+
+    #[test]
+    fn debuginfo_fix_installs_on_fedora_mutable_only() {
+        let fix = Fix::InstallDebuginfo {
+            role: "mesa-vulkan",
+        };
+        assert_eq!(
+            fix_command(&fix, Distro::Fedora, SystemKind::Mutable),
+            vec![
+                "pkexec",
+                "dnf",
+                "debuginfo-install",
+                "-y",
+                "mesa-vulkan-drivers"
+            ]
+        );
+        // Atomic/Locked: rpm-ostree can't layer from a disabled debuginfo repo, and
+        // debuginfod fetch already serves those boxes either way.
+        assert!(fix_command(&fix, Distro::Fedora, SystemKind::OstreeAtomic).is_empty());
+        assert!(fix_command(&fix, Distro::Fedora, SystemKind::Locked).is_empty());
+        // Other distros: no automatable debuginfo package (dbgsym needs ddebs consent,
+        // Arch has no debug packages, Suse's debug repo is off by default).
+        assert!(fix_command(&fix, Distro::Arch, SystemKind::Mutable).is_empty());
+        assert!(fix_command(&fix, Distro::Ubuntu, SystemKind::Mutable).is_empty());
+        assert!(fix_command(&fix, Distro::Unknown, SystemKind::Mutable).is_empty());
     }
 
     #[test]

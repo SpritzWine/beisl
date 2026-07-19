@@ -23,6 +23,7 @@ use cosmic::widget;
 use cosmic::{Application, Element};
 
 use artifact::{TraceArtifact, SCHEMA_VERSION};
+use preflight::debuginfo::{debuginfo_role_for_module, fetch_urls};
 use preflight::{detect_distro, detect_system_kind, fix_command, Config, DumpAccessPolicy, Fix};
 use session::{Session, State};
 
@@ -40,6 +41,10 @@ pub enum Msg {
     Discard,
     ConfirmDiscard,
     CancelDiscard,
+    /// Results view: install the debuginfo package behind one anonymous-module row
+    /// (`Some(module)`), or every installable row at once (`None`) — see
+    /// `preflight::debuginfo::debuginfo_role_for_module` for which modules qualify.
+    InstallDebuginfo(Option<String>),
     OpenFolder,
     Close,
 }
@@ -74,6 +79,11 @@ pub struct SessionApp {
     raw_present: bool,
     analyzing: Option<Arc<Mutex<Analyze>>>,
     analyze_note: Option<String>,
+    /// Tracks the background debuginfo-install `pkexec` run(s), one row's or "install
+    /// all"'s worth — same worker shape as `enabling` (a role's install is just another
+    /// sequential pkexec argv list, see the generalized `spawn_enable`).
+    installing: Option<Arc<Mutex<Enable>>>,
+    install_note: Option<String>,
     /// Discard is destructive (removes the run dir), so it takes a confirm click.
     confirm_discard: bool,
     /// The window/taskbar title — "Beisl" alone until we know the game, then "Beisl — <game>".
@@ -144,6 +154,8 @@ impl Application for SessionApp {
                 raw_present,
                 analyzing: None,
                 analyze_note: None,
+                installing: None,
+                install_note: None,
                 confirm_discard: false,
                 title,
                 title_pushed: false,
@@ -186,6 +198,7 @@ impl Application for SessionApp {
                 }
                 self.poll_enable();
                 self.poll_analyze();
+                self.poll_install();
             }
             Msg::EnableDumpCapture => {
                 if self.enabling.is_none() {
@@ -196,18 +209,56 @@ impl Application for SessionApp {
                     );
                     if !cmd.is_empty() {
                         self.enable_note = Some("Enabling capture…".to_string());
-                        self.enabling = Some(spawn_enable(cmd));
+                        self.enabling = Some(spawn_enable(vec![cmd]));
                     }
                 }
             }
             Msg::Analyze => {
                 if self.analyzing.is_none() && self.artifact.is_none() {
                     self.analyze_note = Some("Analyzing the trace…".to_string());
-                    self.analyzing = Some(spawn_analyze(
-                        self.dir.clone(),
-                        self.session.game.clone(),
-                        self.session.elapsed_secs as f64,
-                    ));
+                    self.analyzing = Some(self.start_analyze());
+                }
+            }
+            Msg::InstallDebuginfo(target) => {
+                // Ignore the press while another install or an analyze is already running
+                // — same "one worker at a time" rule as Analyze/EnableDumpCapture.
+                if self.installing.is_none() && self.analyzing.is_none() {
+                    if let Some(a) = &self.artifact {
+                        // One row, or (`None`) every installable row. Map to roles and
+                        // dedupe: "Install all" must not pkexec the same driver's package
+                        // twice just because two anonymous modules (e.g. a versioned and
+                        // unversioned soname) both mapped to it.
+                        let modules: Vec<&str> = match &target {
+                            Some(m) => vec![m.as_str()],
+                            None => a
+                                .diagnostics
+                                .anonymous_modules
+                                .iter()
+                                .map(|(m, _)| m.as_str())
+                                .collect(),
+                        };
+                        let mut roles: Vec<&'static str> = Vec::new();
+                        for m in modules {
+                            if let Some(role) = debuginfo_role_for_module(m) {
+                                if !roles.contains(&role) {
+                                    roles.push(role);
+                                }
+                            }
+                        }
+                        let distro = detect_distro();
+                        let system = detect_system_kind();
+                        let cmds: Vec<Vec<String>> = roles
+                            .into_iter()
+                            .map(|role| {
+                                fix_command(&Fix::InstallDebuginfo { role }, distro, system)
+                            })
+                            .filter(|c| !c.is_empty())
+                            .collect();
+                        if !cmds.is_empty() {
+                            self.install_note = Some("Installing debug symbols…".to_string());
+                            self.installing = Some(spawn_enable(cmds));
+                        }
+                    }
                 }
             }
             Msg::Discard => self.confirm_discard = true,
@@ -334,10 +385,55 @@ impl SessionApp {
                     None => {
                         self.artifact = load_artifact(&self.dir);
                         self.analyze_note = None;
+                        // A post-install re-analyze just delivered its result; a lingering
+                        // "re-analyzing…" note would contradict the refreshed view.
+                        self.install_note = None;
                     }
                 }
             }
         }
+    }
+
+    /// Poll the background debuginfo install (mirrors `poll_enable`). On success, either
+    /// trigger the same re-analyze `Msg::Analyze` runs (the raw trace is still on disk, so
+    /// the newly-installed debuginfo can actually rename the module now) or, if the trace
+    /// was already discarded, just say the *next* trace will benefit.
+    fn poll_install(&mut self) {
+        if let Some(w) = &self.installing {
+            let (finished, error) = {
+                let e = w.lock().unwrap();
+                (e.finished, e.error.clone())
+            };
+            if finished {
+                self.installing = None;
+                match error {
+                    Some(err) => self.install_note = Some(format!("Couldn't install: {err}")),
+                    None if self.raw_present => {
+                        self.install_note =
+                            Some("Installed — re-analyzing to name the new symbols…".to_string());
+                        self.analyzing = Some(self.start_analyze());
+                    }
+                    None => {
+                        self.install_note =
+                            Some("Installed — the next trace will name this module.".to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Spawn the background re-resolve, passing the session's record mode and the
+    /// debuginfod URL policy through explicitly — see `spawn_analyze`'s doc comment for
+    /// why (the worker thread stays env-free; this is where env/config gets read).
+    /// Shared by `Msg::Analyze` (the ask surface) and `poll_install`'s post-install rerun.
+    fn start_analyze(&mut self) -> Arc<Mutex<Analyze>> {
+        spawn_analyze(
+            self.dir.clone(),
+            self.session.game.clone(),
+            self.session.elapsed_secs as f64,
+            self.session.record_mode.clone(),
+            fetch_urls(&self.config),
+        )
     }
 
     // -- Surface 1: live -----------------------------------------------------------------
@@ -633,22 +729,61 @@ impl SessionApp {
         }
 
         // 4. Issues — anonymous hot modules tied to their fix. The same signal the preflight
-        //    debuginfo checks predict, now confirmed against the real trace.
+        //    debuginfo checks predict, now confirmed against the real trace. A module that
+        //    maps to an automatable Fix::InstallDebuginfo (see preflight::debuginfo) gets
+        //    its own "Install" button; everything else — a .dll, or a native module we
+        //    don't have an automated fix for — keeps the plain hint, exactly as before.
         if !a.diagnostics.anonymous_modules.is_empty() {
             col = col.push(widget::text::title4("Issues"));
             col = col.push(widget::text::caption(
                 "Hot modules we couldn't see inside — install the fix to name them:",
             ));
+            let busy = self.installing.is_some() || self.analyzing.is_some();
+            let distro = detect_distro();
+            let system = detect_system_kind();
+            let mut installable = 0usize;
             for (module, pct) in &a.diagnostics.anonymous_modules {
-                let hint = if module.to_ascii_lowercase().ends_with(".dll") {
+                let is_dll = module.to_ascii_lowercase().ends_with(".dll");
+                let hint = if is_dll {
                     "needs the Full tier (retained-DWARF wine build)"
                 } else {
                     "install its debuginfo package"
                 };
-                col = col.push(widget::text::monotext(format!(
-                    "{pct:>5.1}%  {module:<26}  {hint}"
-                )));
+                let row_text = widget::text::monotext(format!("{pct:>5.1}%  {module:<26}  {hint}"));
+                let cmd = if is_dll {
+                    Vec::new()
+                } else {
+                    debuginfo_role_for_module(module)
+                        .map(|role| fix_command(&Fix::InstallDebuginfo { role }, distro, system))
+                        .unwrap_or_default()
+                };
+                if cmd.is_empty() {
+                    col = col.push(row_text);
+                } else {
+                    installable += 1;
+                    let mut install = widget::button::text("Install");
+                    if !busy {
+                        install = install.on_press(Msg::InstallDebuginfo(Some(module.clone())));
+                    }
+                    col = col.push(
+                        widget::Row::new()
+                            .spacing(8)
+                            .align_y(cosmic::iced::Alignment::Center)
+                            .push(row_text)
+                            .push(install),
+                    );
+                }
             }
+            if installable >= 2 {
+                let mut all = widget::button::text("Install all debug symbols");
+                if !busy {
+                    all = all.on_press(Msg::InstallDebuginfo(None));
+                }
+                col = col.push(all);
+            }
+        }
+        if let Some(note) = &self.install_note {
+            col = col.push(widget::text::caption(note.clone()));
         }
 
         if self.confirm_discard {
@@ -693,14 +828,35 @@ fn load_artifact(dir: &Path) -> Option<TraceArtifact> {
     TraceArtifact::read_json(&dir.join(session::library::ARTIFACT_FILE)).ok()
 }
 
-/// Run `TraceArtifact::build` (resolve `perf.data` + fold in the CSV) on a background
-/// thread, writing `artifact.json` on success. The UI polls the returned handle each Tick.
-fn spawn_analyze(dir: PathBuf, game: String, duration_s: f64) -> Arc<Mutex<Analyze>> {
+/// Run `TraceArtifact::build_with_debuginfod` (resolve `perf.data` + fold in the CSV,
+/// honoring the session's record mode and the debuginfod URL policy) on a background
+/// thread, writing `artifact.json` on success. `record_mode` and `debuginfod_urls` are
+/// computed at the call site (`SessionApp::start_analyze`, which reads `self.session` and
+/// `self.config`) rather than here, so the worker thread itself stays env-free — the same
+/// split `beisl symbols` and the wrapper's post-run analysis use (see
+/// `crates/beisl/src/symbols.rs`, `crates/beisl/src/run.rs`). Previously this called the
+/// record-mode/URL-blind `build`, so a GUI re-analyze silently lost both — most visibly,
+/// re-analyzing after installing a driver's debuginfo package wouldn't pick it up because
+/// no `DEBUGINFOD_URLS` was ever passed to `perf`. The UI polls the returned handle each
+/// Tick.
+fn spawn_analyze(
+    dir: PathBuf,
+    game: String,
+    duration_s: f64,
+    record_mode: String,
+    debuginfod_urls: Option<String>,
+) -> Arc<Mutex<Analyze>> {
     let state = Arc::new(Mutex::new(Analyze::default()));
     let s2 = state.clone();
     std::thread::spawn(move || {
-        let result = TraceArtifact::build(&dir, &game, duration_s)
-            .and_then(|a| a.write_json(&dir.join(session::library::ARTIFACT_FILE)));
+        let result = TraceArtifact::build_with_debuginfod(
+            &dir,
+            &game,
+            duration_s,
+            &record_mode,
+            debuginfod_urls.as_deref(),
+        )
+        .and_then(|a| a.write_json(&dir.join(session::library::ARTIFACT_FILE)));
         let mut a = s2.lock().unwrap();
         if let Err(e) = result {
             a.error = Some(e.to_string());
@@ -710,23 +866,34 @@ fn spawn_analyze(dir: PathBuf, game: String, duration_s: f64) -> Arc<Mutex<Analy
     state
 }
 
-/// Run the (single) `pkexec …` install argv on a background thread so the polkit prompt
-/// doesn't block the event loop.
-fn spawn_enable(cmd: Vec<String>) -> Arc<Mutex<Enable>> {
+/// Run each `pkexec …` argv in `cmds` in turn on a background thread, so the polkit
+/// prompt(s) never block the event loop. One command for `EnableDumpCapture`; possibly
+/// several for `InstallDebuginfo`'s "install all", one per distinct role — stops at the
+/// first failure so a partial "install all" surfaces which command actually broke rather
+/// than silently swallowing it.
+fn spawn_enable(cmds: Vec<Vec<String>>) -> Arc<Mutex<Enable>> {
     let state = Arc::new(Mutex::new(Enable::default()));
     let s2 = state.clone();
     std::thread::spawn(move || {
-        let result = std::process::Command::new(&cmd[0]).args(&cmd[1..]).output();
-        let mut e = s2.lock().unwrap();
-        match result {
-            Ok(out) if out.status.success() => {}
-            Ok(out) => {
-                let msg = String::from_utf8_lossy(&out.stderr);
-                e.error = Some(msg.lines().last().unwrap_or("failed").to_string());
+        for cmd in &cmds {
+            let result = std::process::Command::new(&cmd[0]).args(&cmd[1..]).output();
+            let mut e = s2.lock().unwrap();
+            match result {
+                Ok(out) if out.status.success() => {}
+                Ok(out) => {
+                    let msg = String::from_utf8_lossy(&out.stderr);
+                    e.error = Some(msg.lines().last().unwrap_or("failed").to_string());
+                    e.finished = true;
+                    return;
+                }
+                Err(err) => {
+                    e.error = Some(err.to_string());
+                    e.finished = true;
+                    return;
+                }
             }
-            Err(err) => e.error = Some(err.to_string()),
         }
-        e.finished = true;
+        s2.lock().unwrap().finished = true;
     });
     state
 }

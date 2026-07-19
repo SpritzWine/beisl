@@ -19,7 +19,7 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::gpu;
-use crate::Distro;
+use crate::{Config, Distro};
 
 /// NT_GNU_BUILD_ID note type (see `elf(5)` / `binutils/include/elf/common.h`).
 const NT_GNU_BUILD_ID: u32 = 3;
@@ -209,6 +209,63 @@ pub fn distro_debuginfod_url(distro: Distro) -> Option<String> {
         Some(url) => format!("{url} {DEBUGINFOD_ELFUTILS_FEDERATED}"),
         None => DEBUGINFOD_ELFUTILS_FEDERATED.to_string(),
     })
+}
+
+/// Maps a module (a perf sample's DSO — full path or bare basename) to the debuginfo
+/// [`crate::Fix::InstallDebuginfo`] role that would symbolize it, or `None` when we don't
+/// know one. Deliberately narrow: Mesa Vulkan ICDs (`libvulkan_intel.so`,
+/// `libvulkan_radeon.so.1`, …) are the case-study hotspots — driver time is often the
+/// hottest non-game code in a trace (see [`unsymbolized_families`]) — but every other
+/// anonymous module (a `.dll`, `libc.so.6`, an ICD we don't recognize) stays unmapped
+/// rather than guess: installing the wrong distro package on a user's system because of a
+/// loose name match is worse than just leaving the "Install debuginfo" button off.
+pub fn debuginfo_role_for_module(module: &str) -> Option<&'static str> {
+    let basename = Path::new(module)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(module);
+    let lower = basename.to_ascii_lowercase();
+    if lower.starts_with("libvulkan_") && lower.contains(".so") {
+        Some("mesa-vulkan")
+    } else {
+        None
+    }
+}
+
+/// The `DEBUGINFOD_URLS` to hand a perf-side resolve, honoring the user's preference.
+/// (Moved here from `beisl/src/symbols.rs` — the URL policy belongs with the rest of
+/// preflight's debuginfo knowledge, not the `beisl symbols` subcommand.)
+///
+/// `perf` fetches missing ELF driver debug symbols on demand only when this var is set for
+/// its process. A trace resolved inside Steam's game-launch session doesn't inherit the
+/// interactive shell's value (see the artifact `build_with_debuginfod` note), so we set it
+/// explicitly — otherwise the driver layer silently resolves to anonymous addresses in
+/// exactly the auto-analyzed crash traces the tool exists for.
+///
+/// * fetch **off** (poweruser Advanced toggle): return `Some("")` — force-disable even if
+///   the launching shell exported a server, so an offline/hermetic resolve stays offline.
+/// * fetch **on**, env already set: return `None` — inherit the user's own value verbatim.
+/// * fetch **on**, env unset (the common Steam/Arch/SteamOS case): inject the distro
+///   default (which appends the federated elfutils aggregator), so resolution is
+///   reproducible regardless of what launched it.
+pub fn fetch_urls(cfg: &Config) -> Option<String> {
+    let env_urls = std::env::var("DEBUGINFOD_URLS").ok();
+    fetch_urls_from(
+        cfg.debuginfod_fetch,
+        env_urls.as_deref(),
+        crate::detect_distro(),
+    )
+}
+
+/// Testable core of [`fetch_urls`] — see its doc comment for the three-way policy.
+pub fn fetch_urls_from(fetch: bool, env_urls: Option<&str>, distro: Distro) -> Option<String> {
+    if !fetch {
+        return Some(String::new());
+    }
+    if env_urls.is_some_and(|v| !v.is_empty()) {
+        return None;
+    }
+    distro_debuginfod_url(distro)
 }
 
 /// Does the installed `perf` actually support debuginfod? Setting `DEBUGINFOD_URLS` is
@@ -542,6 +599,47 @@ mod tests {
         .unwrap();
         let missing = unsymbolized_families_from(&manifests, &debug_root);
         assert!(missing.is_empty(), "{missing:?}");
+    }
+
+    #[test]
+    fn debuginfo_role_for_module_matches_mesa_vulkan_icds_only() {
+        // Mesa Vulkan ICDs: the case-study hotspots, matched case-insensitively and
+        // regardless of any leading path or trailing soname version.
+        assert_eq!(
+            debuginfo_role_for_module("libvulkan_intel.so"),
+            Some("mesa-vulkan")
+        );
+        assert_eq!(
+            debuginfo_role_for_module("/usr/lib64/libvulkan_radeon.so"),
+            Some("mesa-vulkan")
+        );
+        assert_eq!(
+            debuginfo_role_for_module("LIBVULKAN_RADEON.SO"),
+            Some("mesa-vulkan")
+        );
+        // Everything else stays unmapped: a wrong package install is worse than a hint.
+        assert_eq!(debuginfo_role_for_module("foo.dll"), None);
+        assert_eq!(debuginfo_role_for_module("libc.so.6"), None);
+        assert_eq!(debuginfo_role_for_module("libgallium-24.so"), None);
+    }
+
+    #[test]
+    fn fetch_urls_from_matches_the_three_way_policy() {
+        // Fetch off: force-disable regardless of env or distro.
+        assert_eq!(
+            fetch_urls_from(false, Some("https://example.invalid/"), Distro::Fedora),
+            Some(String::new())
+        );
+        // Fetch on, env already set: inherit the user's own value (None = don't override).
+        assert_eq!(
+            fetch_urls_from(true, Some("https://example.invalid/"), Distro::Fedora),
+            None
+        );
+        // Fetch on, no env: inject the distro default.
+        assert_eq!(
+            fetch_urls_from(true, None, Distro::Fedora),
+            distro_debuginfod_url(Distro::Fedora)
+        );
     }
 
     #[test]
