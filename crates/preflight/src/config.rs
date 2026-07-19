@@ -62,6 +62,23 @@ pub enum CleanRunAnalysis {
     Discard,
 }
 
+/// The wrapper's last observation, from an actual Steam-launched trace, of whether Steam's
+/// launch environment still scrubs the user's PATH — the steam-for-linux #13389 bug
+/// [`crate::CheckId::SteamVisibleBeisl`] exists for. `Unknown` until the first Steam-launched
+/// trace records a real reading; a manual terminal run never writes this (see
+/// `beisl::run::observe_steam_path`), so it can never produce a false "fixed".
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SteamPathObservation {
+    /// No Steam-launched trace has observed the launch PATH yet.
+    #[default]
+    Unknown,
+    /// The launch PATH lacked `~/.local/bin` — a bare `beisl %command%` would fail.
+    Scrubbed,
+    /// The launch PATH included `~/.local/bin` — Steam passes the user's PATH through.
+    Fixed,
+}
+
 /// A pinned GPU: the exact ICD manifests (+ optional device selector) that make Vulkan
 /// enumeration land on one specific card instead of whichever the loader happens to pick
 /// first — the "enumeration roulette" trap from DESIGN.md's Saints Row case study. `None`
@@ -102,6 +119,12 @@ pub struct Config {
     /// and for `Config::default()` — the opposite of what we want here.
     #[serde(default = "default_debuginfod_fetch")]
     pub debuginfod_fetch: bool,
+    /// The last-observed truth of Steam's launch-PATH scrubbing (see
+    /// [`SteamPathObservation`]) — lets preflight retire the launcher-shim row to
+    /// "advanced" once a real trace confirms the client stopped scrubbing, and
+    /// re-promote it automatically if a later trace observes a regression.
+    #[serde(default)]
+    pub steam_path_observation: SteamPathObservation,
 }
 
 /// Backs `debuginfod_fetch`'s default in both the serde attribute (so a config file
@@ -118,6 +141,7 @@ impl Default for Config {
             gpu_pin: None,
             clean_run_analysis: CleanRunAnalysis::default(),
             debuginfod_fetch: default_debuginfod_fetch(),
+            steam_path_observation: SteamPathObservation::default(),
         }
     }
 }
@@ -194,21 +218,36 @@ mod tests {
         assert!(Config::load().debuginfod_fetch);
         assert!(Config::default().debuginfod_fetch);
 
+        // Steam-path observation defaults to unknown — no Steam-launched trace yet.
+        assert_eq!(
+            Config::load().steam_path_observation,
+            SteamPathObservation::Unknown
+        );
+
         let cfg = Config {
             dump_access_policy: DumpAccessPolicy::RuleInstalled,
             clean_run_analysis: CleanRunAnalysis::Discard,
             debuginfod_fetch: false,
+            steam_path_observation: SteamPathObservation::Fixed,
             ..Default::default()
         };
         cfg.save().unwrap();
         assert_eq!(Config::load(), cfg);
         assert!(!Config::load().debuginfod_fetch);
+        assert_eq!(
+            Config::load().steam_path_observation,
+            SteamPathObservation::Fixed
+        );
 
         // The on-disk form is the kebab-case string, not a bare enum.
         let text = std::fs::read_to_string(Config::path()).unwrap();
         assert!(text.contains("rule-installed"), "got: {text}");
         assert!(text.contains("discard"), "kebab clean-run value: {text}");
         assert!(text.contains("debuginfod_fetch = false"), "got: {text}");
+        assert!(
+            text.contains("steam_path_observation = \"fixed\""),
+            "got: {text}"
+        );
 
         std::fs::remove_dir_all(&tmp).ok();
         unsafe {

@@ -213,6 +213,10 @@ impl Server {
                     "label": c.label,
                     "status": status,
                     "blocking": c.blocking,
+                    // Informational-only rows the setup GUI shows in its Advanced section
+                    // rather than the main checklist (currently only a confirmed-fixed
+                    // Steam launcher shim) — surfaced so an advisor doesn't overstate it.
+                    "advanced": c.advanced,
                     "why": c.why,
                     "fix_command": fix,
                 })

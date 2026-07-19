@@ -19,6 +19,12 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
     let mut log = Log::open(&run_dir);
     log.line(&format!("launch argv = {cmd:?}"));
 
+    // We run *inside* Steam's own launch environment here, so — unlike preflight's
+    // `.steamrt64`-directory guess — we can see the actual truth of whether it scrubbed
+    // our PATH. Persist that reading so preflight can retire the launcher-shim row once
+    // Valve's bug is confirmed fixed, or re-promote it if a later Steam update regresses.
+    observe_steam_path(&mut log);
+
     // Steam runs launch options through a shell, and some %command% expansions carry
     // leading `VAR=value` env assignments; peel those off so we run the real program, not
     // a literal "VAR=value". A no-op when there are none (e.g. the usual reaper command).
@@ -389,6 +395,112 @@ fn gpu_pin_envs(pin: &preflight::GpuPin) -> Vec<(String, String)> {
         envs.push(("MESA_VK_DEVICE_SELECT".to_string(), sel.clone()));
     }
     envs
+}
+
+/// Env vars the Proton *compat-tool contract* sets on every launch — but Heroic, Lutris,
+/// and Bottles all route non-Steam games through the very same contract, so their presence
+/// alone only proves "some compat tool launched us", not "Steam specifically". Enough to
+/// trust a `Scrubbed` reading (see [`decide_observation`]'s doc for why that side stays
+/// permissive), NOT enough on its own to trust `Fixed`.
+const STEAM_COMPAT_MARKERS: &[&str] = &[
+    "SteamAppId",
+    "SteamGameId",
+    "STEAM_COMPAT_APP_ID",
+    "STEAM_COMPAT_CLIENT_INSTALL_PATH",
+];
+
+/// Env vars only the real Steam *client* sets, outside the compat-tool contract above —
+/// third-party launchers don't set these. Required before trusting a `Fixed` reading (see
+/// [`decide_observation`]). Not empirically verified against a real Steam launch in this
+/// dev environment (headless, no Steam client installed) — confirm `SteamEnv=1` /
+/// `SteamClientLaunch=1` actually survive into `%command%` before relying on this gate.
+const STEAM_CLIENT_ONLY_MARKERS: &[&str] = &["SteamEnv", "SteamClientLaunch"];
+
+fn launched_by_compat_tool() -> bool {
+    STEAM_COMPAT_MARKERS
+        .iter()
+        .any(|k| std::env::var_os(k).is_some())
+}
+
+fn launched_by_steam_client() -> bool {
+    STEAM_CLIENT_ONLY_MARKERS
+        .iter()
+        .any(|k| std::env::var_os(k).is_some())
+}
+
+/// Does this process's own PATH include the user's `~/.local/bin`? That's the entry a bare
+/// `beisl %command%` launch option needs Steam to have passed through untouched (see
+/// `preflight::steam_client_scrubs_path`'s doc for the containerized client's scrub).
+fn path_has_user_local_bin() -> bool {
+    let target = PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/bin");
+    path_contains_dir(std::env::var_os("PATH").as_deref(), &target)
+}
+
+/// Testable core of [`path_has_user_local_bin`]: does `path_var` (colon-joined, as `PATH`
+/// always is) contain exactly `target`? Split out so the decision can be tested without
+/// mutating the process's real `PATH`/`HOME`.
+fn path_contains_dir(path_var: Option<&std::ffi::OsStr>, target: &Path) -> bool {
+    path_var
+        .map(|p| std::env::split_paths(p).any(|dir| dir == target))
+        .unwrap_or(false)
+}
+
+/// Pure decision, asymmetrically gated: the two outcomes have very different failure
+/// costs. A false `Scrubbed` is harmless and self-healing (it just triggers today's
+/// ordinary NeedsFix heuristic, corrected the moment a real Steam trace runs) — so
+/// `path_fixed = false` always resolves regardless of `client_marker`. A false `Fixed` is
+/// sticky and self-sealing: persisted with no shim installed, it retires the row with an
+/// authoritative "works without a shim" — but if that reading actually came from a
+/// Heroic/Lutris/Bottles launch (same compat-tool contract, user's own already-full PATH),
+/// the NEXT real Steam launch still can't resolve `beisl %command%`, and now never even
+/// runs to record the correction. So `path_fixed = true` only resolves to `Fixed` when
+/// `client_marker` also holds; otherwise `None` — don't record anything, leave the stored
+/// observation untouched.
+fn decide_observation(
+    path_fixed: bool,
+    client_marker: bool,
+) -> Option<preflight::SteamPathObservation> {
+    if path_fixed {
+        client_marker.then_some(preflight::SteamPathObservation::Fixed)
+    } else {
+        Some(preflight::SteamPathObservation::Scrubbed)
+    }
+}
+
+/// Record what THIS Steam-launched trace saw of the launch PATH into the preflight config
+/// (see `preflight::SteamPathObservation`), so `beisl-setup` can retire the launcher-shim
+/// row once Valve's bug looks fixed here, or re-promote it on a later regression. A no-op
+/// off a manual terminal run, and also a no-op when a PATH-looks-fixed reading can't be
+/// trusted yet (see [`decide_observation`]). A failed config write must never abort the
+/// trace — logged, not propagated.
+fn observe_steam_path(log: &mut Log) {
+    if !launched_by_compat_tool() {
+        return;
+    }
+    let Some(observed) = decide_observation(path_has_user_local_bin(), launched_by_steam_client())
+    else {
+        log.line(
+            "steam path observation: PATH looks fixed but no Steam-client-only marker \
+             present (could be a non-Steam launcher on the same compat-tool contract) — \
+             not recording, to avoid a sticky false \"fixed\"",
+        );
+        return;
+    };
+    let mut cfg = preflight::Config::load();
+    if cfg.steam_path_observation != observed {
+        log.line(&format!(
+            "steam path observation: {:?} -> {observed:?}",
+            cfg.steam_path_observation
+        ));
+        cfg.steam_path_observation = observed;
+        // beisl-setup also loads+saves this same file (e.g. a GPU pin pick); if it read an
+        // older snapshot before this trace ran and saves after, its write clobbers this
+        // fresh observation with the stale one. Benign — no locking here — because the
+        // worst case is one lost observation, corrected by the next Steam-launched trace.
+        if let Err(e) = cfg.save() {
+            log.line(&format!("steam path observation: config save failed ({e})"));
+        }
+    }
 }
 
 /// Parse `BEISL_FORCE_RECORD_MODE`'s value (case-insensitive `full`/`degraded`/`none`) —
@@ -824,6 +936,62 @@ mod tests {
         };
         let label = cfg.gpu_pin.as_ref().map(|p| p.name.clone());
         assert_eq!(label.as_deref(), Some(pin.name.as_str()));
+    }
+
+    #[test]
+    fn path_contains_dir_matches_the_exact_entry_only() {
+        use std::ffi::OsStr;
+        let target = Path::new("/home/tester/.local/bin");
+        assert!(path_contains_dir(
+            Some(OsStr::new("/usr/bin:/home/tester/.local/bin:/bin")),
+            target
+        ));
+        // Steam's scrub: only the container's minimal PATH survives.
+        assert!(!path_contains_dir(
+            Some(OsStr::new("/usr/bin:/bin")),
+            target
+        ));
+        // A same-named directory for a DIFFERENT user must not count as a match.
+        assert!(!path_contains_dir(
+            Some(OsStr::new("/usr/bin:/home/someone-else/.local/bin")),
+            target
+        ));
+        assert!(!path_contains_dir(None, target));
+    }
+
+    #[test]
+    fn steam_compat_markers_cover_native_and_proton_launches() {
+        // Sanity on the marker set itself — the actual env reads (`launched_by_compat_tool`,
+        // `launched_by_steam_client`) aren't unit-tested (it'd mean mutating the process's
+        // real env, racy under parallel tests); this locks down that both launch shapes
+        // have a marker in the compat-tool list.
+        assert!(STEAM_COMPAT_MARKERS.contains(&"SteamAppId"));
+        assert!(STEAM_COMPAT_MARKERS.contains(&"STEAM_COMPAT_APP_ID"));
+    }
+
+    #[test]
+    fn client_only_markers_are_disjoint_from_the_compat_tool_contract() {
+        // The whole point of the second marker set: it must name vars a third-party
+        // launcher on the same compat-tool contract would NOT also set.
+        for m in STEAM_CLIENT_ONLY_MARKERS {
+            assert!(
+                !STEAM_COMPAT_MARKERS.contains(m),
+                "{m} must not double as a compat-tool marker"
+            );
+        }
+    }
+
+    #[test]
+    fn decide_observation_gates_fixed_on_the_client_only_marker() {
+        use preflight::SteamPathObservation::{Fixed, Scrubbed};
+        // Scrubbed stays permissive either way — a false Scrubbed is harmless and
+        // self-healing, so it doesn't need the stronger client-only marker.
+        assert_eq!(decide_observation(false, false), Some(Scrubbed));
+        assert_eq!(decide_observation(false, true), Some(Scrubbed));
+        // Fixed needs the client-only marker: compat markers alone (a Heroic/Lutris/
+        // Bottles launch) must NOT be enough to record the sticky, self-sealing "fixed".
+        assert_eq!(decide_observation(true, false), None);
+        assert_eq!(decide_observation(true, true), Some(Fixed));
     }
 
     #[test]

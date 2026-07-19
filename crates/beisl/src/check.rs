@@ -70,8 +70,11 @@ pub fn run() -> ExitCode {
     // Advisory: the MangoHud #2053 hotkey crash — warned about, never "fixed" by us.
     checks.push(mangohud_hotkey_check());
     // Steam's containerized client scrubs the launch-option PATH — without the /usr/bin
-    // launcher, `beisl %command%` (the tool's whole entry point) silently fails. Most
-    // actionable row on the list, so it renders first, mirroring the setup page.
+    // launcher, `beisl %command%` (the tool's whole entry point) silently fails. Renders
+    // first, mirroring the setup page's main-checklist placement: most actionable row
+    // while unfixed. Once a Steam-launched trace confirms it's fixed the check itself
+    // turns purely informational (see `Check::advanced`), but this flat CLI list has no
+    // separate "advanced" section to move it to, so it stays first either way.
     checks.insert(0, steam_visible_beisl_check());
 
     // A genuine RecordMode::None (perf missing, or paranoid too high for even a degraded

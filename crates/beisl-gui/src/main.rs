@@ -645,6 +645,11 @@ impl AppModel {
             if c.id == CheckId::PerfParanoid {
                 continue;
             }
+            // Retired to Advanced (see `advanced_section`) — a confirmed-fixed Steam path
+            // observation demoted it from "most actionable row" to purely informational.
+            if c.advanced {
+                continue;
+            }
             let is_ok = c.status == Status::Ok;
             // Read-only checkbox (no on_toggle) = the status indicator.
             let mut row = widget::Row::new()
@@ -813,6 +818,20 @@ impl AppModel {
         let mut col = widget::Column::new().spacing(8).push(header);
         if !self.show_advanced {
             return col.into();
+        }
+
+        // Checks retired from the main checklist (currently only `SteamVisibleBeisl`,
+        // once a Steam-launched trace confirms the client stopped scrubbing PATH) — same
+        // read-only checkbox + caption idiom as the main list, just informational: nothing
+        // here is a decision to make.
+        for c in self.checks.iter().filter(|c| c.advanced) {
+            col = col
+                .push(
+                    widget::Row::new()
+                        .spacing(12)
+                        .push(widget::checkbox(c.status == Status::Ok).label(c.label)),
+                )
+                .push(widget::text::caption(c.why.clone().into_owned()));
         }
 
         let policy = self.config.dump_access_policy;

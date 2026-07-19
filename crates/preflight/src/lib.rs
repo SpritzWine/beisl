@@ -22,7 +22,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub mod config;
 pub mod debuginfo;
 pub mod gpu;
-pub use config::{CleanRunAnalysis, Config, DumpAccessPolicy, GpuPin};
+pub use config::{CleanRunAnalysis, Config, DumpAccessPolicy, GpuPin, SteamPathObservation};
 
 /// The lifecycle of a single check, as the setup page renders it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -139,6 +139,11 @@ pub struct Check {
     pub blocking: bool,
     pub status: Status,
     pub fix: Option<Fix>,
+    /// True when this row is purely informational and belongs in the GUI's Advanced
+    /// section instead of the main checklist — set only by [`steam_visible_beisl_check`]
+    /// once a real Steam-launched trace confirms the shim's job is done (harmless either
+    /// way, but no longer worth top billing). Every other check leaves this `false`.
+    pub advanced: bool,
 }
 
 /// Absent CAP_PERFMON, system-wide `-a` sampling of CPU **and** kernel needs
@@ -190,6 +195,7 @@ pub fn all_checks() -> Vec<Check> {
             blocking: true,
             status: Status::Pending,
             fix: Some(Fix::InstallPackage { role: "perf" }),
+            advanced: false,
         },
         Check {
             id: CheckId::LlvmSymbolizer,
@@ -198,6 +204,7 @@ pub fn all_checks() -> Vec<Check> {
             blocking: true,
             status: Status::Pending,
             fix: Some(Fix::InstallPackage { role: "llvm" }),
+            advanced: false,
         },
         Check {
             id: CheckId::PerfParanoid,
@@ -215,6 +222,7 @@ pub fn all_checks() -> Vec<Check> {
             blocking: false,
             status: Status::Pending,
             fix: Some(perf_record_fix()),
+            advanced: false,
         },
         Check {
             id: CheckId::KernelSymbols,
@@ -229,6 +237,7 @@ pub fn all_checks() -> Vec<Check> {
             blocking: false,
             status: Status::Pending,
             fix: None,
+            advanced: false,
         },
         Check {
             id: CheckId::MangoHud,
@@ -237,6 +246,7 @@ pub fn all_checks() -> Vec<Check> {
             blocking: false,
             status: Status::Pending,
             fix: Some(Fix::InstallPackage { role: "mangohud" }),
+            advanced: false,
         },
     ]
 }
@@ -259,6 +269,7 @@ pub fn disk_check(trace_dir: &Path) -> Check {
         blocking: false,
         status,
         fix: None,
+        advanced: false,
     }
 }
 
@@ -294,6 +305,7 @@ pub fn gpu_dump_check() -> Check {
         blocking: false,
         status: dump_access_status(),
         fix: Some(Fix::InstallDumpAccessRule),
+        advanced: false,
     }
 }
 
@@ -316,6 +328,7 @@ pub fn multi_gpu_check() -> Check {
         blocking: false,
         status: multi_gpu_status(&gpus),
         fix: None,
+        advanced: false,
     }
 }
 
@@ -349,6 +362,7 @@ pub fn driver_debuginfo_check() -> Check {
             Status::NeedsFix
         },
         fix: None,
+        advanced: false,
     }
 }
 
@@ -374,6 +388,7 @@ pub fn perf_debuginfod_check() -> Check {
             Status::NeedsFix
         },
         fix: None,
+        advanced: false,
     }
 }
 
@@ -432,6 +447,7 @@ pub fn mangohud_hotkey_check() -> Check {
             _ => Status::Ok,
         },
         fix: None,
+        advanced: false,
     }
 }
 
@@ -495,21 +511,31 @@ fn mangohud_hotkey_why(version: Option<&str>) -> String {
 pub fn steam_visible_beisl_check() -> Check {
     let system = detect_system_kind();
     let installed = user_beisl_path().is_file();
+    let in_usr_bin = Path::new("/usr/bin/beisl").exists();
+    // The wrapper's own observation, from inside an actual Steam-launched trace, outranks
+    // the install-dir heuristic below (see `steam_visible_status`'s doc comment). Unlike
+    // every other check here — `dump_access_status`/`multi_gpu_status` etc. probe only
+    // live system state — this is the first to read persisted `Config`; done inline rather
+    // than threaded through the caller so the check stays a single self-contained call.
+    let observation = Config::load().steam_path_observation;
     let status = steam_visible_status(
         steam_client_scrubs_path(),
         installed,
-        Path::new("/usr/bin/beisl").exists(),
+        in_usr_bin,
+        observation,
     );
+    let advanced = steam_visible_advanced(observation);
     // Only a mutable /usr can take the shim; elsewhere the why explains the fallback.
     let fix = (status == Status::NeedsFix && system == SystemKind::Mutable)
         .then_some(Fix::InstallSteamShim);
     Check {
         id: CheckId::SteamVisibleBeisl,
         label: "Steam can find beisl",
-        why: steam_visible_why(&status, system).into(),
+        why: steam_visible_why(&status, system, advanced, in_usr_bin).into(),
         blocking: false,
         status,
         fix,
+        advanced,
     }
 }
 
@@ -523,7 +549,23 @@ pub const STEAM_PATH_ISSUE_URL: &str =
 /// per-user beisl install for the shim to forward to, and no `/usr/bin/beisl` yet
 /// (`exists()` follows symlinks, so a dangling leftover from an older link-style
 /// install counts as "not there" and the fix replaces it).
-fn steam_visible_status(scrubbing_client: bool, beisl_installed: bool, in_usr_bin: bool) -> Status {
+///
+/// `observation` — the wrapper's last actual reading of Steam's launch PATH (see
+/// [`SteamPathObservation`]) — outranks the `.steamrt64`-directory heuristic: a confirmed
+/// `Fixed` reading always resolves `Ok`, even if the heuristic would still guess a
+/// scrubbing client. `Scrubbed` or `Unknown` fall through to today's heuristic-only
+/// behavior unchanged, which is also how a regression re-promotes the row: a later trace
+/// observing `Scrubbed` again just stops the short-circuit, and the config it wrote is
+/// re-read on the very next preflight run.
+fn steam_visible_status(
+    scrubbing_client: bool,
+    beisl_installed: bool,
+    in_usr_bin: bool,
+    observation: SteamPathObservation,
+) -> Status {
+    if observation == SteamPathObservation::Fixed {
+        return Status::Ok;
+    }
     if scrubbing_client && beisl_installed && !in_usr_bin {
         Status::NeedsFix
     } else {
@@ -531,7 +573,36 @@ fn steam_visible_status(scrubbing_client: bool, beisl_installed: bool, in_usr_bi
     }
 }
 
-fn steam_visible_why(status: &Status, system: SystemKind) -> String {
+/// Whether the row belongs in the GUI's Advanced section (informational) rather than the
+/// main checklist — true once a real Steam-launched trace has confirmed the client stopped
+/// scrubbing PATH. See [`steam_visible_status`] for why this is decided independently: a
+/// `Fixed` observation always retires the row even when a shim was never installed (nothing
+/// to warn about either way), and a later `Scrubbed` observation un-sets this on its own by
+/// no longer matching `Fixed` — the re-promotion falls out of re-reading config each run.
+fn steam_visible_advanced(observation: SteamPathObservation) -> bool {
+    observation == SteamPathObservation::Fixed
+}
+
+fn steam_visible_why(
+    status: &Status,
+    system: SystemKind,
+    advanced: bool,
+    in_usr_bin: bool,
+) -> String {
+    if advanced {
+        return if in_usr_bin {
+            "A Steam-launched trace confirmed the client no longer scrubs launch-option \
+             PATHs (steam-for-linux #13389 looks fixed here) — the /usr/bin/beisl launcher \
+             isn't needed anymore. It's harmless to leave in place; to remove it: \
+             sudo rm /usr/bin/beisl."
+                .to_string()
+        } else {
+            "A Steam-launched trace confirmed the client no longer scrubs launch-option \
+             PATHs (steam-for-linux #13389 looks fixed here) — a bare `beisl %command%` \
+             works without a launcher shim."
+                .to_string()
+        };
+    }
     match status {
         Status::NeedsFix if system == SystemKind::Mutable => {
             "A recent Steam update changed how games launch: Steam now only finds tools \
@@ -1280,7 +1351,9 @@ mod tests {
     #[test]
     fn steam_visible_status_warns_only_when_all_three_line_up() {
         use Status::*;
-        // (scrubbing client, beisl installed, /usr/bin/beisl present) -> status
+        use SteamPathObservation::Unknown;
+        // (scrubbing client, beisl installed, /usr/bin/beisl present) -> status, with the
+        // observation axis held at Unknown (today's behavior, unaffected by the new axis).
         let matrix = [
             ((true, true, false), NeedsFix), // the real case: containerized Steam, no link
             ((true, true, true), Ok),        // already linked
@@ -1290,11 +1363,54 @@ mod tests {
         ];
         for ((scrub, inst, linked), want) in matrix {
             assert_eq!(
-                steam_visible_status(scrub, inst, linked),
+                steam_visible_status(scrub, inst, linked, Unknown),
                 want,
                 "scrub={scrub} installed={inst} linked={linked}"
             );
         }
+    }
+
+    #[test]
+    fn steam_visible_status_scrubbed_observation_matches_unknown() {
+        // A `Scrubbed` observation must behave exactly like `Unknown` — it never
+        // short-circuits, only `Fixed` does. This is what makes re-promotion automatic:
+        // a regression observed after a `Fixed` period just falls back to the heuristic.
+        use Status::*;
+        use SteamPathObservation::Scrubbed;
+        assert_eq!(steam_visible_status(true, true, false, Scrubbed), NeedsFix);
+        assert_eq!(steam_visible_status(true, true, true, Scrubbed), Ok);
+        assert_eq!(steam_visible_status(false, true, false, Scrubbed), Ok);
+    }
+
+    #[test]
+    fn steam_visible_status_fixed_observation_always_resolves_ok() {
+        // A confirmed `Fixed` observation overrides the heuristic even in the shape that
+        // would otherwise demand a fix (scrubbing client, installed, no shim yet) — the
+        // whole point of retiring the row once Valve's bug is confirmed fixed here.
+        use Status::Ok;
+        use SteamPathObservation::Fixed;
+        assert_eq!(steam_visible_status(true, true, false, Fixed), Ok);
+        assert_eq!(steam_visible_status(true, true, true, Fixed), Ok);
+        assert_eq!(steam_visible_status(false, false, false, Fixed), Ok);
+    }
+
+    #[test]
+    fn steam_visible_advanced_only_true_when_fixed() {
+        assert!(!steam_visible_advanced(SteamPathObservation::Unknown));
+        assert!(!steam_visible_advanced(SteamPathObservation::Scrubbed));
+        assert!(steam_visible_advanced(SteamPathObservation::Fixed));
+    }
+
+    #[test]
+    fn steam_visible_why_advanced_names_the_removal_command_only_when_shim_present() {
+        let with_shim = steam_visible_why(&Status::Ok, SystemKind::Mutable, true, true);
+        assert!(with_shim.contains("sudo rm /usr/bin/beisl"), "{with_shim}");
+        let without_shim = steam_visible_why(&Status::Ok, SystemKind::Mutable, true, false);
+        assert!(
+            !without_shim.contains("sudo rm"),
+            "no shim to remove: {without_shim}"
+        );
+        assert!(without_shim.contains("beisl %command%"), "{without_shim}");
     }
 
     #[test]
