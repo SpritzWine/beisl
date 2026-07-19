@@ -34,6 +34,10 @@ deleting traces stay in the app, where a human confirms them.
     get_report          the same analysis as human-readable prose
     get_log             the tail of a run's beisl, game, or perf log
     get_crash_summary   pre-chewed crash forensics for a run that "just died"
+    list_events         crash/gpu/log-signal events from every run since a
+                        since_unix cursor — "anything crash since we last
+                        talked?" as one cheap call, without walking
+                        list_traces yourself
 
 # SEE ALSO
 

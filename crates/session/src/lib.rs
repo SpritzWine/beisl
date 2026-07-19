@@ -10,6 +10,14 @@ use serde::{Deserialize, Serialize};
 
 pub const FILE: &str = "session.json";
 
+/// The wrapper's beisl.log marker for "the launched command exited" (see
+/// `beisl/src/run.rs`'s post-run logging). Shared here — rather than each side owning
+/// its own copy of the string — so `beisl-mcp`'s crash judgment
+/// (`wrapper_exit_crashed`/`crash_detail`) can't silently drift out of sync with the
+/// wrapper's actual wording: a rewording on either side now breaks the build instead of
+/// quietly reading every crash as clean.
+pub const EXIT_LOG_MARKER: &str = "launched command exited:";
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum State {
     #[default]

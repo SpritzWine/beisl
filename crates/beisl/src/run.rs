@@ -265,10 +265,13 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
             };
             let _ = sess.write(&run_dir);
             // With launcher chains (umu-run → launcher → game) this is the *wrapper's*
-            // status — it can be 0 even when the real game process died.
+            // status — it can be 0 even when the real game process died. The marker
+            // itself is `session::EXIT_LOG_MARKER`, shared with beisl-mcp's crash
+            // judgment — don't reword this line without updating that constant.
             log.line(&format!(
-                "launched command exited: {status} (with launcher chains this is the \
+                "{} {status} (with launcher chains this is the \
                  wrapper's status, not the game's), trace {} bytes",
+                session::EXIT_LOG_MARKER,
                 sess.trace_bytes
             ));
             return Ok(status.code().unwrap_or(0));
