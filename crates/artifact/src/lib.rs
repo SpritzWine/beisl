@@ -36,6 +36,15 @@ pub struct FrameStats {
     pub frames: u64,
     pub avg_fps: f32,
     pub median_frametime_ms: f32,
+    /// The frametime `t` such that half of the *logged time* (not frame count) was
+    /// spent in frames <= `t` — the median of what the player experienced, weighted by
+    /// each frame's own duration. Frame-count medians are skewed by menu/launcher
+    /// floods: a real CarX Street trace had per-frame median 0.31 ms (thousands of
+    /// sub-millisecond menu frames outvoting gameplay) but per-time median 17.0 ms; a
+    /// clean trace barely moves the two apart (16.9 -> 18.4 ms). `default` so artifacts
+    /// written before this field deserialize as 0.0.
+    #[serde(default)]
+    pub time_weighted_median_ms: f32,
     /// 99th-percentile frametime — the "1% low" felt as stutter.
     pub p99_frametime_ms: f32,
     pub worst_frametime_ms: f32,
@@ -327,13 +336,23 @@ impl TraceArtifact {
         }
 
         if let Some(f) = &self.frame_stats {
+            // The headline median is time-weighted ("experienced") rather than the
+            // per-frame value: see `FrameStats::time_weighted_median_ms` for why
+            // (menu-flood frame-count bias). The per-frame value stays alongside it for
+            // continuity with earlier reports. "1% low" (p99) deliberately stays
+            // per-frame — a time-weighted p99 was considered and rejected: worst frames
+            // are long *by definition*, so weighting the tail by duration lets a
+            // handful of real hitches dominate it, exploding it to ~400 ms on genuinely
+            // hitchy traces instead of conveying "1% low" the way gamers read it.
             let _ = writeln!(
                 o,
                 "\nFrametimes ({} frames, {:.0}s logged):\n  \
-                 avg {:.0} fps   median {:.1} ms   1% low {:.1} ms   worst {:.1} ms",
+                 avg {:.0} fps   median {:.1} ms experienced ({:.1} per-frame)   \
+                 1% low {:.1} ms   worst {:.1} ms",
                 f.frames,
                 f.logged_seconds,
                 f.avg_fps,
+                f.time_weighted_median_ms,
                 f.median_frametime_ms,
                 f.p99_frametime_ms,
                 f.worst_frametime_ms
@@ -482,6 +501,29 @@ fn uptime_at_csv_end(csv: &Path) -> Option<f64> {
     (uptime > 0.0).then_some(uptime)
 }
 
+/// The time-weighted median (see [`FrameStats::time_weighted_median_ms`] for why):
+/// walk `sorted_asc` (already plausibility-gated, ascending) accumulating the
+/// frametimes themselves as weight, and return the first one at which the cumulative
+/// sum reaches half the total — equivalent to the weighted median with weight = value.
+/// Empty input yields 0.0, matching the rest of the stats' empty-set convention.
+fn time_weighted_median_ms(sorted_asc: &[f32]) -> f32 {
+    if sorted_asc.is_empty() {
+        return 0.0;
+    }
+    let total: f64 = sorted_asc.iter().map(|&ms| ms as f64).sum();
+    let half = total / 2.0;
+    let mut cum = 0.0f64;
+    for &ms in sorted_asc {
+        cum += ms as f64;
+        if cum >= half {
+            return ms;
+        }
+    }
+    // Unreachable in practice (cum reaches `total` >= `half` by the last element),
+    // but a defined fallback keeps this total rather than partial.
+    *sorted_asc.last().unwrap()
+}
+
 /// Parse a MangoHud frametime CSV into stats + worst spikes.
 ///
 /// Layout (verified): two system-info header lines, then a data-header line whose columns
@@ -541,6 +583,7 @@ fn frames_from_csv_gated(path: &Path, uptime_end_s: Option<f64>) -> Option<CsvFr
     let mut sorted = fts.clone();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let median = sorted[sorted.len() / 2];
+    let time_weighted_median = time_weighted_median_ms(&sorted);
     let p99 = sorted[(sorted.len() * 99 / 100).min(sorted.len() - 1)];
     let worst = *sorted.last().unwrap();
     let logged_seconds = t;
@@ -569,6 +612,7 @@ fn frames_from_csv_gated(path: &Path, uptime_end_s: Option<f64>) -> Option<CsvFr
             frames: fts.len() as u64,
             avg_fps,
             median_frametime_ms: median,
+            time_weighted_median_ms: time_weighted_median,
             p99_frametime_ms: p99,
             worst_frametime_ms: worst,
             logged_seconds,
@@ -659,6 +703,48 @@ mod tests {
         assert!(timeline
             .iter()
             .all(|&(_, ms)| ms <= MAX_PLAUSIBLE_FRAMETIME_MS));
+        // The garbage rows (~6.4 h each) must not leak into the time-weighted median
+        // either, or it would report hours instead of milliseconds: surviving frames
+        // sorted are [16, 16, 16, 2500] ms; total = 2548 ms, half = 1274 ms; the
+        // cumulative sum only clears 1274 ms once the 2500 ms frame is folded in
+        // (16+16+16 = 48, then +2500 = 2548 >= 1274) -> 2500 ms.
+        assert_eq!(stats.time_weighted_median_ms, 2500.0);
+        assert!(stats.time_weighted_median_ms <= MAX_PLAUSIBLE_FRAMETIME_MS);
+    }
+
+    #[test]
+    fn menu_flood_time_weighted_median_reflects_experienced_time_not_frame_count() {
+        // Menu/launcher flood (2026-07-12 CarX Street observation, decided with
+        // Florian): thousands of sub-millisecond menu frames outvote gameplay in frame
+        // COUNT but barely register in logged TIME. Here: 1000 menu frames @ 1 ms +
+        // 100 gameplay frames @ 20 ms.
+        //   per-frame median: 1100 frames sorted ascending; index 1100/2 = 550 falls
+        //   inside the first 1000 (all 1 ms) entries -> 1 ms.
+        //   time-weighted median: total time = 1000*1 + 100*20 = 3000 ms; half = 1500
+        //   ms. Cumulative sum over the 1000 1-ms frames reaches 1000 ms; each
+        //   following 20-ms frame adds 20, so it takes 25 more (1000 + 25*20 = 1500)
+        //   to reach exactly half -> the 25th 20-ms frame, i.e. 20 ms.
+        let mut csv = String::from("os,cpu\nSteam,Ryzen\nfps,frametime,elapsed\n");
+        for i in 0..1000 {
+            csv.push_str(&format!("1000,1.0,{i}\n"));
+        }
+        for i in 0..100 {
+            csv.push_str(&format!("50,20.0,{i}\n"));
+        }
+        let (stats, _, _) = frames_from_csv(&write_csv("menu-flood", &csv)).unwrap();
+        assert_eq!(stats.frames, 1100);
+        assert_eq!(stats.median_frametime_ms, 1.0);
+        assert_eq!(stats.time_weighted_median_ms, 20.0);
+    }
+
+    #[test]
+    fn uniform_frametimes_make_both_medians_equal() {
+        // No flood, nothing to weight away from: the two medians agree.
+        let csv = "os,cpu\nSteam,Ryzen\nfps,frametime,elapsed\n\
+                   60,16.0,1\n60,16.0,2\n60,16.0,3\n60,16.0,4\n";
+        let (stats, _, _) = frames_from_csv(&write_csv("uniform", csv)).unwrap();
+        assert_eq!(stats.median_frametime_ms, 16.0);
+        assert_eq!(stats.time_weighted_median_ms, 16.0);
     }
 
     #[test]
@@ -703,11 +789,58 @@ mod tests {
 
     #[test]
     fn frame_stats_json_without_dropped_rows_defaults_to_zero() {
-        // Artifacts written before the plausibility gate carry no dropped_rows field.
+        // Artifacts written before the plausibility gate carry no dropped_rows field —
+        // and, likewise, none written before this item carry time_weighted_median_ms.
+        // Both must default rather than fail deserialization.
         let j = r#"{"frames":1,"avg_fps":60.0,"median_frametime_ms":16.0,
                     "p99_frametime_ms":16.0,"worst_frametime_ms":16.0,"logged_seconds":1.0}"#;
         let f: FrameStats = serde_json::from_str(j).unwrap();
         assert_eq!(f.dropped_rows, 0);
+        assert_eq!(f.time_weighted_median_ms, 0.0);
+    }
+
+    #[test]
+    fn render_report_headlines_the_experienced_median_and_keeps_per_frame() {
+        // The report's summary line must lead with the time-weighted ("experienced")
+        // median and keep the per-frame value alongside it — using the real CarX
+        // Street numbers this item was decided from (0.31 ms per-frame vs 17.0 ms
+        // time-weighted).
+        let a = TraceArtifact {
+            schema_version: SCHEMA_VERSION,
+            game: "Test".into(),
+            wine_flavor: "unknown".into(),
+            gpu_vendor: String::new(),
+            record_mode: String::new(),
+            duration_s: 10.0,
+            frame_stats: Some(FrameStats {
+                frames: 1100,
+                avg_fps: 60.0,
+                median_frametime_ms: 0.31,
+                time_weighted_median_ms: 17.0,
+                p99_frametime_ms: 40.0,
+                worst_frametime_ms: 50.0,
+                logged_seconds: 10.0,
+                dropped_rows: 0,
+            }),
+            spikes: vec![],
+            timeline: vec![],
+            layers: vec![],
+            attributed_pct: 0.0,
+            hot_symbols: vec![],
+            diagnostics: Diagnostics {
+                fidelity: "Exports".into(),
+                total_samples: 0,
+                unresolved_pct: 0.0,
+                anonymous_modules: vec![],
+            },
+        };
+        let report = a.render_report();
+        assert!(
+            report.contains("median 17.0 ms experienced (0.3 per-frame)"),
+            "report was:\n{report}"
+        );
+        // "1% low" (p99) stays exactly per-frame — unchanged.
+        assert!(report.contains("1% low 40.0 ms"));
     }
 
     #[test]
