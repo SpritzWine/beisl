@@ -1,3 +1,10 @@
+<!-- Das Glasl, theme-aware: the -dark variant is drawn for dark grounds. Forgejo/
+     GitHub render the <picture> media query; anything plainer falls back to the img. -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="crates/assets/data/icons/beisl-glass-dark.svg">
+  <img src="crates/assets/data/icons/beisl-glass-light.svg" alt="Das Glasl — the Beisl mark" width="72" align="right">
+</picture>
+
 # Beisl
 
 > Perf-tracing made easy — joining `perf` and MangoHud for actual numbers that matter.
