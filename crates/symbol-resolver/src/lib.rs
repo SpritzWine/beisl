@@ -167,6 +167,9 @@ pub struct Mapping {
     pub size: u64,
     /// File offset of this segment (`@ 0x1000` in the record): RVA = ip − start + pgoff.
     pub pgoff: u64,
+    /// The mapping process's pid (MMAP2's `pid/tid:` prefix) — lets a PE mapping be
+    /// attributed to the process that mapped it, not just the capture as a whole.
+    pub pid: i32,
 }
 
 impl Mapping {
@@ -234,8 +237,16 @@ pub struct Resolution {
     /// many of its samples we could name (the layer's symbol coverage).
     pub layers: Vec<LayerTally>,
     /// Best-effort wine build identifier from a PE module's path (`SpritzWine-Prater`,
-    /// `Proton - Experimental`, …) — the artifact's `wine_flavor`. `None` if no wine PE.
+    /// `Proton - Experimental`, …) — the artifact's `wine_flavor`. Derived ONLY from PE
+    /// paths mapped by the dominant (highest-sample) pid, i.e. the game's own process —
+    /// see [`decide_wine_flavor`]. `None` if that pid maps no PE, or maps one whose path
+    /// doesn't name a known build.
     pub wine_flavor: Option<String>,
+    /// Whether the dominant pid mapped ANY PE module — the honesty signal that lets a
+    /// caller distinguish "native, no wine at all" (`false`) from "wine, but the flavor
+    /// keyword didn't match" (`true` with `wine_flavor` still `None`). See
+    /// [`decide_wine_flavor`].
+    pub game_maps_pe: bool,
     /// Best-effort GPU vendor of the card that ran, from the driver-layer DSOs seen
     /// (`intel`/`amd`/`nvidia`/`qualcomm`) — the one with the most samples. Drives
     /// vendor-colored UI (Intel blue, AMD red, Nvidia green, …). `None` if no driver sample
@@ -324,13 +335,25 @@ pub fn resolve_perf_data_with_debuginfod(
     // GPU vendor tally over driver-layer samples, so a mixed system picks the busiest card.
     let mut gpu_vendors: HashMap<&'static str, u64> = HashMap::new();
     let mut pe_paths: Vec<String> = Vec::new();
+    // Per-pid signal for `decide_wine_flavor`: sample counts (who dominates the capture)
+    // and the PE paths each pid mapped (a full `-a` capture samples every process on the
+    // box, not just the game — see that function's doc for the CarX Street case this
+    // guards against).
+    let mut pid_samples: HashMap<i32, u64> = HashMap::new();
+    let mut pid_pe_paths: HashMap<i32, Vec<String>> = HashMap::new();
 
     use io::BufRead as _;
     for line in reader.lines() {
         let line = line?;
         if let Some(m) = parse_mmap(&line) {
-            if is_pe(&m.path) && !pe_paths.contains(&m.path) {
-                pe_paths.push(m.path.clone());
+            if is_pe(&m.path) {
+                if !pe_paths.contains(&m.path) {
+                    pe_paths.push(m.path.clone());
+                }
+                let per_pid = pid_pe_paths.entry(m.pid).or_default();
+                if !per_pid.contains(&m.path) {
+                    per_pid.push(m.path.clone());
+                }
             }
             mappings.push(m);
             continue;
@@ -345,6 +368,7 @@ pub fn resolve_perf_data_with_debuginfod(
             continue;
         };
         total += 1;
+        *pid_samples.entry(sample.pid).or_insert(0) += 1;
         // Every sample lands in exactly one layer, whether or not we can name its function —
         // the split is over the whole trace, not just the resolved symbols.
         let layer = classify_layer(&sample.dso);
@@ -441,18 +465,63 @@ pub fn resolve_perf_data_with_debuginfod(
         .max_by_key(|&(_, n)| n)
         .map(|(v, _)| v.to_string());
 
+    let (flavor, game_maps_pe) = decide_wine_flavor(&pid_samples, &pid_pe_paths);
+
     Ok(Resolution {
         diagnostics: Diagnostics {
+            // `detect_tier` deliberately still looks at every PE path in the whole
+            // capture, not just the dominant pid's — scoping the symbol-fidelity tier the
+            // same way `wine_flavor` is scoped is out of scope here (this item is about
+            // the flavor claim, not tier detection).
             tier: detect_tier(&pe_paths),
             total_samples: total,
             unresolved_samples: unresolved,
             anonymous_modules,
         },
         layers,
-        wine_flavor: pe_paths.iter().find_map(|p| wine_flavor(p)),
+        wine_flavor: flavor,
+        game_maps_pe,
         gpu_vendor,
         symbols,
     })
+}
+
+/// Decide the wine flavor — or honest nativeness — from per-pid sample counts and the PE
+/// paths each pid mapped. A full (`-a`, system-wide) `perf` capture samples EVERY process
+/// on the box, not just the game, so a whole-capture union of PE paths lets a stray
+/// background wine process make a native game's trace claim a flavor it never ran (real
+/// case: CarX Street, native, misdetected as SpritzWine-Prater from an unrelated wine
+/// process elsewhere in the capture). The fix: approximate the GAME as the pid with the
+/// most samples — in a gaming trace the game dominates, and it's the only per-pid signal
+/// that survives to resolve time (the live pids are long gone) — and derive the flavor
+/// ONLY from that pid's own PE mappings.
+///
+/// Returns `(flavor, game_maps_pe)`. `game_maps_pe` is what lets a caller say "native" (no
+/// PE at all) rather than a silent `None` that would otherwise read identically to "wine,
+/// but the flavor keyword didn't match anything known".
+///
+/// Known accepted limitation: a wineserver-dominated capture (a native ELF process that
+/// sync-hammers wineserver harder than it runs its own code) would out-sample the actual
+/// game and still map no PE — a false "native" verdict this pid-dominance heuristic can't
+/// distinguish from the real thing.
+fn decide_wine_flavor(
+    pid_samples: &HashMap<i32, u64>,
+    pid_pe_paths: &HashMap<i32, Vec<String>>,
+) -> (Option<String>, bool) {
+    // `max_by_key` over a HashMap would otherwise pick nondeterministically among tied
+    // sample counts (iteration order isn't stable), so the same perf.data could flip
+    // verdicts between runs; break ties by lowest pid — arbitrary, but fixed and repeatable.
+    let Some((&dominant, _)) = pid_samples
+        .iter()
+        .max_by_key(|&(&pid, &n)| (n, std::cmp::Reverse(pid)))
+    else {
+        return (None, false);
+    };
+    let paths = pid_pe_paths
+        .get(&dominant)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    (paths.iter().find_map(|p| wine_flavor(p)), !paths.is_empty())
 }
 
 /// Best-effort wine build name from a PE module path. A wine tree is `<build>/lib/wine/
@@ -493,14 +562,15 @@ pub fn detect_tier(pe_paths: &[String]) -> FidelityTier {
 }
 
 struct Sample {
+    pid: i32,
     ip: u64,
     sym: String,
     dso: String,
 }
 
 /// Parse a `perf script` sample line: `<comm…> <pid> <ip> <sym> (<dso>)`. The comm can
-/// carry spaces, so we anchor on the trailing `(<dso>)` and take the last two tokens
-/// before it as `sym` then `ip` (both single tokens).
+/// carry spaces, so we anchor on the trailing `(<dso>)` and take the last three tokens
+/// before it as `sym`, `ip`, then `pid` (all single tokens, in that reverse order).
 fn parse_sample(line: &str) -> Option<Sample> {
     let open = line.rfind('(')?;
     let close = line[open..].find(')')? + open;
@@ -511,13 +581,17 @@ fn parse_sample(line: &str) -> Option<Sample> {
     let mut toks = line[..open].split_whitespace().rev();
     let sym = toks.next()?.to_string();
     let ip = u64::from_str_radix(toks.next()?.trim_start_matches("0x"), 16).ok()?;
-    Some(Sample { ip, sym, dso })
+    let pid = toks.next()?.parse().ok()?;
+    Some(Sample { pid, ip, sym, dso })
 }
 
 /// Parse a `PERF_RECORD_MMAP2` line into a [`Mapping`]:
 /// `… PERF_RECORD_MMAP2 pid/tid: [0xSTART(0xSIZE) @ 0xPGOFF …]: prot /path`.
 fn parse_mmap(line: &str) -> Option<Mapping> {
     let after = line.split_once("PERF_RECORD_MMAP2")?.1;
+    let after_trimmed = after.trim_start();
+    let slash = after_trimmed.find('/')?;
+    let pid: i32 = after_trimmed[..slash].parse().ok()?;
     let lb = after.find('[')?;
     let paren = after[lb..].find('(')? + lb;
     let rparen = after[paren..].find(')')? + paren;
@@ -538,6 +612,7 @@ fn parse_mmap(line: &str) -> Option<Mapping> {
         start,
         size,
         pgoff,
+        pid,
     })
 }
 
@@ -589,9 +664,10 @@ mod tests {
     #[test]
     fn parses_a_sample_line_with_spaced_comm() {
         let s = parse_sample(
-            "  wine_rpcrt4_io      6ffffff8f8df [unknown] (/lib/wine/x86_64-windows/ntdll.dll)",
+            "  wine_rpcrt4_io 80406  6ffffff8f8df [unknown] (/lib/wine/x86_64-windows/ntdll.dll)",
         )
         .unwrap();
+        assert_eq!(s.pid, 80406);
         assert_eq!(s.ip, 0x6ffffff8f8df);
         assert_eq!(s.sym, "[unknown]");
         assert_eq!(s.dso, "/lib/wine/x86_64-windows/ntdll.dll");
@@ -600,6 +676,7 @@ mod tests {
     #[test]
     fn parses_an_elf_resolved_sample() {
         let s = parse_sample("game 123 7f0011 __memcpy_avx+0x2a (/usr/lib/libc.so.6)").unwrap();
+        assert_eq!(s.pid, 123);
         assert_eq!(s.sym, "__memcpy_avx+0x2a");
         assert_eq!(basename(&s.dso), "libc.so.6");
     }
@@ -612,6 +689,7 @@ mod tests {
              /opt/wine/x86_64-windows/ntdll.dll",
         )
         .unwrap();
+        assert_eq!(m.pid, 80406);
         assert_eq!(m.start, 0x6ffffff31000);
         assert_eq!(m.size, 0x7b000);
         assert_eq!(m.pgoff, 0x1000);
@@ -654,6 +732,80 @@ mod tests {
         assert_eq!(
             wine_flavor("/opt/game/bin/x/lib/wine/x86_64-windows/ntdll.dll"),
             None
+        );
+    }
+
+    /// The scoping fix's test matrix: a full (`-a`) capture's per-pid samples/PE-paths in,
+    /// flavor/nativeness out. Covers the real CarX Street misdetection (native game, a
+    /// stray unrelated wine process elsewhere in the same system-wide capture) plus the
+    /// other three shapes the decision must get right.
+    #[test]
+    fn decide_wine_flavor_scopes_to_the_dominant_pid() {
+        // Native game dominates the capture; a stray, unrelated wine process (few samples)
+        // is also in the (`-a`) capture and maps a recognisable wine PE. Must NOT leak into
+        // the game's verdict — real CarX Street case.
+        let mut samples = HashMap::new();
+        samples.insert(100, 10_000); // the game: native, no PE
+        samples.insert(200, 5); // a stray background wine proc
+        let mut pe_paths = HashMap::new();
+        pe_paths.insert(
+            200,
+            vec!["/opt/some-proton-build/files/lib/wine/x86_64-windows/ntdll.dll".to_string()],
+        );
+        assert_eq!(
+            decide_wine_flavor(&samples, &pe_paths),
+            (None, false),
+            "a stray wine pid must not make a native game claim a flavor"
+        );
+
+        // The wine game's own process dominates and maps a recognisable build: flavor found.
+        let mut samples = HashMap::new();
+        samples.insert(100, 10_000);
+        let mut pe_paths = HashMap::new();
+        pe_paths.insert(
+            100,
+            vec!["/opt/some-proton-build/files/lib/wine/x86_64-windows/ntdll.dll".to_string()],
+        );
+        assert_eq!(
+            decide_wine_flavor(&samples, &pe_paths),
+            (Some("some-proton-build".to_string()), true)
+        );
+
+        // The dominant pid maps a PE, but its path names no known build keyword: PE
+        // mapped (honestly wine) but flavor stays unmatched, not silently "native".
+        let mut samples = HashMap::new();
+        samples.insert(100, 10_000);
+        let mut pe_paths = HashMap::new();
+        pe_paths.insert(
+            100,
+            vec!["/opt/nowhere-marker/files/lib/wine/x86_64-windows/ntdll.dll".to_string()],
+        );
+        assert_eq!(decide_wine_flavor(&samples, &pe_paths), (None, true));
+
+        // An empty capture claims nothing at all — the most honest answer available.
+        assert_eq!(
+            decide_wine_flavor(&HashMap::new(), &HashMap::new()),
+            (None, false)
+        );
+    }
+
+    /// Equal sample counts must not leave the verdict up to `HashMap` iteration order — the
+    /// same perf.data has to resolve to the same answer every time. pid 100 and pid 300 tie
+    /// at 10,000 samples; the lower pid (100, native) must win regardless of insertion order.
+    #[test]
+    fn decide_wine_flavor_breaks_sample_ties_deterministically() {
+        let mut samples = HashMap::new();
+        samples.insert(300, 10_000); // tied wine pid, inserted first, higher pid
+        samples.insert(100, 10_000); // tied native pid, lower pid — must win the tie
+        let mut pe_paths = HashMap::new();
+        pe_paths.insert(
+            300,
+            vec!["/opt/some-proton-build/files/lib/wine/x86_64-windows/ntdll.dll".to_string()],
+        );
+        assert_eq!(
+            decide_wine_flavor(&samples, &pe_paths),
+            (None, false),
+            "the lower pid must win a sample-count tie, deterministically"
         );
     }
 

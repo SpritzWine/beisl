@@ -95,6 +95,17 @@ pub struct TraceArtifact {
     pub game: String,
     /// e.g. `SpritzWine-Prater`, `Proton - Experimental`, or `unknown`.
     pub wine_flavor: String,
+    /// Whether the game's own process (the resolver's dominant-pid approximation) mapped
+    /// ANY PE module — what lets [`wine_display`](Self::wine_display) say "native" honestly
+    /// instead of a bare "unknown" that would read the same as a wine game whose flavor
+    /// just didn't match a known keyword. `Option` (not `bool`) so a pre-field artifact is
+    /// distinguishable from a resolved "no PE" verdict: `None` renders the old plain
+    /// "unknown" (we truly don't know), `Some(false)` renders "native" (we checked, and
+    /// the game mapped nothing). Collapsing both to `false` would have old wine traces
+    /// whose flavor simply didn't match a keyword start rendering an affirmative "native"
+    /// claim the old code never made. `default` (`None`) so pre-field artifacts still load.
+    #[serde(default)]
+    pub game_maps_pe: Option<bool>,
     /// GPU vendor of the card that ran (`intel`/`amd`/`nvidia`/`qualcomm`), for vendor-colored
     /// UI. Empty string when undetected. Defaulted so pre-vendor artifacts still load.
     #[serde(default)]
@@ -254,6 +265,9 @@ impl TraceArtifact {
             schema_version: SCHEMA_VERSION,
             game: game.to_string(),
             wine_flavor: res.wine_flavor.unwrap_or_else(|| "unknown".to_string()),
+            // A fresh resolve always knows the answer — only a pre-field artifact read
+            // back from disk carries `None`.
+            game_maps_pe: Some(res.game_maps_pe),
             gpu_vendor: res.gpu_vendor.unwrap_or_default(),
             record_mode: record_mode.to_string(),
             duration_s,
@@ -287,6 +301,22 @@ impl TraceArtifact {
         serde_json::from_slice(&data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
+    /// The `wine:` line's value: a matched flavor always wins; otherwise `game_maps_pe`
+    /// distinguishes three states the old bare `wine_flavor` string collapsed into one
+    /// silent "unknown": `None` (pre-field artifact, we never checked) stays "unknown";
+    /// `Some(true)` (a PE mapped, but its path named no known build) is "unknown flavor";
+    /// `Some(false)` (the game's own process mapped no PE at all) is the honest "native".
+    pub fn wine_display(&self) -> &str {
+        if self.wine_flavor != "unknown" {
+            return &self.wine_flavor;
+        }
+        match self.game_maps_pe {
+            None => "unknown",
+            Some(true) => "unknown flavor",
+            Some(false) => "none — native game",
+        }
+    }
+
     /// A one-line headline for the session window / log: the hottest wine function and tier.
     pub fn headline(&self) -> String {
         match self.hot_symbols.first() {
@@ -312,7 +342,8 @@ impl TraceArtifact {
         let _ = writeln!(
             o,
             "  wine: {}   duration: {:.0}s",
-            self.wine_flavor, self.duration_s
+            self.wine_display(),
+            self.duration_s
         );
         let d = &self.diagnostics;
         let _ = writeln!(
@@ -809,6 +840,7 @@ mod tests {
             schema_version: SCHEMA_VERSION,
             game: "Test".into(),
             wine_flavor: "unknown".into(),
+            game_maps_pe: Some(false),
             gpu_vendor: String::new(),
             record_mode: String::new(),
             duration_s: 10.0,
@@ -849,6 +881,7 @@ mod tests {
             schema_version: SCHEMA_VERSION,
             game: "Test".into(),
             wine_flavor: "example-wine-build".into(),
+            game_maps_pe: Some(true),
             gpu_vendor: "amd".into(),
             record_mode: "degraded".into(),
             duration_s: 42.0,
@@ -900,6 +933,7 @@ mod tests {
             schema_version: SCHEMA_VERSION,
             game: "Test".into(),
             wine_flavor: "example-wine-build".into(),
+            game_maps_pe: Some(true),
             gpu_vendor: "amd".into(),
             record_mode: "degraded".into(),
             duration_s: 1.0,
@@ -947,6 +981,7 @@ mod tests {
                 tally(Layer::Other, 40, 0),
             ],
             wine_flavor: None,
+            game_maps_pe: false,
             gpu_vendor: None,
         };
         let a = TraceArtifact::from_parts("G", 1.0, "full", res, None, vec![], vec![]);
@@ -981,6 +1016,7 @@ mod tests {
             schema_version: SCHEMA_VERSION,
             game: "RoundTrip".into(),
             wine_flavor: "example-wine-build".into(),
+            game_maps_pe: Some(true),
             gpu_vendor: "amd".into(),
             record_mode: "full".into(),
             duration_s: 12.0,
@@ -1022,5 +1058,55 @@ mod tests {
         }"#;
         let back: TraceArtifact = serde_json::from_str(json).unwrap();
         assert!(back.layers.is_empty());
+        // Pre-`game_maps_pe` artifacts default to `None` (we never checked) and must render
+        // the old plain "unknown" — NOT the affirmative "native" claim, which the old code
+        // never made and would be a false positive for a wine trace whose flavor simply
+        // didn't match a known keyword.
+        assert!(back.game_maps_pe.is_none());
+        assert_eq!(back.wine_display(), "unknown");
+    }
+
+    /// `wine_display` is the honesty fix's visible surface: a native game (no PE mapped at
+    /// all) reads distinctly from a wine game whose flavor keyword just didn't match, which
+    /// in turn reads distinctly from a matched flavor. The report and the GUI header both
+    /// read this one method so the three states can't drift apart.
+    #[test]
+    fn wine_display_distinguishes_native_from_unmatched_flavor() {
+        let mut a = TraceArtifact {
+            schema_version: SCHEMA_VERSION,
+            game: "Test".into(),
+            wine_flavor: "unknown".into(),
+            game_maps_pe: Some(false),
+            gpu_vendor: String::new(),
+            record_mode: String::new(),
+            duration_s: 1.0,
+            frame_stats: None,
+            spikes: vec![],
+            timeline: vec![],
+            layers: vec![],
+            attributed_pct: 0.0,
+            hot_symbols: vec![],
+            diagnostics: Diagnostics {
+                fidelity: "Exports".into(),
+                total_samples: 0,
+                unresolved_pct: 0.0,
+                anonymous_modules: vec![],
+            },
+        };
+        assert_eq!(a.wine_display(), "none — native game");
+        assert!(a.render_report().contains("wine: none — native game"));
+
+        a.game_maps_pe = Some(true); // a PE mapped, but its path named no known build
+        assert_eq!(a.wine_display(), "unknown flavor");
+
+        a.wine_flavor = "SpritzWine-Prater".into(); // a real match wins over both
+        assert_eq!(a.wine_display(), "SpritzWine-Prater");
+
+        // A pre-field artifact (`None`) must NOT read as the affirmative "native" claim —
+        // that would be a false claim the old code never made. It stays the old plain
+        // "unknown", same as a resolved-but-unmatched flavor used to render.
+        a.wine_flavor = "unknown".into();
+        a.game_maps_pe = None;
+        assert_eq!(a.wine_display(), "unknown");
     }
 }

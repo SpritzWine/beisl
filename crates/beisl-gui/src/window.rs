@@ -788,7 +788,9 @@ impl SessionApp {
             .push(widget::text::title3(a.game.clone()))
             .push(widget::text::caption(format!(
                 "wine: {}   ·   fidelity: {}   ·   {:.0}s",
-                a.wine_flavor, a.diagnostics.fidelity, a.duration_s
+                a.wine_display(),
+                a.diagnostics.fidelity,
+                a.duration_s
             )));
         if a.diagnostics.fidelity == "Exports" {
             col = col.push(widget::text::caption(
