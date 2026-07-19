@@ -633,10 +633,23 @@ impl SessionApp {
         // 2. Frametime health + spikes.
         col = col.push(widget::text::title4("Frametimes"));
         if let Some(f) = &a.frame_stats {
-            col = col.push(widget::text::body(format!(
-                "avg {:.0} fps   ·   1% low {:.1} ms   ·   worst {:.1} ms",
-                f.avg_fps, f.p99_frametime_ms, f.worst_frametime_ms
-            )));
+            // The median floats right so the at-a-glance trio keeps its shape; the
+            // experienced (time-weighted) value leads with per-frame in parentheses —
+            // the same pairing as the report. Hidden on artifacts predating the field
+            // (serde-default 0.0 would read as a real, absurd number).
+            let mut stats_row = widget::Row::new()
+                .push(widget::text::body(format!(
+                    "avg {:.0} fps   ·   1% low {:.1} ms   ·   worst {:.1} ms",
+                    f.avg_fps, f.p99_frametime_ms, f.worst_frametime_ms
+                )))
+                .push(widget::Space::new().width(Length::Fill));
+            if f.time_weighted_median_ms > 0.0 {
+                stats_row = stats_row.push(widget::text::body(format!(
+                    "median {:.1} ms ({:.1} per-frame)",
+                    f.time_weighted_median_ms, f.median_frametime_ms
+                )));
+            }
+            col = col.push(stats_row);
             // The timeline chart (plotters, drawn on Canvas) with the worst spikes marked.
             if !a.timeline.is_empty() {
                 let points = a.timeline.iter().map(|&(t, ms)| (t, ms as f64)).collect();
