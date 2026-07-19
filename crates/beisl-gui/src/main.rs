@@ -493,7 +493,9 @@ impl Application for AppModel {
                 self.tick += 1;
                 // Set the taskbar/overview title once the window exists (not possible in init).
                 if self.tick == 1 {
-                    let _ = self.set_window_title("beisl setup".to_string());
+                    if let Some(id) = self.core.main_window_id() {
+                        let _ = self.set_window_title("beisl setup".to_string(), id);
+                    }
                 }
                 if self.tick.is_multiple_of(24) {
                     self.tip = (self.tip + 1) % TIPS.len();

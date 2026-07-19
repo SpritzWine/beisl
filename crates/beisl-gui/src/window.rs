@@ -211,7 +211,9 @@ impl Application for SessionApp {
                     self.title = title.clone();
                     self.title_pushed = true;
                     self.set_header_title(title.clone());
-                    let _ = self.set_window_title(title);
+                    if let Some(id) = self.core.main_window_id() {
+                        let _ = self.set_window_title(title, id);
+                    }
                 }
                 // A crash auto-writes artifact.json before the window even opens; poll for it
                 // (and for one Analyze produces) until we have it. Cheap: one stat+read of a
