@@ -93,15 +93,17 @@ pub struct SessionApp {
     title_pushed: bool,
 }
 
-/// The window title: the product name, then what the window is currently *doing* — the live
-/// state while a game runs, or which surface it's showing afterwards. The current activity
-/// reads better in a taskbar than a raw launcher exe name (`upc.exe`), and it never repeats
-/// the game name the results view already shows.
-fn window_title(has_artifact: bool, analysis_offer: bool, state: State) -> String {
+/// The window title: product name plus what the window is *doing* (reads better in a
+/// taskbar than a raw exe name). `stale` is checked before `state` so a crashed run's
+/// title reads "Stale run", not "Recording" forever.
+fn window_title(has_artifact: bool, analysis_offer: bool, stale: bool, state: State) -> String {
     let activity = if has_artifact {
         "Results"
     } else if analysis_offer {
         "Clean run"
+    } else if stale && state != State::Saved {
+        // Stale Saved keeps its own word below — its trace completed.
+        "Stale run"
     } else {
         match state {
             State::Starting => "Starting",
@@ -138,7 +140,16 @@ impl Application for SessionApp {
         let session = read.unwrap_or_default();
         let artifact = load_artifact(&dir);
         let raw_present = dir.join("perf.data").is_file();
-        let title = window_title(artifact.is_some(), session.analysis_offer, session.state);
+        // Not `self.is_stale()` — there's no `Self` yet — but the same core, since
+        // `is_stale()` is just this call wrapped around `self.dir`/`self.session`.
+        let stale =
+            session::library::stale_session(session.state, session::library::run_started(&dir));
+        let title = window_title(
+            artifact.is_some(),
+            session.analysis_offer,
+            stale,
+            session.state,
+        );
         let mut core = core;
         core.set_header_title(title.clone());
         (
@@ -177,6 +188,7 @@ impl Application for SessionApp {
                 let title = window_title(
                     self.artifact.is_some(),
                     self.session.analysis_offer,
+                    self.is_stale(),
                     self.session.state,
                 );
                 if title != self.title || !self.title_pushed {
@@ -191,7 +203,8 @@ impl Application for SessionApp {
                 if self.artifact.is_none()
                     && (self.session.analysis_offer
                         || self.is_finished()
-                        || self.session.state == State::Saved)
+                        || self.session.state == State::Saved
+                        || self.is_stale())
                 {
                     self.artifact = load_artifact(&self.dir);
                     self.raw_present = self.dir.join("perf.data").is_file();
@@ -297,14 +310,25 @@ impl Application for SessionApp {
 
     fn view(&self) -> Element<'_, Self::Message> {
         // Pick the surface: a resolved trace shows results; a kept-but-un-analyzed clean run
-        // shows the ask; anything else is the live view.
+        // (or a stale run with perf.data still on disk) shows the ask; a stale run with
+        // nothing to analyze gets the plain stale view; anything else is the live view. The
+        // `is_stale()` check comes before the live fallback so a run stuck in a live state
+        // from a dead boot can NEVER fall through to `live_content` — that's the bug this
+        // surface selection exists to close (a crashed/killed game's window used to show
+        // "Recording" forever).
         let (content, buttons) = if let Some(a) = &self.artifact {
             (self.results_content(a), self.results_buttons())
         } else if self.session.analysis_offer || self.stale_unanalyzed() {
-            // The second arm is the trace library's analyze-on-demand: an old run
-            // whose ask was never answered (or whose analysis never happened) still
-            // deserves the same Analyze/Discard choice, as long as perf.data exists.
+            // The second arm covers two cases with the same Analyze/Discard choice, as
+            // long as perf.data exists: the trace library's analyze-on-demand (an old
+            // finished/Saved run whose ask was never answered or whose analysis never
+            // ran), and a stale run (crashed/killed mid-recording, `is_stale()`).
             (self.ask_content(), self.ask_buttons())
+        } else if self.is_stale() {
+            // Stale, but no perf.data survived to analyze (e.g. it crashed before the
+            // recorder wrote anything, or the trace was already discarded/resolved
+            // elsewhere) — not live, and nothing to ask about either.
+            (self.stale_content(), self.stale_buttons())
         } else {
             (self.live_content(), self.live_buttons())
         };
@@ -337,13 +361,24 @@ impl SessionApp {
         matches!(self.session.state, State::Done | State::Error)
     }
 
-    /// A finished run that was never analyzed but still has its raw trace: the
-    /// library's analyze-on-demand case (the wrapper only sets `analysis_offer` on a
-    /// kept clean exit; runs whose analysis failed or never ran end up here). A
-    /// "Stop & save" mid-game counts too — the recorder is stopped, so the trace is
-    /// as analyzable as it will ever be; the ask just keeps saying the game runs.
+    /// Live-state session from a boot that's gone — `RunEntry::is_stale`'s counterpart
+    /// via the `Session`-only entry point (this window has no scanned `RunEntry`).
+    /// A wrapper-spawned window is for a run started *this* boot (dir timestamp >=
+    /// btime), so a genuinely live window can't trip this — short of a forward clock
+    /// step larger than the run's age.
+    fn is_stale(&self) -> bool {
+        session::library::stale_session(
+            self.session.state,
+            session::library::run_started(&self.dir),
+        )
+    }
+
+    /// A settled run that was never analyzed but still has its raw trace — the
+    /// analyze-on-demand case. Settled = finished, Saved (recorder stopped, game
+    /// still up), or stale (crashed/killed game — without this arm such a run could
+    /// never be analyzed from this window).
     fn stale_unanalyzed(&self) -> bool {
-        let settled = self.is_finished() || self.session.state == State::Saved;
+        let settled = self.is_finished() || self.session.state == State::Saved || self.is_stale();
         settled && self.artifact.is_none() && self.raw_present
     }
 
@@ -525,19 +560,38 @@ impl SessionApp {
     // -- Surface 2: the ask --------------------------------------------------------------
 
     fn ask_content(&self) -> Element<'_, Msg> {
-        let title = if self.session.game.is_empty() {
-            "Clean run".to_string()
-        } else {
+        let stale = self.is_stale();
+        let title = if !self.session.game.is_empty() {
             self.session.game.clone()
+        } else if stale {
+            "Stale run".to_string()
+        } else {
+            "Clean run".to_string()
         };
         let mut col = widget::Column::new()
             .spacing(10)
             .push(widget::text::title3(title))
             .push(widget::text::body(
-                match (self.session.analysis_offer, self.session.state) {
-                    (true, _) => "Clean run — not analyzed yet",
-                    (false, State::Saved) => "Trace saved — the game is still running",
-                    _ => "Finished run — not analyzed yet",
+                // `stale` is checked first: a stale session still claims a live state
+                // (often Recording) that the tuple match below would otherwise read as
+                // "Trace saved — the game is still running" — which would be a lie, since
+                // nothing is actually running. MangoHud's CSV is flushed per frame, so
+                // whatever the recorder captured before the crash/kill is real, usable
+                // data — hence "survives", not "was lost".
+                if stale && self.session.state != State::Saved {
+                    "Stale run — the session never finished (game crashed, was killed, or the session file is damaged). \
+                     The recorder's data survives up to that point."
+                } else {
+                    match (self.session.analysis_offer, self.session.state) {
+                        (true, _) => "Clean run — not analyzed yet",
+                        // Stale Saved: the trace completed; only the game's exit
+                        // went unrecorded.
+                        (false, State::Saved) if stale => {
+                            "Trace saved — the game has since exited"
+                        }
+                        (false, State::Saved) => "Trace saved — the game is still running",
+                        _ => "Finished run — not analyzed yet",
+                    }
                 },
             ))
             .push(widget::text::caption(
@@ -599,6 +653,56 @@ impl SessionApp {
             .push(widget::Space::new().width(Length::Fill))
             .push(discard)
             .push(analyze)
+            .into()
+    }
+
+    // -- Surface 2b: a stale run with nothing left to analyze -----------------------------
+    //
+    // `is_stale()` true, but `raw_present` false (no perf.data survived — the game crashed
+    // before the recorder wrote anything, or the trace was already resolved/discarded some
+    // other way). Not the live view (nothing is live) and not the ask (nothing to
+    // analyze): a plain, honest "this never finished" surface — with the same delete
+    // door every settled surface offers, since there is nothing here worth keeping.
+
+    fn stale_content(&self) -> Element<'_, Msg> {
+        let title = if self.session.game.is_empty() {
+            "Stale run".to_string()
+        } else {
+            self.session.game.clone()
+        };
+        widget::Column::new()
+            .spacing(10)
+            .push(widget::text::title3(title))
+            .push(widget::text::body(if self.session.state == State::Saved {
+                "Saved run — the game is gone, and so is its trace data."
+            } else {
+                "Stale run — the session never finished (game crashed, was killed, or the \
+                 session file is damaged), and no trace data survived to analyze."
+            }))
+            .push(widget::text::caption(format!(
+                "Output: {}",
+                self.session.trace_dir
+            )))
+            .into()
+    }
+
+    fn stale_buttons(&self) -> Element<'_, Msg> {
+        // Same delete door as every settled surface — this one serves dirs with
+        // nothing analyzable, exactly the traces most worth throwing away.
+        if self.confirm_discard {
+            return widget::Row::new()
+                .spacing(8)
+                .push(widget::button::standard("Cancel").on_press(Msg::CancelDiscard))
+                .push(widget::button::destructive("Delete trace").on_press(Msg::ConfirmDiscard))
+                .push(widget::Space::new().width(Length::Fill))
+                .into();
+        }
+        widget::Row::new()
+            .spacing(8)
+            .push(widget::button::text("Open folder").on_press(Msg::OpenFolder))
+            .push(widget::button::destructive("Delete").on_press(Msg::Discard))
+            .push(widget::Space::new().width(Length::Fill))
+            .push(widget::button::suggested("Close").on_press(Msg::Close))
             .into()
     }
 

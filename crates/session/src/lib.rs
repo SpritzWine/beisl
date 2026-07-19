@@ -136,23 +136,16 @@ pub mod library {
 
         /// Whether the session state is one where the recorder or the game itself
         /// *could* still own the directory — the shared predicate behind both
-        /// `is_live_at` and `is_stale_at` below. `Starting..=Stopping` and `Saved`
-        /// (its own doc comment: the game is STILL RUNNING even though the recorder
-        /// finished) all mean *something* live has a hand in the dir; only
-        /// `Done`/`Error` are settled. `session: None` means an old dir with a
-        /// missing/corrupt `session.json` — the wrapper writes that file at launch, so
-        /// an unreadable one is a damaged relic of a run that's long over.
+        /// `is_live_at` and `is_stale_at` below. `session: None` means an old dir with
+        /// a missing/corrupt `session.json` — the wrapper writes that file at launch,
+        /// so an unreadable one is a damaged relic of a run that's long over. The
+        /// state-match itself lives in the free function `is_live_state` (see there),
+        /// shared with `stale_session_at` for callers that only have a `Session`, not
+        /// a scanned `RunEntry`.
         fn live_state(&self) -> bool {
-            matches!(
-                self.session.as_ref().map(|s| s.state),
-                Some(
-                    super::State::Starting
-                        | super::State::Running
-                        | super::State::Recording
-                        | super::State::Stopping
-                        | super::State::Saved
-                )
-            )
+            self.session
+                .as_ref()
+                .is_some_and(|s| is_live_state(s.state))
         }
 
         /// Whether the recorder or the game itself might still own this run's directory.
@@ -194,17 +187,62 @@ pub mod library {
             self.live_state() && !self.is_stale_at(boot)
         }
 
-        /// Core of `is_stale`, boot time injectable. Two conservative edges, each
-        /// favoring "protect the data" over "reclaim the row": boot time unknown ->
-        /// nothing is stale (a false "live" only keeps a row around a little longer; a
-        /// false "stale" could let someone delete an in-progress recording). An
-        /// unparseable dir name (`started == 0`) -> not stale either, for the same
-        /// reason — an unknown age is never treated as an old one. Settled states
-        /// (`Done`/`Error`) are excluded by `live_state()` itself: settled is settled,
-        /// not "stale".
+        /// Core of `is_stale`, boot time injectable. Delegates the state-match +
+        /// pre-boot check to `stale_session_at` (shared with the standalone
+        /// `stale_session`/`stale_session_at` below) — `session: None` short-circuits
+        /// via `live_state`-style `is_some_and` so a damaged/missing session file is
+        /// never "stale" (it's just not live).
         pub(crate) fn is_stale_at(&self, boot: Option<u64>) -> bool {
-            self.live_state() && self.started > 0 && boot.is_some_and(|b| self.started < b)
+            self.session
+                .as_ref()
+                .is_some_and(|s| stale_session_at(s.state, self.started, boot))
         }
+    }
+
+    /// Whether a session state is one where the recorder or the game itself *could*
+    /// still own the run directory: `Starting..=Stopping`, and `Saved` (its own doc
+    /// comment: the game is STILL RUNNING even though the recorder finished). Only
+    /// `Done`/`Error` are settled. The shared state-match behind `RunEntry::live_state`
+    /// and `stale_session_at` — kept as one function so the two can never drift apart.
+    fn is_live_state(state: super::State) -> bool {
+        matches!(
+            state,
+            super::State::Starting
+                | super::State::Running
+                | super::State::Recording
+                | super::State::Stopping
+                | super::State::Saved
+        )
+    }
+
+    /// Core of `stale_session`, boot time injectable — same pattern as
+    /// `RunEntry::is_stale_at`, and in fact the function it now delegates to. Two
+    /// conservative edges, each favoring "protect the data" over "reclaim the row":
+    /// boot time unknown -> nothing is stale (a false "live" only keeps a row around a
+    /// little longer; a false "stale" could let someone delete/hide an in-progress
+    /// recording). An unparseable/zero `started` -> not stale either, for the same
+    /// reason — an unknown age is never treated as an old one. Settled states
+    /// (`Done`/`Error`) are excluded by `is_live_state` itself: settled is settled,
+    /// not "stale".
+    pub(crate) fn stale_session_at(state: super::State, started: u64, boot: Option<u64>) -> bool {
+        is_live_state(state) && started > 0 && boot.is_some_and(|b| started < b)
+    }
+
+    /// Whether a live-state session (`state`, with the run's launch time `started` —
+    /// see `run_started`) is actually stuck: it started before the current boot, so
+    /// whatever process was recording it died with that boot without ever writing
+    /// `Done`/`Error`/`Saved`->done. The `Session`+`started`-only entry point for
+    /// callers that don't have a scanned `RunEntry` — the session window watches its
+    /// *own* live `session.json` directly, not a `library::scan` result. Same core
+    /// (`is_live_state` + the real boot time) as `RunEntry::is_stale`, so the two can
+    /// never disagree about the same run.
+    ///
+    /// A genuinely live window is never misclassified: the wrapper only spawns the
+    /// session window for a run it just started *this* boot, so `started >=
+    /// boot_time()` always holds for it and this returns `false`. Only a run stuck
+    /// from a *previous* boot ever trips it.
+    pub fn stale_session(state: super::State, started: u64) -> bool {
+        stale_session_at(state, started, boot_time())
     }
 
     /// The kernel's boot time (unix epoch seconds), from `/proc/stat`'s `btime` line.
@@ -217,6 +255,19 @@ pub mod library {
             .lines()
             .find_map(|l| l.strip_prefix("btime "))
             .and_then(|v| v.trim().parse().ok())
+    }
+
+    /// Parse a run dir's `run-<unix_ts>` name into its launch timestamp — `0` when
+    /// unparseable (no `run-` prefix, non-numeric suffix, or no file name at all),
+    /// mirroring `scan`'s own fallback for a stray dir name. `scan` uses this so the
+    /// parse exists in exactly one place; the session window uses it too, to test its
+    /// own run dir against `stale_session` without re-deriving the timestamp.
+    pub fn run_started(dir: &Path) -> u64 {
+        dir.file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_prefix("run-"))
+            .and_then(|ts| ts.parse().ok())
+            .unwrap_or(0)
     }
 
     /// `$XDG_DATA_HOME/beisl` (falls back to `~/.local/share/beisl`) — the same
@@ -248,13 +299,15 @@ pub mod library {
             .flatten()
             .filter_map(|e| {
                 let id = e.file_name().to_str()?.to_string();
-                let ts = id.strip_prefix("run-")?.to_string();
+                if !id.starts_with("run-") {
+                    return None;
+                }
                 if !e.file_type().ok()?.is_dir() {
                     return None;
                 }
                 let dir = e.path();
                 Some(RunEntry {
-                    started: ts.parse().unwrap_or(0),
+                    started: run_started(&dir),
                     session: Session::read(&dir),
                     has_artifact: dir.join(ARTIFACT_FILE).is_file(),
                     has_report: dir.join(REPORT_FILE).is_file(),
@@ -525,6 +578,71 @@ mod tests {
                 "{state:?} is settled, not live"
             );
         }
+    }
+
+    // -- library::stale_session_at (the Session+started-only entry point) ---------------
+    //
+    // Mirrors the `is_stale_at`/`is_live_at` core tests above one-for-one: both now
+    // delegate to this same function, so a regression here is a regression there too.
+
+    #[test]
+    fn stale_session_at_flags_a_live_state_started_before_the_injected_boot() {
+        assert!(library::stale_session_at(State::Recording, 100, Some(200)));
+    }
+
+    #[test]
+    fn stale_session_at_is_false_for_a_live_state_started_after_the_injected_boot() {
+        assert!(!library::stale_session_at(State::Recording, 300, Some(200)));
+    }
+
+    #[test]
+    fn stale_session_at_is_false_when_boot_time_is_unknown() {
+        // Same conservative edge as is_stale_at: an unknown boot time must never
+        // manufacture a false "stale".
+        assert!(!library::stale_session_at(State::Recording, 100, None));
+    }
+
+    #[test]
+    fn stale_session_at_is_false_for_an_unparseable_started() {
+        // started == 0 (an unparseable run-* timestamp, via run_started) means an
+        // unknown age, not an old one.
+        assert!(!library::stale_session_at(State::Recording, 0, Some(200)));
+    }
+
+    #[test]
+    fn stale_session_at_never_flags_settled_states() {
+        for state in [State::Done, State::Error] {
+            assert!(
+                !library::stale_session_at(state, 100, Some(200)),
+                "{state:?} must never be stale"
+            );
+        }
+    }
+
+    // -- library::run_started ------------------------------------------------------------
+
+    #[test]
+    fn run_started_parses_the_dir_name_timestamp() {
+        assert_eq!(
+            library::run_started(std::path::Path::new("/traces/run-12345")),
+            12345
+        );
+    }
+
+    #[test]
+    fn run_started_is_zero_for_a_non_run_dir_name() {
+        assert_eq!(
+            library::run_started(std::path::Path::new("/traces/exports")),
+            0
+        );
+    }
+
+    #[test]
+    fn run_started_is_zero_for_a_garbage_timestamp() {
+        assert_eq!(
+            library::run_started(std::path::Path::new("/traces/run-not-a-number")),
+            0
+        );
     }
 
     #[test]

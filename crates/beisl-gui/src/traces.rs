@@ -113,12 +113,13 @@ fn resolve_deletable(entries: &[RunEntry], ids: &HashSet<String>) -> Vec<std::pa
 /// live row never reads like a finished one (e.g. a Recording run must not say "not
 /// analyzed" while its checkbox is inert and its Delete button hidden, with nothing
 /// explaining why). Settled runs (`Done`/`Error`) fall back to the analysis-state word;
-/// a stale run's checkbox/Delete now behave like a settled one too (`is_live()`
-/// excludes stale runs), so a stale run without an artifact is selectable via the
-/// Unanalyzed helper below — its perf.data may still be analyzable, so that's desired,
-/// even though its caption always reads "stale — never finished", not "not analyzed".
+/// a stale run's checkbox/Delete behave like a settled one's (`is_live()` excludes
+/// stale runs), so the Unanalyzed helper picks it up — its perf.data may still be
+/// analyzable.
 fn state_word(run: &RunEntry) -> &'static str {
-    if run.is_stale() {
+    // Stale Saved is the exception: its trace completed (stop & save), only the
+    // game's exit went unrecorded — let it read like any settled run.
+    if run.is_stale() && run.session.as_ref().map(|s| s.state) != Some(session::State::Saved) {
         return "stale — never finished";
     }
     if run.is_live() {
@@ -705,10 +706,9 @@ mod tests {
             state_word(&stale_run("r", session::State::Recording, false)),
             "stale — never finished"
         );
-        // Also checked ahead of Saved's own special-cased wording.
-        assert_eq!(
-            state_word(&stale_run("r", session::State::Saved, false)),
-            "stale — never finished"
-        );
+        // Stale Saved is different: the trace completed, so it reads settled.
+        let mut saved = stale_run("r", session::State::Saved, false);
+        saved.session.as_mut().unwrap().elapsed_secs = 42;
+        assert_eq!(state_word(&saved), "not analyzed");
     }
 }
