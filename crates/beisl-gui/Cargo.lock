@@ -264,6 +264,9 @@ dependencies = [
  "serde_repr",
  "tokio",
  "url",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
  "zbus",
 ]
 
@@ -894,6 +897,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cosmic-client-toolkit"
+version = "0.2.0"
+source = "git+https://github.com/pop-os/cosmic-protocols?rev=32283d7#32283d76a8d0342da74c4cc022a533c52dcf378f"
+dependencies = [
+ "bitflags 2.13.1",
+ "cosmic-protocols",
+ "libc",
+ "smithay-client-toolkit",
+ "wayland-client",
+ "wayland-protocols",
+]
+
+[[package]]
 name = "cosmic-config"
 version = "1.0.0"
 source = "git+https://github.com/pop-os/libcosmic.git?rev=0eef591171c6c449b99fe0966571cd3ea3507919#0eef591171c6c449b99fe0966571cd3ea3507919"
@@ -931,10 +947,24 @@ dependencies = [
  "bstr",
  "btoi",
  "memchr",
- "memmap2",
+ "memmap2 0.9.11",
  "thiserror 2.0.19",
  "tracing",
  "xdg",
+]
+
+[[package]]
+name = "cosmic-protocols"
+version = "0.2.0"
+source = "git+https://github.com/pop-os/cosmic-protocols?rev=32283d7#32283d76a8d0342da74c4cc022a533c52dcf378f"
+dependencies = [
+ "bitflags 2.13.1",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-wlr",
+ "wayland-scanner",
+ "wayland-server",
 ]
 
 [[package]]
@@ -1561,7 +1591,7 @@ checksum = "457e789b3d1202543297a350643cf459f836cade38934e7a4cf6a39e7cde2905"
 dependencies = [
  "fontconfig-parser",
  "log",
- "memmap2",
+ "memmap2 0.9.11",
  "slotmap",
  "tinyvec",
  "ttf-parser",
@@ -2056,6 +2086,7 @@ dependencies = [
  "bitflags 2.13.1",
  "build_helpers",
  "bytes",
+ "cosmic-client-toolkit",
  "dnd",
  "glam",
  "lilt",
@@ -2146,6 +2177,7 @@ source = "git+https://github.com/pop-os/libcosmic.git?rev=0eef591171c6c449b99fe0
 dependencies = [
  "build_helpers",
  "bytes",
+ "cosmic-client-toolkit",
  "dnd",
  "iced_core",
  "iced_futures",
@@ -2180,6 +2212,7 @@ dependencies = [
  "bitflags 2.13.1",
  "build_helpers",
  "bytemuck",
+ "cosmic-client-toolkit",
  "cryoglyph",
  "futures",
  "glam",
@@ -2208,6 +2241,7 @@ version = "0.14.2"
 source = "git+https://github.com/pop-os/libcosmic.git?rev=0eef591171c6c449b99fe0966571cd3ea3507919#0eef591171c6c449b99fe0966571cd3ea3507919"
 dependencies = [
  "build_helpers",
+ "cosmic-client-toolkit",
  "dnd",
  "iced_renderer",
  "iced_runtime",
@@ -2226,6 +2260,7 @@ version = "0.14.0"
 source = "git+https://github.com/pop-os/libcosmic.git?rev=0eef591171c6c449b99fe0966571cd3ea3507919#0eef591171c6c449b99fe0966571cd3ea3507919"
 dependencies = [
  "build_helpers",
+ "cosmic-client-toolkit",
  "cursor-icon",
  "dnd",
  "iced_debug",
@@ -2234,16 +2269,22 @@ dependencies = [
  "iced_program",
  "iced_runtime",
  "log",
+ "raw-window-handle",
  "rustc-hash 2.1.3",
  "rustix 0.38.44",
  "thiserror 2.0.19",
  "wasm-bindgen-futures",
+ "wayland-backend",
  "wayland-client",
+ "wayland-protocols",
  "web-sys",
  "winapi",
  "window_clipboard",
  "winit",
  "winit-core",
+ "xkbcommon 0.7.0",
+ "xkbcommon-dl",
+ "xkeysym",
 ]
 
 [[package]]
@@ -2674,6 +2715,7 @@ dependencies = [
  "ashpd 0.12.3",
  "auto_enums",
  "build_helpers",
+ "cosmic-client-toolkit",
  "cosmic-config",
  "cosmic-freedesktop-icons",
  "cosmic-settings-daemon",
@@ -2872,6 +2914,15 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "memmap2"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43a5a03cefb0d953ec0be133036f14e109412fa594edc2f77227249db66cc3ed"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "memmap2"
@@ -4147,7 +4198,7 @@ checksum = "1dd3accc0f3f4bbaf2c9e1957a030dc582028130c67660d44c0a0345a22ca69b"
 dependencies = [
  "ab_glyph",
  "log",
- "memmap2",
+ "memmap2 0.9.11",
  "smithay-client-toolkit",
  "tiny-skia",
 ]
@@ -4348,12 +4399,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0512da38f5e2b31201a93524adb8d3136276fa4fe4aafab4e1f727a82b534cc0"
 dependencies = [
  "bitflags 2.13.1",
+ "bytemuck",
  "calloop",
  "calloop-wayland-source",
  "cursor-icon",
  "libc",
  "log",
- "memmap2",
+ "memmap2 0.9.11",
+ "pkg-config",
  "rustix 1.1.4",
  "thiserror 2.0.19",
  "wayland-backend",
@@ -4365,6 +4418,7 @@ dependencies = [
  "wayland-protocols-misc",
  "wayland-protocols-wlr",
  "wayland-scanner",
+ "xkbcommon 0.8.0",
  "xkeysym",
 ]
 
@@ -4414,7 +4468,7 @@ dependencies = [
  "foreign-types",
  "js-sys",
  "log",
- "memmap2",
+ "memmap2 0.9.11",
  "objc",
  "raw-window-handle",
  "redox_syscall 0.5.18",
@@ -5184,6 +5238,7 @@ dependencies = [
  "wayland-backend",
  "wayland-client",
  "wayland-scanner",
+ "wayland-server",
 ]
 
 [[package]]
@@ -5236,6 +5291,7 @@ dependencies = [
  "wayland-client",
  "wayland-protocols",
  "wayland-scanner",
+ "wayland-server",
 ]
 
 [[package]]
@@ -5247,6 +5303,19 @@ dependencies = [
  "proc-macro2",
  "quick-xml",
  "quote",
+]
+
+[[package]]
+name = "wayland-server"
+version = "0.31.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc1846eb04c49182e04f4a099e2a830a2b745610bbc1d61246e206f29c7000a0"
+dependencies = [
+ "bitflags 2.13.1",
+ "downcast-rs",
+ "rustix 1.1.4",
+ "wayland-backend",
+ "wayland-scanner",
 ]
 
 [[package]]
@@ -5981,7 +6050,7 @@ name = "winit-common"
 version = "0.31.0-beta.2"
 source = "git+https://github.com/pop-os/winit.git?tag=cosmic-0.14#71ce08c043814514a8fd92d9d0599f115ae854e8"
 dependencies = [
- "memmap2",
+ "memmap2 0.9.11",
  "objc2 0.6.4",
  "objc2-core-foundation",
  "smol_str",
@@ -6052,7 +6121,7 @@ dependencies = [
  "cursor-icon",
  "dpi",
  "libc",
- "memmap2",
+ "memmap2 0.9.11",
  "raw-window-handle",
  "rustix 1.1.4",
  "sctk-adwaita",
@@ -6204,6 +6273,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2fb433233f2df9344722454bc7e96465c9d03bff9d77c248f9e7523fe79585b5"
 
 [[package]]
+name = "xkbcommon"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13867d259930edc7091a6c41b4ce6eee464328c6ff9659b7e4c668ca20d4c91e"
+dependencies = [
+ "libc",
+ "memmap2 0.8.0",
+ "xkeysym",
+]
+
+[[package]]
+name = "xkbcommon"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d66ca9352cbd4eecbbc40871d8a11b4ac8107cfc528a6e14d7c19c69d0e1ac9"
+dependencies = [
+ "libc",
+ "memmap2 0.9.11",
+ "xkeysym",
+]
+
+[[package]]
 name = "xkbcommon-dl"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6221,6 +6312,9 @@ name = "xkeysym"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
+dependencies = [
+ "bytemuck",
+]
 
 [[package]]
 name = "xml-rs"

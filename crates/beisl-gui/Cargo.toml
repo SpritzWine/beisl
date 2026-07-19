@@ -39,7 +39,10 @@ git = "https://github.com/pop-os/libcosmic.git"
 # SpritzWine installer's.
 rev = "0eef591171c6c449b99fe0966571cd3ea3507919"
 default-features = false
-features = ["dbus-config", "tokio", "winit", "wgpu"]
+# "wayland" compiles iced-winit's Wayland layer incl. the ext-background-effect
+# handler — without it Frosted Glass can't render on ANY compositor (found 2026-07-19:
+# distro COSMIC apps frosted under KWin while beisl-setup stayed opaque).
+features = ["dbus-config", "tokio", "winit", "wgpu", "wayland"]
 
 # Own workspace root -> own Cargo.lock, kept out of the main Beisl lockfile.
 [workspace]
