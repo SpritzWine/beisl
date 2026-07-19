@@ -434,9 +434,13 @@ impl TracesTab {
         widget::Column::new()
             .spacing(14)
             .push(
-                widget::scrollable(content)
-                    .width(Length::Fill)
-                    .height(Length::Fill),
+                // A little right padding inside the scroll region keeps the row
+                // buttons off the scrollbar (same treatment as the checklist).
+                widget::scrollable(
+                    widget::container(content).padding(cosmic::iced::Padding::from([0, 14, 0, 0])),
+                )
+                .width(Length::Fill)
+                .height(Length::Fill),
             )
             .push(footer)
             .into()
