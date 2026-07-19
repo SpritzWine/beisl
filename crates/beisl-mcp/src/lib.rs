@@ -139,6 +139,12 @@ impl Server {
         }
     }
 
+    /// "Which runs are stuck?" (Florian, 2026-07-19, working this machine's actual
+    /// traces root: 5 runs sat in live session states — Recording/Saved — from before
+    /// the current boot, and this tool had no way to say so) was unanswerable over
+    /// MCP before `state`/`stale` existed here: an AI client could see `analyzed`
+    /// but not the session state a stuck run was left in, nor tell a genuinely live
+    /// run from one whose wrapper died with a previous boot.
     fn list_traces(&self) -> String {
         let runs: Vec<Value> = library::scan(&self.traces_root)
             .iter()
@@ -150,6 +156,12 @@ impl Server {
                     "elapsed_secs": r.session.as_ref().map(|s| s.elapsed_secs),
                     "analyzed": r.has_artifact,
                     "has_report": r.has_report,
+                    // `None` (-> JSON null) mirrors the crate's existing optional-field
+                    // idiom (see elapsed_secs above): missing/corrupt session.json.
+                    // Serialized via serde, not Debug: the API vocabulary must stay
+                    // structurally identical to what session.json itself contains.
+                    "state": r.session.as_ref().map(|s| serde_json::json!(s.state)),
+                    "stale": r.is_stale(),
                 })
             })
             .collect();
@@ -280,7 +292,8 @@ impl Server {
         Ok(json!({
             "run_id": id,
             "game": session.as_ref().map(|s| s.game.clone()),
-            "state": session.as_ref().map(|s| format!("{:?}", s.state)),
+            // Serde, not Debug — same session.json-vocabulary rule as list_traces.
+            "state": session.as_ref().map(|s| serde_json::json!(s.state)),
             "message": session.as_ref().map(|s| s.message.clone()),
             "elapsed_secs": session.as_ref().map(|s| s.elapsed_secs),
             "warnings": session.as_ref().map(|s| s.warnings.clone()),
@@ -347,8 +360,11 @@ fn tools_list() -> Value {
         {
             "name": "list_traces",
             "description": "List all recorded game-performance runs, newest first: run_id, \
-                            game, start time, duration, and whether an analysis artifact \
-                            exists.",
+                            game, start time, duration, whether an analysis artifact \
+                            exists, the session state, and whether the run is stale \
+                            (a live-looking state left over from before the current \
+                            boot — nothing can still own it, so it's a stuck run, not \
+                            an active one).",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         },
         {
@@ -580,6 +596,42 @@ mod tests {
                    "params":{"name":"get_artifact","arguments":{"run_id":"run-200"}}}),
         );
         assert_eq!(resp["result"]["isError"], true);
+    }
+
+    #[test]
+    fn list_traces_reports_session_state_and_staleness() {
+        // The real motivating case (2026-07-19): "which runs are stuck?" was
+        // unanswerable over MCP — list_traces had `analyzed` but nothing about the
+        // session state a stuck run was left in, nor a way to tell a genuinely live
+        // run from one whose wrapper died with a previous boot.
+        let root = fixture_root("state");
+        // put_run's Session defaults to State::Starting (a live state) with a
+        // `started` — from the run-* dir name — of 100: always long before this
+        // (or any) real machine's boot time, so this run is stale.
+        put_run(&root, "run-100", false);
+        // A missing/corrupt session.json: state is null, the crate's existing
+        // optional-field idiom (see elapsed_secs/game above) rather than a
+        // made-up state — and never live, so never stale either.
+        std::fs::create_dir_all(root.join("run-900")).unwrap();
+
+        let server = Server::new(root);
+        let resp = call(
+            &server,
+            json!({"jsonrpc":"2.0","id":11,"method":"tools/call",
+                   "params":{"name":"list_traces","arguments":{}}}),
+        );
+        assert_eq!(resp["result"]["isError"], false);
+        let listing: Value =
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let traces = listing["traces"].as_array().unwrap();
+
+        let run_100 = traces.iter().find(|t| t["run_id"] == "run-100").unwrap();
+        assert_eq!(run_100["state"], "Starting");
+        assert_eq!(run_100["stale"], true);
+
+        let run_900 = traces.iter().find(|t| t["run_id"] == "run-900").unwrap();
+        assert!(run_900["state"].is_null());
+        assert_eq!(run_900["stale"], false);
     }
 
     #[test]

@@ -134,20 +134,15 @@ pub mod library {
             }
         }
 
-        /// Whether the recorder or the game itself might still own this run's directory.
-        /// `delete_run` itself stays policy-free — it only ever checks containment (a
-        /// run-* dir directly under the root) — because the session window's own
-        /// single-run Discard legitimately removes a `Saved` run's dir while the game is
-        /// still up (that IS its "stop capturing this session" flow). It's the CALLER —
-        /// any bulk or list surface that presents "you can delete this" as a standing
-        /// option, like the traces library page — that must gate its own selection/delete
-        /// UI on this. `Starting..=Stopping` and `Saved` (its own doc comment: the game is
-        /// STILL RUNNING even though the recorder finished) all mean *something* live has
-        /// a hand in the dir; only `Done`/`Error` are settled. `session: None` means an old
-        /// dir with a missing/corrupt `session.json` — the wrapper writes that file at
-        /// launch, so an unreadable one is a damaged relic of a run that's long over, not a
-        /// live one, and must not be treated as undeletable.
-        pub fn is_live(&self) -> bool {
+        /// Whether the session state is one where the recorder or the game itself
+        /// *could* still own the directory — the shared predicate behind both
+        /// `is_live_at` and `is_stale_at` below. `Starting..=Stopping` and `Saved`
+        /// (its own doc comment: the game is STILL RUNNING even though the recorder
+        /// finished) all mean *something* live has a hand in the dir; only
+        /// `Done`/`Error` are settled. `session: None` means an old dir with a
+        /// missing/corrupt `session.json` — the wrapper writes that file at launch, so
+        /// an unreadable one is a damaged relic of a run that's long over.
+        fn live_state(&self) -> bool {
             matches!(
                 self.session.as_ref().map(|s| s.state),
                 Some(
@@ -159,6 +154,69 @@ pub mod library {
                 )
             )
         }
+
+        /// Whether the recorder or the game itself might still own this run's directory.
+        /// `delete_run` itself stays policy-free — it only ever checks containment (a
+        /// run-* dir directly under the root) — because the session window's own
+        /// single-run Discard legitimately removes a `Saved` run's dir while the game is
+        /// still up (that IS its "stop capturing this session" flow). It's the CALLER —
+        /// any bulk or list surface that presents "you can delete this" as a standing
+        /// option, like the traces library page — that must gate its own selection/delete
+        /// UI on this.
+        ///
+        /// A run whose session is stuck in a live state but which started before the
+        /// current boot is excluded (see `is_stale`) — nothing can still own a
+        /// directory from a boot that's gone, and treating it as live would caption it
+        /// "recording" forever.
+        pub fn is_live(&self) -> bool {
+            self.is_live_at(boot_time())
+        }
+
+        /// A live-state session that cannot actually be live: it started before the
+        /// current boot, so whatever wrapper process was recording it died with that
+        /// boot, without ever writing `Done`/`Error`/`Saved`->done. Real data, 2026-07-19:
+        /// 5 runs on this machine sat in `Recording`/`Saved` from a previous boot —
+        /// `is_live`'s new gating would otherwise protect them from deletion and
+        /// caption them "recording" forever.
+        ///
+        /// The converse isn't detected: a wrapper that dies within the *current*
+        /// boot leaves its run wrongly-live until the next reboot — that would
+        /// need a pid liveness probe (wrapper pid in session.json + /proc check),
+        /// a separate mechanism for a much rarer window.
+        pub fn is_stale(&self) -> bool {
+            self.is_stale_at(boot_time())
+        }
+
+        /// Core of `is_live`, boot time injectable — same pattern as
+        /// `artifact::frames_from_csv_gated` — so tests don't depend on the real
+        /// kernel clock.
+        pub(crate) fn is_live_at(&self, boot: Option<u64>) -> bool {
+            self.live_state() && !self.is_stale_at(boot)
+        }
+
+        /// Core of `is_stale`, boot time injectable. Two conservative edges, each
+        /// favoring "protect the data" over "reclaim the row": boot time unknown ->
+        /// nothing is stale (a false "live" only keeps a row around a little longer; a
+        /// false "stale" could let someone delete an in-progress recording). An
+        /// unparseable dir name (`started == 0`) -> not stale either, for the same
+        /// reason — an unknown age is never treated as an old one. Settled states
+        /// (`Done`/`Error`) are excluded by `live_state()` itself: settled is settled,
+        /// not "stale".
+        pub(crate) fn is_stale_at(&self, boot: Option<u64>) -> bool {
+            self.live_state() && self.started > 0 && boot.is_some_and(|b| self.started < b)
+        }
+    }
+
+    /// The kernel's boot time (unix epoch seconds), from `/proc/stat`'s `btime` line.
+    /// Linux-only, which is fine — beisl only runs on Linux. `None` on any failure
+    /// (missing/unreadable file, no `btime` line, unparseable value): the caller's
+    /// fallback is "boot time unknown", never a guess.
+    fn boot_time() -> Option<u64> {
+        std::fs::read_to_string("/proc/stat")
+            .ok()?
+            .lines()
+            .find_map(|l| l.strip_prefix("btime "))
+            .and_then(|v| v.trim().parse().ok())
     }
 
     /// `$XDG_DATA_HOME/beisl` (falls back to `~/.local/share/beisl`) — the same
@@ -341,6 +399,11 @@ mod tests {
         assert!(library::scan(&root).is_empty());
     }
 
+    /// Far beyond any real machine's boot time (year ~2100) — a `started` this large
+    /// is always post-boot, so a live-state fixture built on it is genuinely live
+    /// (not stale) regardless of which machine runs the test.
+    const FAR_FUTURE: u64 = 4_102_444_800;
+
     #[test]
     fn is_live_covers_recorder_and_game_owned_states() {
         let live = [
@@ -354,7 +417,7 @@ mod tests {
             let entry = library::RunEntry {
                 dir: PathBuf::new(),
                 id: "run-1".into(),
-                started: 1,
+                started: FAR_FUTURE,
                 session: Some(Session {
                     state,
                     ..Default::default()
@@ -390,6 +453,78 @@ mod tests {
             has_report: false,
         };
         assert!(!entry.is_live());
+    }
+
+    /// A live-state entry with the given `started`, for the `is_stale_at`/`is_live_at`
+    /// core tests below (boot injected, so these never touch the real kernel clock).
+    fn live_entry(state: State, started: u64) -> library::RunEntry {
+        library::RunEntry {
+            dir: PathBuf::new(),
+            id: "run-1".into(),
+            started,
+            session: Some(Session {
+                state,
+                ..Default::default()
+            }),
+            has_artifact: false,
+            has_report: false,
+        }
+    }
+
+    #[test]
+    fn stale_at_flags_a_live_state_started_before_the_injected_boot() {
+        let entry = live_entry(State::Recording, 100);
+        assert!(
+            entry.is_stale_at(Some(200)),
+            "pre-boot start should be stale"
+        );
+        assert!(!entry.is_live_at(Some(200)), "stale excludes live");
+    }
+
+    #[test]
+    fn stale_at_is_false_for_a_live_state_started_after_the_injected_boot() {
+        let entry = live_entry(State::Recording, 300);
+        assert!(
+            !entry.is_stale_at(Some(200)),
+            "post-boot start is not stale"
+        );
+        assert!(entry.is_live_at(Some(200)), "post-boot start is live");
+    }
+
+    #[test]
+    fn stale_at_is_false_when_boot_time_is_unknown() {
+        // Conservative edge: an unknown boot time must never manufacture a false
+        // "stale" that would let someone delete a still-recording run. Even a
+        // started value that would be stale under any known boot stays live here.
+        let entry = live_entry(State::Recording, 100);
+        assert!(!entry.is_stale_at(None));
+        assert!(entry.is_live_at(None));
+    }
+
+    #[test]
+    fn stale_at_is_false_for_an_unparseable_dir_name() {
+        // Conservative edge: started == 0 (an unparseable `run-*` timestamp) means an
+        // unknown age, not an old one.
+        let entry = live_entry(State::Recording, 0);
+        assert!(!entry.is_stale_at(Some(200)));
+        assert!(entry.is_live_at(Some(200)));
+    }
+
+    #[test]
+    fn stale_at_never_flags_settled_states() {
+        // Settled is settled, not "stale" — even with a started time that would be
+        // stale for any live state.
+        for state in [State::Done, State::Error] {
+            let entry = live_entry(state, 100);
+            assert!(
+                !entry.is_stale_at(Some(200)),
+                "{state:?} must never be stale"
+            );
+            assert!(
+                !entry.is_live_at(Some(200)),
+                "{state:?} is settled, not live"
+            );
+        }
     }
 
     #[test]

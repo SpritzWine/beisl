@@ -105,12 +105,22 @@ fn resolve_deletable(entries: &[RunEntry], ids: &HashSet<String>) -> Vec<std::pa
         .collect()
 }
 
-/// The row caption's state word. Live states are named honestly — Starting/Running/
-/// Recording/Stopping, or Saved's own "still running" — so a live row never reads like
-/// a finished one (e.g. a Recording run must not say "not analyzed" while its checkbox
-/// is inert and its Delete button hidden, with nothing explaining why). Settled runs
-/// (`Done`/`Error`) fall back to the analysis-state word.
+/// The row caption's state word. A stale run (session claims a live state, but it
+/// started before the current boot — see `RunEntry::is_stale`: nothing can still own
+/// that directory) is checked FIRST, so it reads honestly as never having finished
+/// rather than "recording"/"in use" forever. Genuinely live states are named honestly
+/// too — Starting/Running/Recording/Stopping, or Saved's own "still running" — so a
+/// live row never reads like a finished one (e.g. a Recording run must not say "not
+/// analyzed" while its checkbox is inert and its Delete button hidden, with nothing
+/// explaining why). Settled runs (`Done`/`Error`) fall back to the analysis-state word;
+/// a stale run's checkbox/Delete now behave like a settled one too (`is_live()`
+/// excludes stale runs), so a stale run without an artifact is selectable via the
+/// Unanalyzed helper below — its perf.data may still be analyzable, so that's desired,
+/// even though its caption always reads "stale — never finished", not "not analyzed".
 fn state_word(run: &RunEntry) -> &'static str {
+    if run.is_stale() {
+        return "stale — never finished";
+    }
     if run.is_live() {
         return match run.session.as_ref().map(|s| s.state) {
             Some(session::State::Starting) => "starting",
@@ -485,7 +495,32 @@ mod tests {
 
     // -- selection helpers ---------------------------------------------------------------
 
+    /// `is_live`/`is_stale` now consult the real boot time (`session::library::
+    /// boot_time`, unreachable from here — it's crate-private to `session`), so a
+    /// fixture's `started` has to be picked deliberately instead of an arbitrary `1`:
+    /// far enough in the future that it's post-boot on any machine these tests run
+    /// on, so a "live" fixture is genuinely live, never accidentally stale.
+    const FAR_FUTURE: u64 = 4_102_444_800; // 2100-01-01 UTC
+
     fn run(id: &str, state: session::State, has_artifact: bool) -> RunEntry {
+        RunEntry {
+            dir: PathBuf::from(id),
+            id: id.to_string(),
+            started: FAR_FUTURE,
+            session: Some(Session {
+                state,
+                ..Default::default()
+            }),
+            has_artifact,
+            has_report: false,
+        }
+    }
+
+    /// A run whose session claims a live state but started at the epoch's first
+    /// second — always pre-boot on a real machine (the kernel's `btime` is never
+    /// `1`), so this is deterministically stale on any machine these tests run on,
+    /// without needing to inject a fake boot time.
+    fn stale_run(id: &str, state: session::State, has_artifact: bool) -> RunEntry {
         RunEntry {
             dir: PathBuf::from(id),
             id: id.to_string(),
@@ -541,6 +576,18 @@ mod tests {
         let mut analyzed = HashSet::new();
         select_by_rule(&runs, SelectRule::Analyzed, &mut analyzed);
         assert_eq!(analyzed, HashSet::from(["run-2".to_string()]));
+    }
+
+    #[test]
+    fn select_unanalyzed_includes_a_stale_recording_run() {
+        // `is_live()` now excludes stale runs (RunEntry::is_stale), so a Recording run
+        // stuck since a previous boot passes the Unanalyzed rule same as any settled,
+        // un-analyzed run — its perf.data may still be analyzable, so that's desired,
+        // not a bug the staleness work should have introduced.
+        let runs = [stale_run("run-1", session::State::Recording, false)];
+        let mut selected = HashSet::new();
+        select_by_rule(&runs, SelectRule::Unanalyzed, &mut selected);
+        assert_eq!(selected, HashSet::from(["run-1".to_string()]));
     }
 
     #[test]
@@ -643,5 +690,21 @@ mod tests {
         let mut not_analyzed = run("r", session::State::Done, false);
         not_analyzed.session.as_mut().unwrap().elapsed_secs = 42;
         assert_eq!(state_word(&not_analyzed), "not analyzed");
+    }
+
+    #[test]
+    fn state_word_reads_stale_never_finished_before_any_live_wording() {
+        // A stale run's session still claims Recording — the exact caption a genuinely
+        // live run gets — so the is_stale() check has to run first, or this row would
+        // read "recording" forever even though nothing can still own its directory.
+        assert_eq!(
+            state_word(&stale_run("r", session::State::Recording, false)),
+            "stale — never finished"
+        );
+        // Also checked ahead of Saved's own special-cased wording.
+        assert_eq!(
+            state_word(&stale_run("r", session::State::Saved, false)),
+            "stale — never finished"
+        );
     }
 }
