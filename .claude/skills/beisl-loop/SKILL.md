@@ -35,12 +35,17 @@ human-editable):
 - **Git hygiene.** Direct commits only on `loop/*` branches; `agent-dev`
   receives merges only; main receives only human-approved landings (step 9).
   No history rewriting outside an unmerged `loop/*` branch.
-- **Git identity.** Before the iteration's FIRST commit, verify
-  `git var GIT_COMMITTER_IDENT` resolves to the spritzwine profile
+- **Git identity.** Commits must carry the spritzwine profile
   (`fschaupp <spritzwine.absently488@passinbox.com>` — what Florian's own
-  beisl commits carry). A session env leak once overrode it with the
-  personal identity (caught 2026-07-19; three beisl + eight vault commits
-  needed rewriting). Mismatch → fix the environment first, don't commit.
+  beisl commits carry). The repo's LOCAL config pins it (set 2026-07-19),
+  because `~/.gitconfig` flaps between identity profiles mid-session
+  (external tool, likely GitKraken profile switching — it burned two
+  batches of commits on 2026-07-19, the second one MINUTES after a
+  passing identity check). Before the iteration's first commit, verify
+  `git var GIT_COMMITTER_IDENT` from INSIDE the worktree; if it's wrong,
+  the local pin is gone — restore it (`git config user.name fschaupp` +
+  `git config user.email spritzwine.absently488@passinbox.com`), never
+  trust the global.
 - **The main checkout is Florian's.** Never `git checkout`, `reset`, or
   `merge` in it — he may be mid-work there (e.g. the MCP crate) and the loop
   must not switch branches under him (this bit us on 2026-07-11: a landing
