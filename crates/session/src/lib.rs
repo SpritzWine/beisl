@@ -67,6 +67,11 @@ pub struct Session {
     /// legacy runs. A downstream artifact step will read it to mark a degraded trace.
     #[serde(default)]
     pub record_mode: String,
+    /// The wrapper deleted `perf.data` itself, per the `discard` clean-run preference
+    /// — a HEALTHY run, not a recorder failure. Distinguishes this from a genuine
+    /// zero-byte-write failure, which reads `raw_bytes == 0` identically otherwise.
+    #[serde(default)]
+    pub trace_discarded: bool,
 }
 
 impl Session {
@@ -100,11 +105,16 @@ impl Session {
 pub mod library {
     use std::path::{Path, PathBuf};
 
+    use serde::{Deserialize, Serialize};
+
     use super::Session;
 
     /// Written by the wrapper's post-run analysis next to `session.json`.
     pub const ARTIFACT_FILE: &str = "artifact.json";
     pub const REPORT_FILE: &str = "report.txt";
+    /// Written by `mark_invalid` next to `session.json` when analysis was attempted
+    /// and failed.
+    pub const INVALID_FILE: &str = "invalid.json";
 
     /// One past run under the traces root.
     #[derive(Clone, Debug)]
@@ -122,6 +132,13 @@ pub mod library {
         /// `artifact.json` exists — the run is analyzed and openable in the results view.
         pub has_artifact: bool,
         pub has_report: bool,
+        /// `perf.data`'s size in bytes; 0 when missing or empty (the recorder died
+        /// before writing anything). See `raw_bytes()`.
+        pub raw_bytes: u64,
+        /// A prior failed analysis attempt's error, still valid against the current
+        /// `perf.data` — see `invalid_of()`. `None` if never attempted, or the data
+        /// changed since.
+        pub invalid: Option<String>,
     }
 
     impl RunEntry {
@@ -270,6 +287,72 @@ pub mod library {
             .unwrap_or(0)
     }
 
+    /// `perf.data`'s size in bytes — 0 when missing or empty, so a recorder that died
+    /// before writing and one that never started read the same: nothing to analyze.
+    pub fn raw_bytes(dir: &Path) -> u64 {
+        std::fs::metadata(dir.join("perf.data"))
+            .map(|m| m.len())
+            .unwrap_or(0)
+    }
+
+    /// perf.data's (len, mtime-as-unix-secs) — the fingerprint `mark_invalid`/
+    /// `invalid_of` compare, so a rewritten file is detected even at the same size.
+    fn perf_data_stamp(dir: &Path) -> (u64, u64) {
+        let Ok(meta) = std::fs::metadata(dir.join("perf.data")) else {
+            return (0, 0);
+        };
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        (meta.len(), mtime)
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct InvalidMarker {
+        len: u64,
+        mtime: u64,
+        error: String,
+    }
+
+    /// Record that analysis was attempted on `dir`'s `perf.data` and failed —
+    /// fingerprinted against its current (len, mtime) so a later rewrite auto-clears
+    /// the verdict (see `invalid_of`) instead of lying forever. Best-effort, like
+    /// `Session::write`; callers ignore the error (`let _ =`).
+    pub fn mark_invalid(dir: &Path, error: &str) -> std::io::Result<()> {
+        let (len, mtime) = perf_data_stamp(dir);
+        let marker = InvalidMarker {
+            len,
+            mtime,
+            error: error.to_string(),
+        };
+        let json = serde_json::to_vec_pretty(&marker)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        std::fs::write(dir.join(INVALID_FILE), json)
+    }
+
+    /// The recorded error, but ONLY if `perf.data`'s (len, mtime) still match the
+    /// marker — a changed file (or an unreadable/missing marker) means the verdict no
+    /// longer applies, so this returns `None`: derived honesty, never a stale "failed".
+    pub fn invalid_of(dir: &Path) -> Option<String> {
+        let data = std::fs::read(dir.join(INVALID_FILE)).ok()?;
+        let marker: InvalidMarker = serde_json::from_slice(&data).ok()?;
+        let stamp = perf_data_stamp(dir);
+        (marker.len, marker.mtime)
+            .eq(&stamp)
+            .then_some(marker.error)
+    }
+
+    /// Drop a stale marker once analysis succeeds — without this, a retry that fixes
+    /// the real cause (e.g. `perf` got installed) on UNCHANGED `perf.data` would still
+    /// report the old failure alongside the new artifact. Best-effort: a missing
+    /// marker is not an error.
+    pub fn clear_invalid(dir: &Path) {
+        let _ = std::fs::remove_file(dir.join(INVALID_FILE));
+    }
+
     /// `$XDG_DATA_HOME/beisl` (falls back to `~/.local/share/beisl`) — the same
     /// resolution the wrapper uses when it creates run dirs.
     pub fn data_root() -> PathBuf {
@@ -311,6 +394,8 @@ pub mod library {
                     session: Session::read(&dir),
                     has_artifact: dir.join(ARTIFACT_FILE).is_file(),
                     has_report: dir.join(REPORT_FILE).is_file(),
+                    raw_bytes: raw_bytes(&dir),
+                    invalid: invalid_of(&dir),
                     dir,
                     id,
                 })
@@ -452,6 +537,62 @@ mod tests {
         assert!(library::scan(&root).is_empty());
     }
 
+    // -- library::raw_bytes / mark_invalid / invalid_of ----------------------------------
+
+    #[test]
+    fn raw_bytes_is_zero_for_missing_or_empty_and_n_for_real_data() {
+        let dir = fixture_root("raw-bytes");
+        assert_eq!(library::raw_bytes(&dir), 0, "no perf.data at all");
+        std::fs::write(dir.join("perf.data"), b"").unwrap();
+        assert_eq!(library::raw_bytes(&dir), 0, "empty perf.data");
+        std::fs::write(dir.join("perf.data"), b"perf data bytes").unwrap();
+        assert_eq!(library::raw_bytes(&dir), 15);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn mark_and_read_invalid_round_trips() {
+        let dir = fixture_root("invalid-roundtrip");
+        std::fs::write(dir.join("perf.data"), b"").unwrap();
+        library::mark_invalid(&dir, "perf script produced no samples").unwrap();
+        assert_eq!(
+            library::invalid_of(&dir),
+            Some("perf script produced no samples".to_string())
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn invalid_marker_is_ignored_once_perf_data_changes() {
+        let dir = fixture_root("invalid-stale");
+        std::fs::write(dir.join("perf.data"), b"").unwrap();
+        library::mark_invalid(&dir, "perf script produced no samples").unwrap();
+        // The recorder wrote real data on a later run — the old verdict no longer
+        // describes this file, so it must auto-clear.
+        std::fs::write(dir.join("perf.data"), b"real data now").unwrap();
+        assert_eq!(library::invalid_of(&dir), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn clear_invalid_drops_the_marker_even_on_unchanged_perf_data() {
+        // The realistic retry: perf.data never changes (only the missing `perf`
+        // binary did), so invalid_of's fingerprint match alone can't clear it.
+        let dir = fixture_root("invalid-clear");
+        std::fs::write(dir.join("perf.data"), b"").unwrap();
+        library::mark_invalid(&dir, "perf script produced no samples").unwrap();
+        library::clear_invalid(&dir);
+        assert_eq!(library::invalid_of(&dir), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn invalid_of_is_none_without_a_marker() {
+        let dir = fixture_root("invalid-none");
+        assert_eq!(library::invalid_of(&dir), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Far beyond any real machine's boot time (year ~2100) — a `started` this large
     /// is always post-boot, so a live-state fixture built on it is genuinely live
     /// (not stale) regardless of which machine runs the test.
@@ -477,6 +618,8 @@ mod tests {
                 }),
                 has_artifact: false,
                 has_report: false,
+                raw_bytes: 0,
+                invalid: None,
             };
             assert!(entry.is_live(), "{state:?} should be live");
         }
@@ -492,6 +635,8 @@ mod tests {
                 }),
                 has_artifact: false,
                 has_report: false,
+                raw_bytes: 0,
+                invalid: None,
             };
             assert!(!entry.is_live(), "{state:?} should not be live");
         }
@@ -504,6 +649,8 @@ mod tests {
             session: None,
             has_artifact: false,
             has_report: false,
+            raw_bytes: 0,
+            invalid: None,
         };
         assert!(!entry.is_live());
     }
@@ -521,6 +668,8 @@ mod tests {
             }),
             has_artifact: false,
             has_report: false,
+            raw_bytes: 0,
+            invalid: None,
         }
     }
 

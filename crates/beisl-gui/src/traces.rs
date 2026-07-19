@@ -116,6 +116,14 @@ fn resolve_deletable(entries: &[RunEntry], ids: &HashSet<String>) -> Vec<std::pa
 /// a stale run's checkbox/Delete behave like a settled one's (`is_live()` excludes
 /// stale runs), so the Unanalyzed helper picks it up — its perf.data may still be
 /// analyzable.
+///
+/// A settled, artifact-less run is further split so "not analyzed" never lies about a
+/// run analysis can't actually help (CarX, run-1783864589: a zero-byte perf.data reads
+/// "not analyzed" forever and the ask can only fail): a marker from a previously
+/// FAILED attempt wins first (most specific — names the actual error), then a
+/// deliberately-discarded trace (a HEALTHY run — must not read like a recorder
+/// failure), then a run that ran but whose recorder wrote nothing, then one with no
+/// raw trace at all.
 fn state_word(run: &RunEntry) -> &'static str {
     // Stale Saved is the exception: its trace completed (stop & save), only the
     // game's exit went unrecorded — let it read like any settled run.
@@ -137,7 +145,11 @@ fn state_word(run: &RunEntry) -> &'static str {
     }
     match &run.session {
         _ if run.has_artifact => "analyzed",
+        _ if run.invalid.is_some() => "invalid — analysis failed",
+        Some(s) if s.trace_discarded => "trace discarded (per preference)",
+        Some(s) if s.elapsed_secs > 0 && run.raw_bytes == 0 => "invalid — recorder wrote no data",
         Some(s) if s.elapsed_secs > 0 => "not analyzed",
+        Some(_) if run.raw_bytes == 0 => "no raw trace",
         Some(_) => "incomplete",
         None => "no session data",
     }
@@ -507,6 +519,9 @@ mod tests {
     /// on, so a "live" fixture is genuinely live, never accidentally stale.
     const FAR_FUTURE: u64 = 4_102_444_800; // 2100-01-01 UTC
 
+    /// `raw_bytes` defaults to non-zero so existing fixtures don't accidentally trip
+    /// the new "no raw trace" / "recorder wrote no data" words — tests that need those
+    /// override the field explicitly (see `state_word_*` below).
     fn run(id: &str, state: session::State, has_artifact: bool) -> RunEntry {
         RunEntry {
             dir: PathBuf::from(id),
@@ -518,6 +533,8 @@ mod tests {
             }),
             has_artifact,
             has_report: false,
+            raw_bytes: 1024,
+            invalid: None,
         }
     }
 
@@ -536,6 +553,8 @@ mod tests {
             }),
             has_artifact,
             has_report: false,
+            raw_bytes: 1024,
+            invalid: None,
         }
     }
 
@@ -548,6 +567,8 @@ mod tests {
             session: None,
             has_artifact: false,
             has_report: false,
+            raw_bytes: 1024,
+            invalid: None,
         }
     }
 
@@ -695,6 +716,48 @@ mod tests {
         let mut not_analyzed = run("r", session::State::Done, false);
         not_analyzed.session.as_mut().unwrap().elapsed_secs = 42;
         assert_eq!(state_word(&not_analyzed), "not analyzed");
+    }
+
+    #[test]
+    fn state_word_names_a_zero_byte_perf_data_that_ran() {
+        // CarX, run-1783864589: the recorder died before writing anything, so a run
+        // that actually played must not read "not analyzed" — that ask can only fail.
+        let mut r = run("r", session::State::Done, false);
+        r.raw_bytes = 0;
+        r.session.as_mut().unwrap().elapsed_secs = 42;
+        assert_eq!(state_word(&r), "invalid — recorder wrote no data");
+    }
+
+    #[test]
+    fn state_word_names_a_discarded_trace_not_a_recorder_failure() {
+        // A `discard`-preference run deletes perf.data on purpose (a HEALTHY clean
+        // run) — must read distinctly from the CarX zero-byte-write failure above,
+        // even though raw_bytes and elapsed_secs look identical.
+        let mut r = run("r", session::State::Done, false);
+        r.raw_bytes = 0;
+        r.session.as_mut().unwrap().elapsed_secs = 42;
+        r.session.as_mut().unwrap().trace_discarded = true;
+        assert_eq!(state_word(&r), "trace discarded (per preference)");
+    }
+
+    #[test]
+    fn state_word_names_a_missing_raw_trace_that_never_ran() {
+        let mut r = run("r", session::State::Done, false);
+        r.raw_bytes = 0; // elapsed_secs stays 0 (the fixture's default)
+        assert_eq!(state_word(&r), "no raw trace");
+    }
+
+    #[test]
+    fn state_word_prefers_a_failed_analysis_marker_over_everything_else() {
+        // A marker names the actual error, so it wins even over the zero-byte case
+        // that likely caused it — the more specific word comes first.
+        let mut r = run("r", session::State::Done, false);
+        r.raw_bytes = 0;
+        r.invalid = Some("perf script produced no samples".into());
+        assert_eq!(state_word(&r), "invalid — analysis failed");
+        // And it wins even with a real trace present, e.g. a transient perf failure.
+        r.raw_bytes = 1024;
+        assert_eq!(state_word(&r), "invalid — analysis failed");
     }
 
     #[test]

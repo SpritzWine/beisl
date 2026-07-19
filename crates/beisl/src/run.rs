@@ -246,6 +246,9 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
                     PostRun::Discard => {
                         let _ = std::fs::remove_file(run_dir.join("perf.data"));
                         sess.trace_bytes = 0;
+                        // A healthy run, not a recorder failure — state_word must not
+                        // read the empty perf.data as "wrote no data".
+                        sess.trace_discarded = true;
                         log.line("post-run: clean exit — perf trace discarded (per preference)");
                         "Game exited — clean run, perf trace discarded (per your setting)."
                             .to_string()
@@ -580,6 +583,9 @@ fn write_report(
         Ok(a) => a,
         Err(e) => {
             log.line(&format!("post-run: resolution failed ({e})"));
+            // Same door as `beisl symbols`/the window's Analyze: say so on disk, but
+            // never disable a later retry (see `mark_invalid`'s doc comment).
+            let _ = session::library::mark_invalid(run_dir, &e.to_string());
             return None;
         }
     };
@@ -588,6 +594,8 @@ fn write_report(
         run_dir.join(session::library::REPORT_FILE),
         art.render_report(),
     );
+    // A retry succeeded on the same perf.data — drop any stale failure verdict.
+    session::library::clear_invalid(run_dir);
     let headline = art.headline();
     log.line(&format!("post-run: {headline}"));
     Some(headline)

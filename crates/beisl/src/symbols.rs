@@ -42,10 +42,15 @@ pub fn run(run_dir: &str) -> ExitCode {
         urls.as_deref(),
     ) {
         Ok(a) => {
+            // A retry succeeded on the same perf.data — drop any stale failure verdict.
+            session::library::clear_invalid(dir);
             out!("{}", a.render_report().trim_end());
             ExitCode::SUCCESS
         }
         Err(e) => {
+            // Say so on disk too — same truth via `beisl-setup`'s ask, whichever door
+            // hits the failure first.
+            let _ = session::library::mark_invalid(dir, &e.to_string());
             eprintln!("beisl: symbol resolution failed ({e}) — is `perf` installed?");
             ExitCode::FAILURE
         }

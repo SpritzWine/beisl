@@ -162,6 +162,9 @@ impl Server {
                     // structurally identical to what session.json itself contains.
                     "state": r.session.as_ref().map(|s| serde_json::json!(s.state)),
                     "stale": r.is_stale(),
+                    // A prior failed analysis attempt's error, or null — see
+                    // `session::library::invalid_of` (cleared once perf.data changes).
+                    "invalid": r.invalid,
                 })
             })
             .collect();
@@ -613,6 +616,11 @@ mod tests {
         // optional-field idiom (see elapsed_secs/game above) rather than a
         // made-up state — and never live, so never stale either.
         std::fs::create_dir_all(root.join("run-900")).unwrap();
+        // A run whose analysis was attempted and failed (CarX's zero-byte perf.data
+        // case): `invalid` should carry the recorded error.
+        put_run(&root, "run-500", false);
+        std::fs::write(root.join("run-500").join("perf.data"), b"").unwrap();
+        library::mark_invalid(&root.join("run-500"), "perf script produced no samples").unwrap();
 
         let server = Server::new(root);
         let resp = call(
@@ -628,10 +636,17 @@ mod tests {
         let run_100 = traces.iter().find(|t| t["run_id"] == "run-100").unwrap();
         assert_eq!(run_100["state"], "Starting");
         assert_eq!(run_100["stale"], true);
+        assert!(
+            run_100["invalid"].is_null(),
+            "no marker written for run-100"
+        );
 
         let run_900 = traces.iter().find(|t| t["run_id"] == "run-900").unwrap();
         assert!(run_900["state"].is_null());
         assert_eq!(run_900["stale"], false);
+
+        let run_500 = traces.iter().find(|t| t["run_id"] == "run-500").unwrap();
+        assert_eq!(run_500["invalid"], "perf script produced no samples");
     }
 
     #[test]

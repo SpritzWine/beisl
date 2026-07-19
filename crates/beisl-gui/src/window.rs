@@ -91,6 +91,13 @@ pub struct SessionApp {
     /// Whether the xdg window title has been pushed yet (only possible once the window
     /// exists, i.e. on the first Tick, not in `init`).
     title_pushed: bool,
+    /// The run dir vanished (deleted from the library or by hand) — show a plain
+    /// "trace deleted" surface instead of rendering stale in-memory state.
+    gone: bool,
+    /// A previously-failed analysis attempt's error, snapshotted at open (see
+    /// `session::library::invalid_of`) — shown as a caption on the ask, never used to
+    /// gate it (the ask must always stay available; see `Msg::Analyze`).
+    invalid_marker: Option<String>,
 }
 
 /// The window title: product name plus what the window is *doing* (reads better in a
@@ -135,11 +142,13 @@ impl Application for SessionApp {
     }
 
     fn init(core: Core, dir: Self::Flags) -> (Self, Task<Self::Message>) {
+        let dir_exists = dir.is_dir();
         let read = Session::read(&dir);
         let have = read.is_some();
         let session = read.unwrap_or_default();
         let artifact = load_artifact(&dir);
         let raw_present = dir.join("perf.data").is_file();
+        let invalid_marker = session::library::invalid_of(&dir);
         // Not `self.is_stale()` — there's no `Self` yet — but the same core, since
         // `is_stale()` is just this call wrapped around `self.dir`/`self.session`.
         let stale =
@@ -170,6 +179,8 @@ impl Application for SessionApp {
                 confirm_discard: false,
                 title,
                 title_pushed: false,
+                gone: !dir_exists,
+                invalid_marker,
             },
             Task::none(),
         )
@@ -182,15 +193,20 @@ impl Application for SessionApp {
                     self.session = s;
                     self.have = true;
                 }
+                self.gone = !self.dir.is_dir();
                 // Push the title once the window exists, and refresh it as the activity
                 // changes (live state → the ask → results). The xdg title (taskbar/overview)
                 // can only be set once the window is up, so it happens here, not in `init`.
-                let title = window_title(
-                    self.artifact.is_some(),
-                    self.session.analysis_offer,
-                    self.is_stale(),
-                    self.session.state,
-                );
+                let title = if self.gone {
+                    "beisl ∷ Trace deleted".to_string()
+                } else {
+                    window_title(
+                        self.artifact.is_some(),
+                        self.session.analysis_offer,
+                        self.is_stale(),
+                        self.session.state,
+                    )
+                };
                 if title != self.title || !self.title_pushed {
                     self.title = title.clone();
                     self.title_pushed = true;
@@ -316,7 +332,11 @@ impl Application for SessionApp {
         // from a dead boot can NEVER fall through to `live_content` — that's the bug this
         // surface selection exists to close (a crashed/killed game's window used to show
         // "Recording" forever).
-        let (content, buttons) = if let Some(a) = &self.artifact {
+        let (content, buttons) = if self.gone {
+            // The dir was deleted under us (library bulk delete, manual rm). Anything
+            // else would render from stale in-memory state — say it plainly instead.
+            (self.gone_content(), self.gone_buttons())
+        } else if let Some(a) = &self.artifact {
             (self.results_content(a), self.results_buttons())
         } else if self.session.analysis_offer || self.stale_unanalyzed() {
             // The second arm covers two cases with the same Analyze/Discard choice, as
@@ -416,13 +436,21 @@ impl SessionApp {
             if finished {
                 self.analyzing = None;
                 match error {
-                    Some(err) => self.analyze_note = Some(format!("Couldn't analyze: {err}")),
+                    Some(err) => {
+                        // Say so, but never disable the ask — perf.data might get
+                        // rewritten later (see `mark_invalid`'s doc comment).
+                        let _ = session::library::mark_invalid(&self.dir, &err);
+                        self.analyze_note = Some(format!("Couldn't analyze: {err}"));
+                    }
                     None => {
                         self.artifact = load_artifact(&self.dir);
                         self.analyze_note = None;
                         // A post-install re-analyze just delivered its result; a lingering
                         // "re-analyzing…" note would contradict the refreshed view.
                         self.install_note = None;
+                        // The retry succeeded on the same perf.data — drop the old
+                        // verdict so MCP/the library don't call this run invalid.
+                        session::library::clear_invalid(&self.dir);
                     }
                 }
             }
@@ -581,6 +609,12 @@ impl SessionApp {
                 if stale && self.session.state != State::Saved {
                     "Stale run — the session never finished (game crashed, was killed, or the session file is damaged). \
                      The recorder's data survives up to that point."
+                } else if session::library::raw_bytes(&self.dir) == 0 {
+                    // Same verdict the library row shows — the window must not
+                    // soften it to "not analyzed yet". Analyze stays offered.
+                    "Finished run — the recorder wrote no data"
+                } else if self.invalid_marker.is_some() {
+                    "Finished run — a previous analysis failed"
                 } else {
                     match (self.session.analysis_offer, self.session.state) {
                         (true, _) => "Clean run — not analyzed yet",
@@ -593,7 +627,17 @@ impl SessionApp {
                         _ => "Finished run — not analyzed yet",
                     }
                 },
-            ))
+            ));
+
+        // A prior attempt already failed — say so, without hiding the ask: perf.data
+        // might get rewritten later (see `mark_invalid`'s doc comment).
+        if let Some(err) = &self.invalid_marker {
+            col = col.push(widget::text::caption(format!(
+                "A previous analysis failed: {err}"
+            )));
+        }
+
+        col = col
             .push(widget::text::caption(
                 "The trace was kept as-is. Analyze it to see which layer of the stack ate the \
                  frame and where it hitched, or discard it to reclaim the disk.",
@@ -683,6 +727,24 @@ impl SessionApp {
                 "Output: {}",
                 self.session.trace_dir
             )))
+            .into()
+    }
+
+    fn gone_content(&self) -> Element<'_, Msg> {
+        widget::Column::new()
+            .spacing(10)
+            .push(widget::text::title3("Trace deleted"))
+            .push(widget::text::body(
+                "This trace's directory no longer exists — it was deleted, e.g. from \
+                 the trace library.",
+            ))
+            .into()
+    }
+
+    fn gone_buttons(&self) -> Element<'_, Msg> {
+        widget::Row::new()
+            .push(widget::Space::new().width(Length::Fill))
+            .push(widget::button::suggested("Close").on_press(Msg::Close))
             .into()
     }
 
