@@ -28,3 +28,6 @@ dist
 #.idea/
 
 /man/
+
+# obsidian-second-brain project vault (agent knowledge base, not source)
+.second-brain/
