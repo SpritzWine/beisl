@@ -1,3 +1,74 @@
+# beisl 0.2.0
+
+The Frosted Glass release: the trace library learns to be honest about
+broken runs, analysis reports the median you actually felt, an AI can ask
+"anything crash since we last talked?" — and the setup app joins COSMIC 1.3,
+frost included.
+
+## New
+
+- **Frosted Glass.** The setup app moves to the COSMIC 1.3 era of libcosmic
+  and renders the frosted-window look under any compositor that serves the
+  standardized blur protocol (cosmic-comp, KWin, …). It follows the system
+  theme: an Advanced toggle lets beisl-setup decline the frost for itself,
+  a link opens COSMIC Settings straight on the Appearance page where the
+  theme's own switch lives, and on systems without a COSMIC Settings UI a
+  consent-style button can write the theme flag for you (it says exactly
+  what it touches and how to revert). Content sections now sit on the
+  standard container panels, so everything stays readable over the blur.
+- **The median you experienced.** Frametime stats add a time-weighted
+  median alongside the per-frame one: the frame the *session's wall-clock*
+  spent its typical moment in, so a stutter-heavy minute no longer hides
+  behind thousands of fast frames. The results header shows it front and
+  center.
+- **One-click debuginfo install.** Issues-panel rows whose module maps to a
+  known distro debuginfo package (Mesa Vulkan drivers, deliberately narrow)
+  grow an *Install* button — pkexec-confirmed, followed by an automatic
+  re-analyze so the freshly resolved symbols land in the report you're
+  looking at.
+- **Re-analyze on demand.** An already-analyzed run's window offers a
+  fresh analysis pass, so old traces pick up resolver improvements without
+  hand-deleting anything.
+- **An honest trace library.** Runs whose recorder died pre-boot read
+  "stale — never finished" instead of pretending to be live (and become
+  deletable again); a trace that can't be analyzed says so — with the
+  reason — instead of failing quietly on every attempt; the Traces page
+  gains selection and bulk delete.
+- **MCP: `list_events`.** One cheap poll answers "anything crash since we
+  last talked?" — crashes, GPU hangs and corroborated log signals newer
+  than your cursor, deduplicated, with the next cursor in the answer. Built
+  for an AI client (or a cron'd agent) checking in at session start.
+- **Steam PATH self-observation.** Every Steam-launched trace records
+  whether the client still scrubs launch-option PATH (upstream
+  [steam-for-linux #13389](https://github.com/ValveSoftware/steam-for-linux/issues/13389)):
+  the day Steam ships the fix, the launcher-shim checklist row retires
+  itself — no beisl update needed.
+
+## Fixed
+
+- **Native games no longer borrow the launcher's wine.** Wine-flavor
+  detection is scoped to the traced game's own process instead of the whole
+  capture, so a native Linux title launched through a wine-based launcher
+  reads "none — native game" rather than inheriting Proton's name.
+- **Updating over a running install.** `beisl install` stages and renames
+  instead of copying over live binaries — updating while `beisl-mcp` (or a
+  session) is running no longer dies with "text file busy", and a running
+  reader keeps its old binary until restart.
+- **A re-analysis can't eat the artifact.** Analysis results are written
+  via a staged temp file and atomic rename, so a mid-write crash leaves the
+  previous good `artifact.json` untouched.
+- The traces-page scrollbar keeps its distance from the row buttons.
+
+## Compatibility
+
+- `artifact.json` stays schema v1; new fields are additive with defaults,
+  and old artifacts render their old readings (absent data reports
+  "unknown", never a fresh claim). Config files gain keys with
+  behavior-preserving defaults. The MCP surface grows `list_events`; the
+  existing six tools are unchanged.
+
+---
+
 # beisl 0.1.0
 
 The first release without the alpha tag: beisl now traces on locked-down

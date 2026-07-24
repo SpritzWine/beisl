@@ -143,8 +143,8 @@ the backlog — a misfit is cheaper abandoned than merged).
 
 ### 7. Land on `agent-dev`
 
-Commit on the branch (conventional message, `Co-Authored-By: Claude Fable 5
-<noreply@anthropic.com>`), then `git merge --no-ff loop/<slug>` into
+Commit on the branch (conventional message; NO `Co-Authored-By` trailer —
+Codeberg rejects it, 2026-07-24), then `git merge --no-ff loop/<slug>` into
 `agent-dev` — run inside the `.loop/wt/agent-dev` worktree, not the main
 checkout — and record the merge-commit hash: that hash is the unit of
 review and of revert.

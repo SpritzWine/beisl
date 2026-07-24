@@ -38,8 +38,10 @@ jobs:
     # The self-hosted runner has no cap and keeps CARGO_HOME + both target dirs on a
     # bind-mounted cache disk, so only the first release build is cold.
     runs-on: beisl-local
-    # Official Rust image: toolchain + gcc/make preinstalled. The GUI needs no
-    # build-time system libs — winit/xkbcommon load via dlopen at runtime.
+    # Official Rust image: toolchain + gcc/make preinstalled. One build-time system
+    # lib on top: libcosmic's "wayland" feature (Frosted Glass, 0.2.0) compiles
+    # smithay-client-toolkit, whose build script pkg-config-requires xkbcommon —
+    # installed in the build step below. Everything else still dlopens at runtime.
     container:
       image: docker.io/library/rust:1
     env:
@@ -94,7 +96,10 @@ jobs:
           cat /tmp/release-notes.md
 
       - name: Build and package
-        run: make
+        # libxkbcommon-dev: see the container comment up top (sctk build script).
+        run: |
+          apt-get -qq update && apt-get -qq install -y --no-install-recommends libxkbcommon-dev >/dev/null
+          make
 
       - name: Collect release assets
         # forgejo-release uploads everything in release-dir; dist/ also holds
