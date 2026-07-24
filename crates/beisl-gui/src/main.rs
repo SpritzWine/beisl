@@ -725,7 +725,10 @@ impl AppModel {
                 )));
             }
         }
-        content = content.push(tier);
+        // The checklist itself sits on the theme's container background (libcosmic's
+        // standard settings-section card) so the rows stay readable under a frosted
+        // window — each check becomes one card item, tier ladder first.
+        let mut checklist = widget::settings::section().add(tier);
 
         for c in &self.checks {
             // The perf-record capability is shown as the tier ladder above, not a binary row.
@@ -763,22 +766,25 @@ impl AppModel {
             } else {
                 row = row.push(widget::text::caption(status_word(c)));
             }
-            content = content
+            let mut item = widget::Column::new()
+                .spacing(4)
                 .push(row)
                 .push(widget::text::caption(c.why.clone().into_owned()));
             // The why cites Valve's bug number — make it a real link, not a dead end.
             if c.id == CheckId::SteamVisibleBeisl && !is_ok {
-                content = content.push(
+                item = item.push(
                     widget::button::link("steam-for-linux #13389 \u{2197}")
                         .on_press(Message::OpenSteamPathIssue),
                 );
             }
+            checklist = checklist.add(item);
         }
 
         // Informational only — the decision lives in Advanced. A poweruser who turned it
         // off still gets an honest read here; everyone else just sees the good default
         // is on, with nothing to decide.
-        content = content.push(self.debuginfod_indicator());
+        checklist = checklist.add(self.debuginfod_indicator());
+        content = content.push(checklist);
 
         // Advanced (opt-in details): collapsed by default. No expander widget at this
         // libcosmic rev, so a plain toggle-shown section (the brief allows this).
@@ -902,27 +908,40 @@ impl AppModel {
         let header =
             widget::button::text(format!("{arrow} Advanced")).on_press(Message::ToggleAdvanced);
 
-        let mut col = widget::Column::new().spacing(8).push(header);
         if !self.show_advanced {
-            return col.into();
+            return widget::Column::new().spacing(8).push(header).into();
         }
+
+        // Expanded: the header stays a plain disclosure control, but the body groups
+        // onto one settings-section card — same container-background treatment as the
+        // checklist, so the Advanced details stay readable under a frosted window
+        // instead of sitting bare on the blurred ground. No card title: the
+        // disclosure button right above already says "Advanced".
+        let mut section = widget::settings::section();
 
         // Checks retired from the main checklist (currently only `SteamVisibleBeisl`,
         // once a Steam-launched trace confirms the client stopped scrubbing PATH) — same
         // read-only checkbox + caption idiom as the main list, just informational: nothing
-        // here is a decision to make.
-        for c in self.checks.iter().filter(|c| c.advanced) {
-            col = col
-                .push(
-                    widget::Row::new()
-                        .spacing(12)
-                        .push(widget::checkbox(c.status == Status::Ok).label(c.label)),
-                )
-                .push(widget::text::caption(c.why.clone().into_owned()));
+        // here is a decision to make. Bundled as one card item since there's normally
+        // just the one retired check.
+        let retired: Vec<_> = self.checks.iter().filter(|c| c.advanced).collect();
+        if !retired.is_empty() {
+            let mut retired_col = widget::Column::new().spacing(4);
+            for c in retired {
+                retired_col = retired_col
+                    .push(
+                        widget::Row::new()
+                            .spacing(12)
+                            .push(widget::checkbox(c.status == Status::Ok).label(c.label)),
+                    )
+                    .push(widget::text::caption(c.why.clone().into_owned()));
+            }
+            section = section.add(retired_col);
         }
 
         let policy = self.config.dump_access_policy;
-        col = col
+        let mut dump_col = widget::Column::new()
+            .spacing(8)
             .push(widget::text::body("GPU crash-dump capture"))
             .push(widget::text::caption(
                 "When a game crashes your GPU, this decides whether Beisl can save the \
@@ -956,11 +975,18 @@ impl AppModel {
             remove = remove.on_press(Message::RemoveDumpRule);
         }
         actions = actions.push(remove);
-        col = col.push(actions);
+        dump_col = dump_col.push(actions);
+        section = section.add(dump_col);
 
-        col = col.push(self.gpu_pin_picker());
-        col = col.push(self.debuginfod_toggle());
-        col.push(self.frosted_background_toggle()).into()
+        section = section.add(self.gpu_pin_picker());
+        section = section.add(self.debuginfod_toggle());
+        section = section.add(self.frosted_background_toggle());
+
+        widget::Column::new()
+            .spacing(8)
+            .push(header)
+            .push(section)
+            .into()
     }
 
     /// The debuginfod on-demand fetch toggle. On by default (see `preflight::Config`); the

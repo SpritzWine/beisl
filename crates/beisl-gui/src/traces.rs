@@ -355,6 +355,10 @@ impl TracesTab {
             }
             content = content.push(helpers);
         }
+        // The run rows sit on the theme's container background (libcosmic's standard
+        // settings-section card), same treatment as the checklist page, so a row stays
+        // readable under a frosted window.
+        let mut list = widget::settings::section();
         for (i, run) in self.runs.iter().enumerate() {
             let when = if run.started > 0 {
                 fmt_unix_ts(run.started)
@@ -417,7 +421,10 @@ impl TracesTab {
                 }
                 row = row.push(widget::button::standard("Open").on_press(Msg::Open(i)));
             }
-            content = content.push(row);
+            list = list.add(row);
+        }
+        if !self.runs.is_empty() {
+            content = content.push(list);
         }
 
         if let Some(e) = &self.error {

@@ -613,7 +613,10 @@ impl SessionApp {
         if !self.have {
             col = col.push(widget::text::caption("(waiting for the session to start…)"));
         }
-        col.into()
+        // On the theme's container background (libcosmic's standard settings-section
+        // card), same as the checklist page, so the live status stays readable under a
+        // frosted window.
+        widget::settings::section().add(col).into()
     }
 
     fn live_buttons(&self) -> Element<'_, Msg> {
@@ -715,7 +718,8 @@ impl SessionApp {
                 "Discard this trace? This permanently deletes the run directory.",
             ));
         }
-        col.into()
+        // Same container-background card as the other surfaces.
+        widget::settings::section().add(col).into()
     }
 
     fn ask_buttons(&self) -> Element<'_, Msg> {
@@ -760,7 +764,7 @@ impl SessionApp {
         } else {
             self.session.game.clone()
         };
-        widget::Column::new()
+        let col = widget::Column::new()
             .spacing(10)
             .push(widget::text::title3(title))
             .push(widget::text::body(if self.session.state == State::Saved {
@@ -772,19 +776,19 @@ impl SessionApp {
             .push(widget::text::caption(format!(
                 "Output: {}",
                 self.session.trace_dir
-            )))
-            .into()
+            )));
+        widget::settings::section().add(col).into()
     }
 
     fn gone_content(&self) -> Element<'_, Msg> {
-        widget::Column::new()
+        let col = widget::Column::new()
             .spacing(10)
             .push(widget::text::title3("Trace deleted"))
             .push(widget::text::body(
                 "This trace's directory no longer exists — it was deleted, e.g. from \
                  the trace library.",
-            ))
-            .into()
+            ));
+        widget::settings::section().add(col).into()
     }
 
     fn gone_buttons(&self) -> Element<'_, Msg> {
@@ -844,8 +848,12 @@ impl SessionApp {
             ));
         }
 
-        // 2. Frametime health + spikes.
-        col = col.push(widget::text::title4("Frametimes"));
+        // 2. Frametime health + spikes. Each named group below — Frametimes, Who ate the
+        // frame, Hottest functions, Issues — becomes its own titled settings-section
+        // card (libcosmic's standard container-background treatment), the same grouping
+        // the old `title4` headers already implied, just now on a readable-under-frost
+        // backdrop instead of the bare window ground.
+        let mut frametimes = widget::Column::new().spacing(10);
         if let Some(f) = &a.frame_stats {
             // The median floats right so the at-a-glance trio keeps its shape; the
             // experienced (time-weighted) value leads with per-frame in parentheses —
@@ -863,7 +871,7 @@ impl SessionApp {
                     f.time_weighted_median_ms, f.median_frametime_ms
                 )));
             }
-            col = col.push(stats_row);
+            frametimes = frametimes.push(stats_row);
             // The timeline chart (plotters, drawn on Canvas) with the worst spikes marked.
             if !a.timeline.is_empty() {
                 let points = a.timeline.iter().map(|&(t, ms)| (t, ms as f64)).collect();
@@ -872,30 +880,36 @@ impl SessionApp {
                     .iter()
                     .map(|s| (s.t_seconds, s.frametime_ms as f64))
                     .collect();
-                col = col.push(crate::chart::FrametimeChart::new(points, spikes).view::<Msg>());
+                frametimes = frametimes
+                    .push(crate::chart::FrametimeChart::new(points, spikes).view::<Msg>());
             }
             if !a.spikes.is_empty() {
-                col = col.push(widget::text::caption("Worst hitches:"));
+                frametimes = frametimes.push(widget::text::caption("Worst hitches:"));
                 for s in &a.spikes {
-                    col = col.push(widget::text::caption(format!(
+                    frametimes = frametimes.push(widget::text::caption(format!(
                         "   {:.0} ms at {:.1}s",
                         s.frametime_ms, s.t_seconds
                     )));
                 }
             }
         } else {
-            col = col.push(widget::text::caption(
+            frametimes = frametimes.push(widget::text::caption(
                 "No MangoHud frametime log for this run.",
             ));
         }
+        col = col.push(
+            widget::settings::section()
+                .title("Frametimes")
+                .add(frametimes),
+        );
 
         // 3. The culprit — the layer split (who ate the frame), normalized over attributed
         //    samples, each layer with its own symbol coverage.
-        col = col.push(widget::text::title4("Who ate the frame"));
+        let mut layer_group = widget::Column::new().spacing(10);
         if a.layers.is_empty() {
-            col = col.push(widget::text::caption("No CPU samples to attribute."));
+            layer_group = layer_group.push(widget::text::caption("No CPU samples to attribute."));
         } else {
-            col = col.push(widget::text::caption(format!(
+            layer_group = layer_group.push(widget::text::caption(format!(
                 "CPU by layer — of {:.0}% of samples we could place:",
                 a.attributed_pct
             )));
@@ -915,7 +929,7 @@ impl SessionApp {
                     color: crate::chart::layer_color(&l.layer, &a.gpu_vendor),
                 })
                 .collect();
-            col = col.push(crate::chart::layer_bar::<Msg>(segments));
+            layer_group = layer_group.push(crate::chart::layer_bar::<Msg>(segments));
             // Legend: a color swatch matching the bar segment, then the precise numbers.
             for l in &a.layers {
                 let row = widget::Row::new()
@@ -929,30 +943,39 @@ impl SessionApp {
                         "{:<11} {:4.1}%   {:>3.0}% named",
                         l.layer, l.pct, l.symbol_pct
                     )));
-                col = col.push(row);
+                layer_group = layer_group.push(row);
             }
             let gap = 100.0 - a.attributed_pct;
             if gap >= 0.5 {
-                col = col.push(widget::text::caption(format!(
+                layer_group = layer_group.push(widget::text::caption(format!(
                     "{gap:.0}% of samples were unmapped — could belong to any layer, \
                      graphics/driver included.",
                 )));
             }
         }
+        col = col.push(
+            widget::settings::section()
+                .title("Who ate the frame")
+                .add(layer_group),
+        );
 
         // Top hot functions within the layers (the ones we could name). Same header level and
         // monospaced, column-aligned rows as Issues below, so the two read as one family.
         if !a.hot_symbols.is_empty() {
-            col = col.push(widget::text::title4("Hottest functions"));
-            col = col.push(widget::text::caption(
+            let mut hot = widget::Column::new().spacing(4).push(widget::text::caption(
                 "Self time across all layers — the functions we could name.",
             ));
             for h in a.hot_symbols.iter().take(8) {
-                col = col.push(widget::text::monotext(format!(
+                hot = hot.push(widget::text::monotext(format!(
                     "{:>5.1}%  {:<26}  {}",
                     h.pct, h.module, h.symbol
                 )));
             }
+            col = col.push(
+                widget::settings::section()
+                    .title("Hottest functions")
+                    .add(hot),
+            );
         }
 
         // 4. Issues — anonymous hot modules tied to their fix. The same signal the preflight
@@ -961,8 +984,7 @@ impl SessionApp {
         //    its own "Install" button; everything else — a .dll, or a native module we
         //    don't have an automated fix for — keeps the plain hint, exactly as before.
         if !a.diagnostics.anonymous_modules.is_empty() {
-            col = col.push(widget::text::title4("Issues"));
-            col = col.push(widget::text::caption(
+            let mut issues = widget::Column::new().spacing(8).push(widget::text::caption(
                 "Hot modules we couldn't see inside — install the fix to name them:",
             ));
             let busy = self.installing.is_some() || self.analyzing.is_some();
@@ -985,14 +1007,14 @@ impl SessionApp {
                         .unwrap_or_default()
                 };
                 if cmd.is_empty() {
-                    col = col.push(row_text);
+                    issues = issues.push(row_text);
                 } else {
                     installable += 1;
                     let mut install = widget::button::text("Install");
                     if !busy {
                         install = install.on_press(Msg::InstallDebuginfo(Some(module.clone())));
                     }
-                    col = col.push(
+                    issues = issues.push(
                         widget::Row::new()
                             .spacing(8)
                             .align_y(cosmic::iced::Alignment::Center)
@@ -1006,8 +1028,9 @@ impl SessionApp {
                 if !busy {
                     all = all.on_press(Msg::InstallDebuginfo(None));
                 }
-                col = col.push(all);
+                issues = issues.push(all);
             }
+            col = col.push(widget::settings::section().title("Issues").add(issues));
         }
         if let Some(note) = &self.install_note {
             col = col.push(widget::text::caption(note.clone()));
