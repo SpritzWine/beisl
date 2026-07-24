@@ -20,9 +20,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cosmic::app::{ApplicationExt, Core, Settings, Task};
+use cosmic::core::Auto;
 use cosmic::iced::{Length, Subscription};
 use cosmic::widget;
 use cosmic::{Application, Element};
+use enumflags2::BitFlags;
 
 use preflight::gpu::GpuPinCandidate;
 use preflight::{
@@ -34,8 +36,21 @@ use preflight::{
 };
 
 mod chart; // frametime timeline (plotters, drawn on cosmic's Canvas)
+mod frost; // non-COSMIC assist: writes the theme's `frosted_windows` key file
 mod traces; // the trace library page (its own Elm-style component)
 mod window; // the live session window (`--session`)
+
+/// libcosmic's default allow-mask (`Auto::System | Auto::Popup | Auto::Window`) when
+/// `Config::frosted_background` wants us to follow the theme; empty when it doesn't. The
+/// mask can only DECLINE frost past the theme's own `frosted_windows` flag, never force it
+/// — so `false` here just means "stay opaque," never "frost regardless."
+pub(crate) fn auto_blur_mask(follow_theme: bool) -> BitFlags<Auto> {
+    if follow_theme {
+        Auto::System | Auto::Popup | Auto::Window
+    } else {
+        BitFlags::empty()
+    }
+}
 
 /// Onboarding tips, cycled while the user waits.
 const TIPS: &[&str] = &[
@@ -140,6 +155,13 @@ enum Message {
     /// Advanced: on/off for on-demand debuginfod fetch of GPU-driver symbols. Default on;
     /// a plain config write, same as the GPU pin — nothing privileged to run either way.
     SetDebuginfodFetch(bool),
+    /// Advanced: on/off for following the system theme's Frosted Glass setting. A plain
+    /// config write plus an immediate `Core::set_auto_blur` — no privilege involved.
+    SetFrostedBackground(bool),
+    /// Advanced: the non-COSMIC assist — write the theme's `frosted_windows` key file for
+    /// both Dark and Light (see `frost::write_frosted_flag`). Shown only while neither file
+    /// exists yet; re-evaluated on every render, so success just makes the row disappear.
+    EnableFrostedThemeFlag,
     ToggleAdvanced,
     /// Show the trace library (rescans on every entry — cheap, and a run finished
     /// since the last look should simply be there).
@@ -179,6 +201,9 @@ struct AppModel {
     gpu_candidates: Vec<GpuPinCandidate>,
     /// The trace library page (state + view + actions live in `traces.rs`).
     traces: traces::TracesTab,
+    /// A failed `frost::write_frosted_flag` attempt's error, shown as a caption under the
+    /// assist button; `None` on success (the button's row simply stops rendering).
+    frost_flag_error: Option<String>,
     show_advanced: bool,
     log: Vec<String>,
     error: Option<String>,
@@ -340,8 +365,13 @@ impl Application for AppModel {
     fn init(core: Core, flags: Self::Flags) -> (Self, Task<Self::Message>) {
         let trace_dir = trace_dir();
         let checks = Self::detect_all(&trace_dir);
+        let config = Config::load();
         let mut core = core;
         core.set_header_title("beisl setup".to_string());
+        // The allow-mask lives on `Core`, so it has to be set here too, not just on toggle
+        // (see `Message::SetFrostedBackground`) — otherwise a saved "off" would frost again
+        // on every restart until the user re-touched the toggle.
+        core.set_auto_blur(auto_blur_mask(config.frosted_background));
         let app = AppModel {
             core,
             distro: detect_distro(),
@@ -359,9 +389,10 @@ impl Application for AppModel {
             checks,
             worker: None,
             dump_worker: None,
-            config: Config::load(),
+            config,
             gpu_candidates: preflight::gpu::detect_candidates(),
             traces: traces::TracesTab::default(),
+            frost_flag_error: None,
             show_advanced: false,
             log: Vec::new(),
             error: None,
@@ -477,6 +508,40 @@ impl Application for AppModel {
                     self.config.debuginfod_fetch = on;
                     let _ = self.config.save();
                 }
+            }
+            Message::SetFrostedBackground(on) => {
+                // Plain config write, same as the other Advanced toggles. `set_auto_blur`
+                // only mutates the field on `Core` — nothing re-reads it on its own, so
+                // without more the window would stay however it looked at last
+                // enable_blur/disable_blur until the next theme event or restart.
+                //
+                // libcosmic's own re-evaluation path (`Action::BlurEnabled`, see
+                // `app/cosmic.rs` in the pinned rev) doesn't fix that either: it gates
+                // BOTH `enable_blur` and `disable_blur` behind the very `Core::blur`
+                // check we just flipped, so turning the mask off skips the `if` and never
+                // issues `disable_blur` at all — the window would stay frosted. So this
+                // computes the up-to-date should-frost the same way `Core::blur` does
+                // (mask AND theme — never past the theme) and drives the compositor
+                // command directly instead of going through that action.
+                if !self.running() {
+                    self.config.frosted_background = on;
+                    let _ = self.config.save();
+                    self.core.set_auto_blur(auto_blur_mask(on));
+                    if let Some(id) = self.core.main_window_id() {
+                        let should_frost = self.core.blur(self.core.system_theme(), None);
+                        return if should_frost {
+                            cosmic::iced::window::enable_blur(id)
+                        } else {
+                            cosmic::iced::window::disable_blur(id)
+                        };
+                    }
+                }
+            }
+            Message::EnableFrostedThemeFlag => {
+                self.frost_flag_error = match frost::write_frosted_flag(&frost::real_config_dir()) {
+                    Ok(()) => None,
+                    Err(e) => Some(e.to_string()),
+                };
             }
             Message::ToggleAdvanced => self.show_advanced = !self.show_advanced,
             Message::ShowTraces => {
@@ -874,7 +939,8 @@ impl AppModel {
         col = col.push(actions);
 
         col = col.push(self.gpu_pin_picker());
-        col.push(self.debuginfod_toggle()).into()
+        col = col.push(self.debuginfod_toggle());
+        col.push(self.frosted_background_toggle()).into()
     }
 
     /// The debuginfod on-demand fetch toggle. On by default (see `preflight::Config`); the
@@ -895,6 +961,52 @@ impl AppModel {
                     .on_toggle(Message::SetDebuginfodFetch),
             )
             .into()
+    }
+
+    /// The Frosted background toggle (app-local allow-mask), plus — only while neither
+    /// COSMIC theme key file exists yet — the non-COSMIC assist to write it. See
+    /// `Config::frosted_background` and `frost::frosted_flag_offered`.
+    fn frosted_background_toggle(&self) -> Element<'_, Message> {
+        let mut col = widget::Column::new()
+            .spacing(8)
+            .push(widget::text::body("Frosted background"))
+            .push(widget::text::caption(
+                "Follows the system theme's Frosted Glass setting. Off keeps beisl-setup \
+                 opaque even under a frosted theme.",
+            ))
+            .push(
+                widget::toggler(self.config.frosted_background)
+                    .label("Follow theme".to_string())
+                    .on_toggle(Message::SetFrostedBackground),
+            );
+
+        // Only offered while the theme has no explicit preference yet (neither key file
+        // exists) — once one does, the theme/user has spoken and we leave it alone.
+        if frost::frosted_flag_offered(&frost::real_config_dir()) {
+            col = col
+                .push(widget::text::caption(
+                    "Outside COSMIC Settings there's no dialog for the theme's own Frosted \
+                     Glass flag. This writes the COSMIC theme key `frosted_windows=true` for \
+                     both the Dark and Light themes — it affects every libcosmic app, not just \
+                     Beisl. To revert, delete the two key files: \
+                     ~/.config/cosmic/com.system76.CosmicTheme.{Dark,Light}/v1/frosted_windows.",
+                ))
+                .push(
+                    widget::button::suggested("Enable the frosted theme flag")
+                        .on_press(Message::EnableFrostedThemeFlag),
+                );
+        }
+        // Outside the `offered()` gate on purpose: `write_frosted_flag` rolls a partial
+        // write back on failure (best-effort — the rollback itself can't be guaranteed),
+        // but even set aside that edge case, an error is the one time this MUST stay
+        // visible instead of silently riding out with the row it came from.
+        if let Some(e) = &self.frost_flag_error {
+            col = col.push(widget::text::caption(format!(
+                "Couldn't write the frosted theme flag: {e}"
+            )));
+        }
+
+        col.into()
     }
 
     /// The GPU pin picker: "Don't pin (default)" plus one radio per detected candidate —

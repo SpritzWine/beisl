@@ -167,15 +167,20 @@ impl Application for SessionApp {
             stale,
             session.state,
         );
+        let config = Config::load();
         let mut core = core;
         core.set_header_title(title.clone());
+        // The allow-mask lives on `Core`, per-app not per-window — the session window
+        // builds its own `Core` (a separate `cosmic::app::run` call), so it needs the same
+        // application the setup page does at init (see `main::auto_blur_mask`).
+        core.set_auto_blur(crate::auto_blur_mask(config.frosted_background));
         (
             Self {
                 core,
                 dir,
                 session,
                 have,
-                config: Config::load(),
+                config,
                 enabling: None,
                 enable_note: None,
                 artifact,

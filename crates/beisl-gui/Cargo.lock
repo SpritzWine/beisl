@@ -496,6 +496,7 @@ name = "beisl-gui"
 version = "0.1.0"
 dependencies = [
  "artifact",
+ "enumflags2",
  "libcosmic",
  "plotters",
  "plotters-backend",

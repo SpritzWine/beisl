@@ -33,7 +33,11 @@ group read access to GPU crash dumps, so the evidence of a GPU-side crash can
 be saved the moment it happens.
 
 The Advanced section holds the poweruser switches: GPU pin for multi-GPU
-boxes, on-demand debug-symbol fetch, and dump-access policy.
+boxes, on-demand debug-symbol fetch, dump-access policy, and Frosted
+background — whether beisl-setup follows the system theme's Frosted Glass
+setting (on by default). Outside COSMIC's Settings app, where there's no
+dialog for that theme flag, a button in the same section offers to write it
+directly; it only appears while the theme has no saved preference yet.
 
 When started from an extracted dist tree, an install/update page comes first;
 the Traces page lists every past run — open one for its results, reveal its

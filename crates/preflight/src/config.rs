@@ -125,12 +125,26 @@ pub struct Config {
     /// re-promote it automatically if a later trace observes a regression.
     #[serde(default)]
     pub steam_path_observation: SteamPathObservation,
+    /// Whether `beisl-setup` follows the system theme's Frosted Glass setting (libcosmic's
+    /// per-app allow-mask, `Core::set_auto_blur`). Default **true** — follow the theme, the
+    /// old behavior before this switch existed. Named explicitly rather than via a bare
+    /// `#[serde(default)]` for the same reason as `debuginfod_fetch`: a plain `bool` would
+    /// default to `false` for both an old config file missing this key and
+    /// `Config::default()`, which would silently opt every existing user out.
+    #[serde(default = "default_frosted_background")]
+    pub frosted_background: bool,
 }
 
 /// Backs `debuginfod_fetch`'s default in both the serde attribute (so a config file
 /// written before this field existed loads as `true`, not `bool`'s usual `false`) and
 /// `Config`'s hand-written `Default` impl below, so the two can never drift apart.
 fn default_debuginfod_fetch() -> bool {
+    true
+}
+
+/// Backs `frosted_background`'s default the same way `default_debuginfod_fetch` backs
+/// its field — see that field's doc comment.
+fn default_frosted_background() -> bool {
     true
 }
 
@@ -142,6 +156,7 @@ impl Default for Config {
             clean_run_analysis: CleanRunAnalysis::default(),
             debuginfod_fetch: default_debuginfod_fetch(),
             steam_path_observation: SteamPathObservation::default(),
+            frosted_background: default_frosted_background(),
         }
     }
 }
@@ -224,11 +239,17 @@ mod tests {
             SteamPathObservation::Unknown
         );
 
+        // Frosted background defaults to on — same derived-`Default` footgun dodge as
+        // `debuginfod_fetch` (absent key, and `Config::default()`, both read `true`).
+        assert!(Config::load().frosted_background);
+        assert!(Config::default().frosted_background);
+
         let cfg = Config {
             dump_access_policy: DumpAccessPolicy::RuleInstalled,
             clean_run_analysis: CleanRunAnalysis::Discard,
             debuginfod_fetch: false,
             steam_path_observation: SteamPathObservation::Fixed,
+            frosted_background: false,
             ..Default::default()
         };
         cfg.save().unwrap();
@@ -238,6 +259,7 @@ mod tests {
             Config::load().steam_path_observation,
             SteamPathObservation::Fixed
         );
+        assert!(!Config::load().frosted_background);
 
         // The on-disk form is the kebab-case string, not a bare enum.
         let text = std::fs::read_to_string(Config::path()).unwrap();
@@ -248,6 +270,7 @@ mod tests {
             text.contains("steam_path_observation = \"fixed\""),
             "got: {text}"
         );
+        assert!(text.contains("frosted_background = false"), "got: {text}");
 
         std::fs::remove_dir_all(&tmp).ok();
         unsafe {
