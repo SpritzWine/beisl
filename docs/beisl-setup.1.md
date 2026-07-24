@@ -37,7 +37,10 @@ boxes, on-demand debug-symbol fetch, dump-access policy, and Frosted
 background — whether beisl-setup follows the system theme's Frosted Glass
 setting (on by default). Outside COSMIC's Settings app, where there's no
 dialog for that theme flag, a button in the same section offers to write it
-directly; it only appears while the theme has no saved preference yet.
+directly; it only appears while the theme has no saved preference yet. When
+`cosmic-settings` is installed, a link in the same section opens it straight
+to the Appearance page — the link never writes anything, and changing or
+reverting the theme flag always happens in Settings.
 
 When started from an extracted dist tree, an install/update page comes first;
 the Traces page lists every past run — open one for its results, reveal its

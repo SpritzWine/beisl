@@ -77,9 +77,37 @@ pub fn real_config_dir() -> PathBuf {
         })
 }
 
+/// Is `cosmic-settings` on the real `PATH`? Gates the "Open COSMIC Settings" deep-link —
+/// it's the owner of the theme's Frosted Glass toggle (under Appearance), so beisl only
+/// ever offers to hand the user to it, never to revert the theme itself.
+pub fn cosmic_settings_on_path() -> bool {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    on_path(&path, "cosmic-settings")
+}
+
+/// Core: does `bin` exist as an executable regular file in any of `path`'s dirs? Same
+/// walk-PATH idiom as `preflight`'s `which` (crates/preflight/src/lib.rs), kept here
+/// instead since this is libcosmic-specific UI assistance, not a trace prerequisite —
+/// plus the executable-bit check `which` doesn't need (it only ever probes packaged
+/// tools). Takes `path` as a parameter, not read from the environment, so it's testable
+/// against a fake PATH.
+fn on_path(path: &std::ffi::OsStr, bin: &str) -> bool {
+    std::env::split_paths(path).any(|dir| {
+        std::fs::metadata(dir.join(bin))
+            .map(|m| m.is_file() && is_executable(&m))
+            .unwrap_or(false)
+    })
+}
+
+fn is_executable(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode() & 0o111 != 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn offered_when_absent() {
@@ -155,5 +183,42 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// A fresh tempdir for one `on_path` test, so parallel tests never share a PATH dir.
+    fn path_tmp(name: &str) -> PathBuf {
+        let tmp =
+            std::env::temp_dir().join(format!("beisl-frost-onpath-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        tmp
+    }
+
+    #[test]
+    fn on_path_finds_an_executable_entry() {
+        let dir = path_tmp("found");
+        let bin = dir.join("cosmic-settings");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(on_path(dir.as_os_str(), "cosmic-settings"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn on_path_missing_from_an_empty_path() {
+        assert!(!on_path(std::ffi::OsStr::new(""), "cosmic-settings"));
+    }
+
+    #[test]
+    fn on_path_ignores_a_non_executable_file() {
+        let dir = path_tmp("noexec");
+        let bin = dir.join("cosmic-settings");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert!(!on_path(dir.as_os_str(), "cosmic-settings"));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -162,6 +162,11 @@ enum Message {
     /// both Dark and Light (see `frost::write_frosted_flag`). Shown only while neither file
     /// exists yet; re-evaluated on every render, so success just makes the row disappear.
     EnableFrostedThemeFlag,
+    /// Advanced: hand the user to COSMIC Settings' own Appearance page, which owns the
+    /// theme's Frosted Glass toggle — beisl never reverts theme state itself. Shown
+    /// whenever `cosmic-settings` is on PATH (see `AppModel::cosmic_settings_on_path`),
+    /// regardless of whether the theme key exists — useful both to enable and to revert.
+    OpenCosmicSettings,
     ToggleAdvanced,
     /// Show the trace library (rescans on every entry — cheap, and a run finished
     /// since the last look should simply be there).
@@ -204,6 +209,9 @@ struct AppModel {
     /// A failed `frost::write_frosted_flag` attempt's error, shown as a caption under the
     /// assist button; `None` on success (the button's row simply stops rendering).
     frost_flag_error: Option<String>,
+    /// Is `cosmic-settings` on PATH — gates the "Open COSMIC Settings" deep-link. Computed
+    /// once at init (PATH doesn't change mid-session); see `frost::cosmic_settings_on_path`.
+    cosmic_settings_on_path: bool,
     show_advanced: bool,
     log: Vec<String>,
     error: Option<String>,
@@ -393,6 +401,7 @@ impl Application for AppModel {
             gpu_candidates: preflight::gpu::detect_candidates(),
             traces: traces::TracesTab::default(),
             frost_flag_error: None,
+            cosmic_settings_on_path: frost::cosmic_settings_on_path(),
             show_advanced: false,
             log: Vec::new(),
             error: None,
@@ -542,6 +551,17 @@ impl Application for AppModel {
                     Ok(()) => None,
                     Err(e) => Some(e.to_string()),
                 };
+            }
+            Message::OpenCosmicSettings => {
+                // Fire-and-forget, same as the Steam-issue link: beisl hands the user to
+                // the theme's actual owner rather than acting on its behalf, so a failed
+                // spawn just means no window opens — nothing to abort or prompt over.
+                let _ = std::process::Command::new("cosmic-settings")
+                    .arg("appearance")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
             }
             Message::ToggleAdvanced => self.show_advanced = !self.show_advanced,
             Message::ShowTraces => {
@@ -1004,6 +1024,21 @@ impl AppModel {
             col = col.push(widget::text::caption(format!(
                 "Couldn't write the frosted theme flag: {e}"
             )));
+        }
+
+        // Also outside the `offered()` gate, and unconditional on it: beisl never owns
+        // theme state, so this stays visible whether the key is unset (to enable) or
+        // already set (to revert) — the write-assist above is the only row whose
+        // visibility depends on that key.
+        if self.cosmic_settings_on_path {
+            col = col
+                .push(widget::text::caption(
+                    "The system theme's Frosted Glass toggle lives under Appearance.",
+                ))
+                .push(
+                    widget::button::link("Open COSMIC Settings \u{2197}")
+                        .on_press(Message::OpenCosmicSettings),
+                );
         }
 
         col.into()
