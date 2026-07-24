@@ -20,22 +20,22 @@ releasenotes.md       verbatim copy of the repo's RELEASENOTES.md (main branch),
 
 ## Deploying to Codeberg Pages
 
-This site is the `page/` directory on the **`pages` branch** of
+This site is the root of the **`pages` branch** of
 [`SpritzWine/beisl`](https://codeberg.org/SpritzWine/beisl). Codeberg serves a
 repo's `pages` branch at `https://<org>.codeberg.page/<repo>/…` — no build step,
 no webhook. Pushing the branch republishes it:
 
 ```sh
 # from a checkout of the beisl repo, on the pages branch
-git show main:RELEASENOTES.md > page/releasenotes.md   # refresh at each release
-git add page
+git show main:RELEASENOTES.md > releasenotes.md   # refresh at each release
+git add -A
 git commit -m "update landing page"
 git push origin pages
 ```
 
 Published at:
 
-    https://spritzwine.codeberg.page/beisl/page/
+    https://spritzwine.codeberg.page/beisl/
 
 Everything is relative-path (`assets/…`), so it works unchanged under that
 sub-path — no base-href to adjust. Updates go live on push (allow a few minutes

@@ -446,7 +446,7 @@
 
   /* ---------- release notes: releasenotes.md, rendered client-side ----------
      Single source of truth: the file is a verbatim copy of the repo's
-     RELEASENOTES.md, refreshed at each release (see page/README.md). Fetch is
+     RELEASENOTES.md, refreshed at each release (see README.md). Fetch is
      same-origin only — the page's no-external-requests rule holds; under
      file:// (or any fetch failure) the section keeps its fallback link. */
 
