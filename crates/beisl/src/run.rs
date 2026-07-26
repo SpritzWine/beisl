@@ -116,6 +116,9 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
     let mut gpuwatch = gpu::GpuWatch::new(&run_dir);
 
     // Publish the initial state so the window has something to show immediately.
+    // `wrapper` is OUR identity (this process IS the wrapper), so a reader can later
+    // tell a same-boot crash from a genuinely live run (see session::WrapperProc) -
+    // `None` on failure just degrades to the pre-boot-only staleness rule.
     let mut sess = Session {
         game: game_name(&prog),
         trace_dir: run_dir.display().to_string(),
@@ -124,6 +127,7 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
         warnings: preflight_warnings(),
         gpu_pin: cfg.gpu_pin.as_ref().map(|p| p.name.clone()),
         record_mode: mode.as_str().to_string(),
+        wrapper: session::WrapperProc::current(),
         ..Default::default()
     };
     let _ = sess.write(&run_dir);

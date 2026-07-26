@@ -105,9 +105,10 @@ fn resolve_deletable(entries: &[RunEntry], ids: &HashSet<String>) -> Vec<std::pa
         .collect()
 }
 
-/// The row caption's state word. A stale run (session claims a live state, but it
-/// started before the current boot — see `RunEntry::is_stale`: nothing can still own
-/// that directory) is checked FIRST, so it reads honestly as never having finished
+/// The row caption's state word. A stale run (session claims a live state, but either
+/// it started before the current boot or its recorded wrapper process is provably
+/// gone - see `RunEntry::is_stale`: nothing can still own that directory) is checked
+/// FIRST, so it reads honestly as never having finished
 /// rather than "recording"/"in use" forever. Genuinely live states are named honestly
 /// too — Starting/Running/Recording/Stopping, or Saved's own "still running" — so a
 /// live row never reads like a finished one (e.g. a Recording run must not say "not

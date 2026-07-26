@@ -160,7 +160,7 @@ impl Application for SessionApp {
         // Not `self.is_stale()` — there's no `Self` yet — but the same core, since
         // `is_stale()` is just this call wrapped around `self.dir`/`self.session`.
         let stale =
-            session::library::stale_session(session.state, session::library::run_started(&dir));
+            session::library::stale_session(&session, session::library::run_started(&dir));
         let title = window_title(
             artifact.is_some(),
             session.analysis_offer,
@@ -366,10 +366,10 @@ impl Application for SessionApp {
         // Pick the surface: a resolved trace shows results; a kept-but-un-analyzed clean run
         // (or a stale run with perf.data still on disk) shows the ask; a stale run with
         // nothing to analyze gets the plain stale view; anything else is the live view. The
-        // `is_stale()` check comes before the live fallback so a run stuck in a live state
-        // from a dead boot can NEVER fall through to `live_content` — that's the bug this
-        // surface selection exists to close (a crashed/killed game's window used to show
-        // "Recording" forever).
+        // `is_stale()` check comes before the live fallback so a run whose wrapper is
+        // provably gone (a dead boot, or - same boot - a dead pid) can NEVER fall through
+        // to `live_content` - that's the bug this surface selection exists to close (a
+        // crashed/killed game's window used to show "Recording" forever).
         let (content, buttons) = if self.gone {
             // The dir was deleted under us (library bulk delete, manual rm). Anything
             // else would render from stale in-memory state — say it plainly instead.
@@ -419,16 +419,16 @@ impl SessionApp {
         matches!(self.session.state, State::Done | State::Error)
     }
 
-    /// Live-state session from a boot that's gone — `RunEntry::is_stale`'s counterpart
-    /// via the `Session`-only entry point (this window has no scanned `RunEntry`).
-    /// A wrapper-spawned window is for a run started *this* boot (dir timestamp >=
-    /// btime), so a genuinely live window can't trip this — short of a forward clock
-    /// step larger than the run's age.
+    /// A live-state session whose wrapper is provably gone - `RunEntry::is_stale`'s
+    /// counterpart via the `Session`-only entry point (this window has no scanned
+    /// `RunEntry`). Either the run started before the current boot, or its recorded
+    /// wrapper pid/starttime (`Session::wrapper`) no longer matches anything in
+    /// `/proc`. A wrapper-spawned window is for a run started *this* boot and whose
+    /// wrapper is, by construction, alive at spawn time, so a genuinely live window
+    /// can't trip either rule - short of the wrapper dying moments later, which is
+    /// exactly the case this item exists to catch.
     fn is_stale(&self) -> bool {
-        session::library::stale_session(
-            self.session.state,
-            session::library::run_started(&self.dir),
-        )
+        session::library::stale_session(&self.session, session::library::run_started(&self.dir))
     }
 
     /// A settled run that was never analyzed but still has its raw trace — the

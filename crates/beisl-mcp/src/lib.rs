@@ -166,7 +166,8 @@ impl Server {
     /// the current boot, and this tool had no way to say so) was unanswerable over
     /// MCP before `state`/`stale` existed here: an AI client could see `analyzed`
     /// but not the session state a stuck run was left in, nor tell a genuinely live
-    /// run from one whose wrapper died with a previous boot.
+    /// run from one whose wrapper died - with a previous boot, or (via the pid probe)
+    /// within the current one.
     fn list_traces(&self) -> String {
         let runs: Vec<Value> = library::scan(&self.traces_root)
             .iter()
@@ -303,18 +304,21 @@ impl Server {
     /// `session.json`/`beisl.log`) is `>= since_unix` — NOT just its start time. Filtering
     /// on start time alone would permanently drop any run still alive at poll time: the
     /// cursor advances past its (already-passed) start, so a crash that lands later —
-    /// including staleness, which by definition only becomes visible after a reboot, long
-    /// after the run's original start — is never re-examined on a later poll. The `>=`
+    /// including staleness, which can surface anywhere from moments after the wrapper
+    /// dies (the pid-probe half of `RunEntry::is_stale`) to a whole reboot later (the
+    /// pre-boot half) - is never re-examined on a later poll. The `>=`
     /// (kept, not tightened to `>`) means a run whose last activity lands exactly on a
     /// cursor value can reappear on the next poll that reuses that value: at-least-once
     /// delivery, not exactly-once. Clients should dedupe by `(run_id, kind)`.
     ///
     /// Event kinds, newest run first:
     /// * `crash` — the run is stale (`library::RunEntry::is_stale`: a still-live-looking
-    ///   state left over from before the current boot) in anything OTHER than `Saved`
-    ///   (recorder stopped, game kept running — the session window treats Saved+stale as
-    ///   "trace saved, the game has since exited", not a crash, and so does this: an
-    ///   ordinary Stop-and-keep-playing followed by an ordinary reboot must stay silent);
+    ///   state whose wrapper is provably gone - either it started before the current
+    ///   boot, or its recorded pid/starttime no longer matches `/proc`) in anything
+    ///   OTHER than `Saved` (recorder stopped, game kept running - the session window
+    ///   treats Saved+stale as "trace saved, the game has since exited", not a crash,
+    ///   and so does this: an ordinary Stop-and-keep-playing followed by an ordinary
+    ///   reboot must stay silent);
     ///   or `session.json` is `State::Error` (the wrapper failed to spawn the game at
     ///   all); or the wrapper's own `session::EXIT_LOG_MARKER` log line (see `run.rs`)
     ///   reports anything other than a clean `exit status: 0`.
@@ -344,8 +348,8 @@ impl Server {
             let state = session.map(|s| s.state);
             // Saved+stale is the benign "trace saved — the game has since exited" case
             // (mirrors the session window's own stale handling): only the OTHER live
-            // states (Starting/Running/Recording/Stopping) mean whatever was recording
-            // it actually died with that boot.
+            // states (Starting/Running/Recording/Stopping) mean the wrapper that was
+            // recording it is actually gone (pre-boot, or its pid provably dead now).
             let stale_crash = run.is_stale() && state != Some(session::State::Saved);
             let spawn_failed = state == Some(session::State::Error);
             let exit_crashed = wrapper_exit_crashed(&beisl_log).unwrap_or(false);
@@ -505,10 +509,7 @@ fn crash_detail(session: Option<&session::Session>, beisl_log: &str, stale: bool
         let state = session
             .map(|s| format!("{:?}", s.state))
             .unwrap_or_else(|| "unknown".to_string());
-        return format!(
-            "stuck in {state} since before this boot — whatever was recording it died \
-             with that boot"
-        );
+        return format!("stuck in {state} - the wrapper that was recording it is gone");
     }
     if session.map(|s| s.state) == Some(session::State::Error) {
         return match session.map(|s| s.message.as_str()) {
@@ -582,9 +583,10 @@ fn tools_list() -> Value {
             "description": "List all recorded game-performance runs, newest first: run_id, \
                             game, start time, duration, whether an analysis artifact \
                             exists, the session state, and whether the run is stale \
-                            (a live-looking state left over from before the current \
-                            boot — nothing can still own it, so it's a stuck run, not \
-                            an active one).",
+                            (a live-looking state whose wrapper is provably gone - \
+                            either it started before the current boot, or its pid died \
+                            within this one - so nothing can still own it: a stuck run, \
+                            not an active one).",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         },
         {
@@ -648,9 +650,10 @@ fn tools_list() -> Value {
                             active exactly on the cursor can repeat once), so dedupe by \
                             (run_id, kind) if that matters to you. Conservative by design \
                             (a clean run is silent — no events): 'crash' (abnormal exit, \
-                            wrapper launch failure, or a stuck/stale run left from a \
-                            previous boot — but NOT a run that was cleanly stopped and \
-                            kept playing before an ordinary reboot), 'gpu' (a GPU hang/\
+                            wrapper launch failure, or a stuck/stale run whose wrapper is \
+                            provably gone - from a previous boot, or its pid dying within \
+                            this one - but NOT a run that was cleanly stopped and kept \
+                            playing before an ordinary reboot), 'gpu' (a GPU hang/\
                             devcoredump warning), 'log-signal' (an error-shaped game-log \
                             line, only alongside a harder signal or an invalid run). Each \
                             event's detail is a short pointer — get_crash_summary is the \
@@ -857,7 +860,8 @@ mod tests {
         // The real motivating case (2026-07-19): "which runs are stuck?" was
         // unanswerable over MCP — list_traces had `analyzed` but nothing about the
         // session state a stuck run was left in, nor a way to tell a genuinely live
-        // run from one whose wrapper died with a previous boot.
+        // run from one whose wrapper died - with a previous boot, or (via the pid
+        // probe) within the current one.
         let root = fixture_root("state");
         // put_run's Session defaults to State::Starting (a live state) with a
         // `started` — from the run-* dir name — of 100: always long before this

@@ -80,6 +80,104 @@ pub struct Session {
     /// zero-byte-write failure, which reads `raw_bytes == 0` identically otherwise.
     #[serde(default)]
     pub trace_discarded: bool,
+    /// The wrapper's own process identity, captured at launch - lets a reader probe
+    /// whether it's still alive (`WrapperProc::verdict`) instead of only trusting the
+    /// last state it managed to write. `#[serde(default)]`/`None` on legacy runs and
+    /// whenever `WrapperProc::current()` couldn't read `/proc` for some part of it -
+    /// those degrade to the pre-boot-only staleness rule, same as before this field
+    /// existed.
+    #[serde(default)]
+    pub wrapper: Option<WrapperProc>,
+}
+
+/// The wrapper process's identity, recorded once at launch so a later reader -
+/// possibly outside this process, possibly outside its PID namespace entirely - can
+/// tell whether it's still running. See `verdict` for the actual liveness check.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct WrapperProc {
+    pub pid: u32,
+    /// `/proc/<pid>/stat` field 22 (start time in clock ticks since boot). Paired with
+    /// `pid` so a recycled pid can't be mistaken for the same process: an unrelated
+    /// process reusing this pid will almost certainly have a different starttime.
+    pub starttime: u64,
+    /// `/proc/self/ns/pid`'s target (e.g. "pid:[4026531836]") at launch - see
+    /// `verdict`'s doc comment for why this matters.
+    pub pid_ns: String,
+}
+
+impl WrapperProc {
+    /// The calling process's own identity. Meant to be called once, by the wrapper
+    /// itself, right after it starts. `None` if any part is unreadable - never guess
+    /// at a liveness fact we can't back up; a `None` here just means the run degrades
+    /// to the pre-boot-only staleness rule later.
+    ///
+    /// Both `pid` and `starttime` come from the SAME read of `/proc/self/stat`,
+    /// rather than `std::process::id()` + a second `/proc/<pid>/stat` open - the pid
+    /// field there is `getpid()`'s own answer, but pairing it with a `/proc` lookup
+    /// keyed by a value from a different syscall leaves a seam if `/proc` were ever
+    /// mounted from a different namespace than the caller's `getpid()` (the same
+    /// exotic case the `pid_ns` guard in `verdict` exists for). One read closes it.
+    pub fn current() -> Option<Self> {
+        let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+        let pid = parse_pid(&stat)?;
+        let starttime = parse_starttime(&stat)?;
+        let pid_ns = std::fs::read_link("/proc/self/ns/pid")
+            .ok()?
+            .to_str()?
+            .to_string();
+        Some(Self {
+            pid,
+            starttime,
+            pid_ns,
+        })
+    }
+
+    /// Whether the process recorded here is still the one running: `Some(true)`
+    /// alive, `Some(false)` gone (exited, or its pid recycled by something else),
+    /// `None` inconclusive. Every rule favors "inconclusive" over a wrong "gone" - a
+    /// bad verdict here would tell a reader to delete or hide a still-recording run.
+    ///
+    /// The PID-namespace check is the important one: beisl traces are routinely
+    /// launched inside Steam's pressure-vessel container, which has its own PID
+    /// namespace. A desktop-side reader (the Traces page) probing a container-local
+    /// pid from outside would hit an unrelated process - or none - and could declare
+    /// a genuinely live recording dead. A mismatched namespace means this pid isn't
+    /// ours to interpret at all, so it's `None`, not a guess either way.
+    pub fn verdict(&self) -> Option<bool> {
+        let our_ns = std::fs::read_link("/proc/self/ns/pid").ok()?;
+        if our_ns.to_str() != Some(self.pid_ns.as_str()) {
+            return None;
+        }
+        let stat = match std::fs::read_to_string(proc_stat_path(self.pid)) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(false),
+            Err(_) => return None,
+        };
+        parse_starttime(&stat).map(|st| st == self.starttime)
+    }
+}
+
+fn proc_stat_path(pid: u32) -> String {
+    format!("/proc/{pid}/stat")
+}
+
+/// Pull field 1 (pid) out of a `/proc/<pid>/stat` line - pure and /proc-free like
+/// `parse_starttime`, and safe for the same reason `comm` can't confuse it: pid is
+/// purely numeric, so the first `(` in the line is unambiguously where `comm` starts,
+/// no matter what `comm` itself contains.
+fn parse_pid(stat: &str) -> Option<u32> {
+    stat.split('(').next()?.trim().parse().ok()
+}
+
+/// Pull field 22 (starttime) out of a `/proc/<pid>/stat` line. Pure and /proc-free so
+/// it's unit-testable directly. `comm` (field 2) is the process name in parentheses,
+/// unquoted, and may itself contain spaces and even parentheses - so the only safe
+/// split point is the LAST `)` in the line, not the first whitespace. Everything after
+/// it is fields 3.. as whitespace-separated tokens, so field 22 sits at index 19
+/// (field 3 is index 0). `None` on anything short of that shape.
+fn parse_starttime(stat: &str) -> Option<u64> {
+    let after_comm = stat.rsplit_once(')')?.1;
+    after_comm.split_whitespace().nth(19)?.parse().ok()
 }
 
 impl Session {
@@ -186,6 +284,16 @@ pub mod library {
         /// current boot is excluded (see `is_stale`) — nothing can still own a
         /// directory from a boot that's gone, and treating it as live would caption it
         /// "recording" forever.
+        ///
+        /// "Might still own" is deliberately loose even once the wrapper is confirmed
+        /// gone (`is_stale`'s probe half): `perf` is started with `PDEATHSIG` so it
+        /// exits with the wrapper, but MangoHud is the GAME's overlay, not the
+        /// wrapper's child - it keeps appending frametimes to its CSV in this same
+        /// directory for as long as the game runs. Consequences are mild (a dead
+        /// wrapper means the trace is unrecoverable anyway, and MangoHud is just
+        /// writing on to an fd whose directory entry a bulk-delete already removed),
+        /// but it means "not live" here is a statement about the WRAPPER, not a
+        /// guarantee that nothing is still writing into the directory.
         pub fn is_live(&self) -> bool {
             self.is_live_at(boot_time())
         }
@@ -197,10 +305,11 @@ pub mod library {
         /// `is_live`'s new gating would otherwise protect them from deletion and
         /// caption them "recording" forever.
         ///
-        /// The converse isn't detected: a wrapper that dies within the *current*
-        /// boot leaves its run wrongly-live until the next reboot — that would
-        /// need a pid liveness probe (wrapper pid in session.json + /proc check),
-        /// a separate mechanism for a much rarer window.
+        /// The converse - a wrapper killed within the *current* boot - is caught too,
+        /// via `Session::wrapper`: a recorded pid/starttime that no longer matches
+        /// anything in `/proc` (or is simply gone) reads as stale immediately, rather
+        /// than waiting for the next reboot. See `stale_session_at` for how the two
+        /// rules compose.
         pub fn is_stale(&self) -> bool {
             self.is_stale_at(boot_time())
         }
@@ -220,7 +329,7 @@ pub mod library {
         pub(crate) fn is_stale_at(&self, boot: Option<u64>) -> bool {
             self.session
                 .as_ref()
-                .is_some_and(|s| stale_session_at(s.state, self.started, boot))
+                .is_some_and(|s| stale_session_at(s, self.started, boot))
         }
     }
 
@@ -240,34 +349,79 @@ pub mod library {
         )
     }
 
-    /// Core of `stale_session`, boot time injectable — same pattern as
-    /// `RunEntry::is_stale_at`, and in fact the function it now delegates to. Two
-    /// conservative edges, each favoring "protect the data" over "reclaim the row":
-    /// boot time unknown -> nothing is stale (a false "live" only keeps a row around a
-    /// little longer; a false "stale" could let someone delete/hide an in-progress
-    /// recording). An unparseable/zero `started` -> not stale either, for the same
-    /// reason — an unknown age is never treated as an old one. Settled states
-    /// (`Done`/`Error`) are excluded by `is_live_state` itself: settled is settled,
-    /// not "stale".
-    pub(crate) fn stale_session_at(state: super::State, started: u64, boot: Option<u64>) -> bool {
-        is_live_state(state) && started > 0 && boot.is_some_and(|b| started < b)
+    /// Core of `stale_session`, boot/verdict both injectable - same pattern as
+    /// `RunEntry::is_stale_at`, and in fact the function it now delegates to. Reads
+    /// the wrapper's own liveness verdict off `session.wrapper` (see
+    /// `super::WrapperProc::verdict`) and ORs it with the pre-boot rule via
+    /// `stale_core`, which is where the actual conservative logic lives - kept
+    /// separate so tests can inject the verdict without touching real `/proc`.
+    ///
+    /// The probe only runs for a live-state session: `stale_core` would ignore its
+    /// verdict for a settled `Done`/`Error` row anyway (`is_live_state` gates the
+    /// whole rule there), so skipping it here saves a `readlink` + a `/proc/<pid>/stat`
+    /// read per settled row - and the Traces page calls this multiple times per row,
+    /// per render.
+    pub(crate) fn stale_session_at(
+        session: &super::Session,
+        started: u64,
+        boot: Option<u64>,
+    ) -> bool {
+        let verdict = is_live_state(session.state)
+            .then(|| {
+                session
+                    .wrapper
+                    .as_ref()
+                    .and_then(super::WrapperProc::verdict)
+            })
+            .flatten();
+        stale_core(session.state, started, boot, verdict)
     }
 
-    /// Whether a live-state session (`state`, with the run's launch time `started` —
-    /// see `run_started`) is actually stuck: it started before the current boot, so
-    /// whatever process was recording it died with that boot without ever writing
-    /// `Done`/`Error`/`Saved`->done. The `Session`+`started`-only entry point for
-    /// callers that don't have a scanned `RunEntry` — the session window watches its
-    /// *own* live `session.json` directly, not a `library::scan` result. Same core
-    /// (`is_live_state` + the real boot time) as `RunEntry::is_stale`, so the two can
-    /// never disagree about the same run.
+    /// The actual staleness rule, with both the boot time and the wrapper-liveness
+    /// verdict injected - the innermost core, so unit tests exercise it directly
+    /// without ever touching `/proc` or the real kernel clock. A live state
+    /// (`is_live_state`) is stale when EITHER of two independent, both-conservative
+    /// rules fires:
+    /// * pre-boot: `started` predates `boot` - whatever wrapper was recording it died
+    ///   with that boot. Stands alone, unconditionally: even a `Some(true)` verdict
+    ///   never rescues a pre-boot run (a same pid + starttime recurring across a
+    ///   reboot would otherwise be a false "still alive").
+    /// * probe-dead: `verdict == Some(false)` - the recorded wrapper pid/starttime no
+    ///   longer matches anything in `/proc`, so it died within the *current* boot.
+    ///
+    /// Boot unknown, an unparseable/zero `started`, and `verdict == None`
+    /// (inconclusive, e.g. a legacy run with no `Session::wrapper`, or a probe run
+    /// from a different PID namespace) all favor "not stale" - a false "live" only
+    /// keeps a row around a little longer, where a false "stale" could let someone
+    /// delete or hide an in-progress recording. Settled states (`Done`/`Error`) are
+    /// excluded by `is_live_state` itself: settled is settled, not "stale".
+    pub(crate) fn stale_core(
+        state: super::State,
+        started: u64,
+        boot: Option<u64>,
+        verdict: Option<bool>,
+    ) -> bool {
+        let pre_boot = started > 0 && boot.is_some_and(|b| started < b);
+        is_live_state(state) && (pre_boot || verdict == Some(false))
+    }
+
+    /// Whether a live-state `session` (with the run's launch time `started` - see
+    /// `run_started`) is actually stuck: either it started before the current boot
+    /// (whatever process was recording it died with that boot without ever writing
+    /// `Done`/`Error`/`Saved`->done), or its recorded wrapper process
+    /// (`Session::wrapper`) is provably gone within the current boot. The
+    /// `Session`+`started`-only entry point for callers that don't have a scanned
+    /// `RunEntry` - the session window watches its *own* live `session.json` directly,
+    /// not a `library::scan` result. Same core (`stale_core` + the real boot time and
+    /// wrapper verdict) as `RunEntry::is_stale`, so the two can never disagree about
+    /// the same run.
     ///
     /// A genuinely live window is never misclassified: the wrapper only spawns the
-    /// session window for a run it just started *this* boot, so `started >=
-    /// boot_time()` always holds for it and this returns `false`. Only a run stuck
-    /// from a *previous* boot ever trips it.
-    pub fn stale_session(state: super::State, started: u64) -> bool {
-        stale_session_at(state, started, boot_time())
+    /// session window for a run it just started *this* boot, so the pre-boot rule
+    /// never trips for it, and it's still alive to keep matching its own
+    /// pid/starttime for the probe rule.
+    pub fn stale_session(session: &super::Session, started: u64) -> bool {
+        stale_session_at(session, started, boot_time())
     }
 
     /// The kernel's boot time (unix epoch seconds), from `/proc/stat`'s `btime` line.
@@ -464,6 +618,127 @@ mod tests {
         assert_eq!(back.warnings.len(), 1);
         assert_eq!(back.record_mode, "degraded");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn wrapper_field_absent_from_disk_deserializes_to_none() {
+        // The legacy-file guarantee: a session.json written before this field existed
+        // (or by any other producer that omits it) must still parse, with `wrapper`
+        // defaulting to `None` rather than failing the whole read.
+        let dir = std::env::temp_dir().join(format!("beisl-sess-legacy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(Session::file_in(&dir), br#"{"game":"Old.exe","trace_dir":"","hotkey":"","state":"Recording","elapsed_secs":0,"trace_bytes":0,"warnings":[],"message":"","stop_requested":false}"#).unwrap();
+        let back = Session::read(&dir).unwrap();
+        assert_eq!(back.game, "Old.exe");
+        assert!(back.wrapper.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -- WrapperProc ----------------------------------------------------------------------
+
+    /// A syntactically valid `/proc/<pid>/stat` line with `starttime` planted at field
+    /// 22. After the `comm)`, real `/proc/<pid>/stat` has: state, then 18 more fields
+    /// (ppid..itrealvalue) before starttime - 19 tokens total before it, so it lands
+    /// at whitespace index 19 (state is index 0), matching `parse_starttime`'s doc.
+    fn fake_stat(pid: u32, comm: &str, starttime: u64) -> String {
+        // ppid pgrp session tty_nr tpgid flags minflt cminflt majflt cmajflt utime
+        // stime cutime cstime priority nice num_threads itrealvalue (18 fields).
+        let filler = "0 ".repeat(18);
+        format!("{pid} ({comm}) S {filler}{starttime} 0 0")
+    }
+
+    #[test]
+    fn parse_pid_reads_field_1_from_a_normal_stat_line() {
+        let stat = fake_stat(1234, "bash", 567890);
+        assert_eq!(parse_pid(&stat), Some(1234));
+    }
+
+    #[test]
+    fn parse_pid_handles_a_comm_with_spaces_and_parens() {
+        // comm can't confuse this one either: pid is purely numeric, so the FIRST `(`
+        // in the line is always where comm starts, regardless of what's inside it.
+        let stat = fake_stat(999, "my (game) launcher", 424242);
+        assert_eq!(parse_pid(&stat), Some(999));
+    }
+
+    #[test]
+    fn parse_pid_is_none_for_truncated_or_garbage_input() {
+        assert_eq!(parse_pid(""), None);
+        assert_eq!(parse_pid("no parens here at all"), None);
+        assert_eq!(parse_pid("not-a-number (sh) S"), None);
+    }
+
+    #[test]
+    fn parse_starttime_reads_field_22_from_a_normal_stat_line() {
+        let stat = fake_stat(1234, "bash", 567890);
+        assert_eq!(parse_starttime(&stat), Some(567890));
+    }
+
+    #[test]
+    fn parse_starttime_handles_a_comm_with_spaces_and_parens() {
+        // comm (field 2) is unquoted and copied verbatim from the kernel - a process
+        // named e.g. "my (game) launcher" must not confuse the parser into splitting
+        // on the WRONG `)`. The parser must split on the LAST one in the line.
+        let stat = fake_stat(999, "my (game) launcher", 424242);
+        assert_eq!(parse_starttime(&stat), Some(424242));
+    }
+
+    #[test]
+    fn parse_starttime_is_none_for_truncated_or_garbage_input() {
+        assert_eq!(parse_starttime(""), None);
+        assert_eq!(parse_starttime("no parens here at all"), None);
+        // Has a `)` but not enough fields after it to reach index 19.
+        assert_eq!(parse_starttime("123 (sh) S 1 2 3"), None);
+        // Enough fields, but the starttime slot itself isn't numeric.
+        let filler = "0 ".repeat(18);
+        let bad = format!("1 (sh) S {filler}not-a-number 0 0");
+        assert_eq!(parse_starttime(&bad), None);
+    }
+
+    #[test]
+    fn wrapper_proc_current_reports_the_test_process_itself_alive() {
+        // A free real-/proc sanity check: our own identity, probed right back, must
+        // read as alive.
+        let me = WrapperProc::current().expect("/proc/self/stat must be readable in CI");
+        assert_eq!(me.pid, std::process::id());
+        assert_eq!(me.verdict(), Some(true));
+    }
+
+    #[test]
+    fn wrapper_proc_verdict_is_dead_when_starttime_does_not_match() {
+        // Same pid + namespace as us, but a starttime that can never be ours - the
+        // pid-recycling case.
+        let mut me = WrapperProc::current().expect("/proc/self/stat must be readable in CI");
+        me.starttime = me.starttime.wrapping_add(12345);
+        assert_eq!(me.verdict(), Some(false));
+    }
+
+    #[test]
+    fn wrapper_proc_verdict_is_inconclusive_for_a_mismatched_pid_namespace() {
+        // A recorded namespace that isn't ours (the pressure-vessel-container case):
+        // the pid isn't ours to interpret, so the verdict must be None, never a guess.
+        let mut me = WrapperProc::current().expect("/proc/self/stat must be readable in CI");
+        me.pid_ns = "pid:[1]".to_string();
+        assert_eq!(me.verdict(), None);
+    }
+
+    /// A `WrapperProc` for our OWN process with its starttime perturbed - a
+    /// deterministic "provably dead" probe (`verdict() == Some(false)`) without ever
+    /// touching another process, the same trick as
+    /// `wrapper_proc_verdict_is_dead_when_starttime_does_not_match`. Used below to
+    /// prove `stale_session_at`/`is_stale_at` actually consult `WrapperProc::verdict`
+    /// - every other staleness test in this file injects a verdict straight into
+    /// `stale_core`, which would still pass even if the real join were deleted.
+    fn dead_wrapper() -> WrapperProc {
+        let mut w = WrapperProc::current().expect("/proc/self/stat must be readable in CI");
+        w.starttime = w.starttime.wrapping_add(12345);
+        w
+    }
+
+    /// A `WrapperProc` for our own process, unperturbed - a deterministic "provably
+    /// alive" probe (`verdict() == Some(true)`): we ARE this pid, right now.
+    fn alive_wrapper() -> WrapperProc {
+        WrapperProc::current().expect("/proc/self/stat must be readable in CI")
     }
 
     // -- library::scan ------------------------------------------------------------------
@@ -737,40 +1012,178 @@ mod tests {
         }
     }
 
+    // -- is_stale_at/is_live_at + a real WrapperProc (the actual join) ------------------
+    //
+    // `started` is deliberately POST-boot below, so the pre-boot rule can't be what's
+    // firing - only the probe can explain the result. This is the entry point the
+    // Traces page and beisl-mcp actually call, so it's the one that must exercise the
+    // real `WrapperProc::verdict()` call, not a hand-injected verdict.
+
+    #[test]
+    fn is_stale_at_flags_a_live_state_with_a_dead_probe_even_post_boot() {
+        let mut entry = live_entry(State::Recording, 300);
+        entry.session.as_mut().unwrap().wrapper = Some(dead_wrapper());
+        assert!(
+            entry.is_stale_at(Some(200)),
+            "a dead probe must be stale even post-boot"
+        );
+        assert!(!entry.is_live_at(Some(200)));
+    }
+
+    #[test]
+    fn is_stale_at_is_not_stale_with_an_alive_probe_post_boot() {
+        let mut entry = live_entry(State::Recording, 300);
+        entry.session.as_mut().unwrap().wrapper = Some(alive_wrapper());
+        assert!(!entry.is_stale_at(Some(200)));
+        assert!(entry.is_live_at(Some(200)));
+    }
+
+    /// A live-state `Session` with no recorded wrapper (verdict always `None` -
+    /// inconclusive), for the `stale_session_at` tests below that only exercise the
+    /// pre-boot half of the rule.
+    fn live_session(state: State) -> Session {
+        Session {
+            state,
+            ..Default::default()
+        }
+    }
+
     // -- library::stale_session_at (the Session+started-only entry point) ---------------
     //
     // Mirrors the `is_stale_at`/`is_live_at` core tests above one-for-one: both now
-    // delegate to this same function, so a regression here is a regression there too.
+    // delegate to the same `stale_core`, so a regression here is a regression there
+    // too. `wrapper: None` throughout - these only exercise the pre-boot half; the
+    // probe half is covered by the `stale_core` tests below.
 
     #[test]
     fn stale_session_at_flags_a_live_state_started_before_the_injected_boot() {
-        assert!(library::stale_session_at(State::Recording, 100, Some(200)));
+        assert!(library::stale_session_at(
+            &live_session(State::Recording),
+            100,
+            Some(200)
+        ));
     }
 
     #[test]
     fn stale_session_at_is_false_for_a_live_state_started_after_the_injected_boot() {
-        assert!(!library::stale_session_at(State::Recording, 300, Some(200)));
+        assert!(!library::stale_session_at(
+            &live_session(State::Recording),
+            300,
+            Some(200)
+        ));
     }
 
     #[test]
     fn stale_session_at_is_false_when_boot_time_is_unknown() {
         // Same conservative edge as is_stale_at: an unknown boot time must never
         // manufacture a false "stale".
-        assert!(!library::stale_session_at(State::Recording, 100, None));
+        assert!(!library::stale_session_at(
+            &live_session(State::Recording),
+            100,
+            None
+        ));
     }
 
     #[test]
     fn stale_session_at_is_false_for_an_unparseable_started() {
         // started == 0 (an unparseable run-* timestamp, via run_started) means an
         // unknown age, not an old one.
-        assert!(!library::stale_session_at(State::Recording, 0, Some(200)));
+        assert!(!library::stale_session_at(
+            &live_session(State::Recording),
+            0,
+            Some(200)
+        ));
     }
 
     #[test]
     fn stale_session_at_never_flags_settled_states() {
         for state in [State::Done, State::Error] {
             assert!(
-                !library::stale_session_at(state, 100, Some(200)),
+                !library::stale_session_at(&live_session(state), 100, Some(200)),
+                "{state:?} must never be stale"
+            );
+        }
+    }
+
+    // -- library::stale_session_at + a real WrapperProc (the actual join) --------------
+    //
+    // Every test above passes `wrapper: None`, so it only ever exercises the pre-boot
+    // half - deleting the `.and_then(WrapperProc::verdict)` call inside
+    // `stale_session_at` and always passing `None` to `stale_core` would still pass
+    // all of them. These two use a real probe (see `dead_wrapper`/`alive_wrapper`)
+    // with a POST-boot `started`, so only the probe half can explain the result.
+
+    #[test]
+    fn stale_session_at_flags_a_live_state_with_a_dead_probe_even_post_boot() {
+        let session = Session {
+            state: State::Recording,
+            wrapper: Some(dead_wrapper()),
+            ..Default::default()
+        };
+        assert!(library::stale_session_at(&session, 300, Some(200)));
+    }
+
+    #[test]
+    fn stale_session_at_is_not_stale_with_an_alive_probe_post_boot() {
+        let session = Session {
+            state: State::Recording,
+            wrapper: Some(alive_wrapper()),
+            ..Default::default()
+        };
+        assert!(!library::stale_session_at(&session, 300, Some(200)));
+    }
+
+    // -- library::stale_core (verdict injected - the wrapper-liveness half) -------------
+
+    #[test]
+    fn stale_core_flags_a_live_state_with_a_dead_verdict_even_in_the_current_boot() {
+        // The new case this item adds: a wrapper killed within the current boot, so
+        // `started` is post-boot (never trips the pre-boot rule) but the probe says
+        // the recorded pid/starttime is gone.
+        assert!(library::stale_core(
+            State::Recording,
+            300,
+            Some(200),
+            Some(false)
+        ));
+    }
+
+    #[test]
+    fn stale_core_is_not_stale_with_an_alive_verdict() {
+        assert!(!library::stale_core(
+            State::Recording,
+            300,
+            Some(200),
+            Some(true)
+        ));
+    }
+
+    #[test]
+    fn stale_core_with_an_inconclusive_verdict_falls_back_to_the_boot_rule() {
+        // None (legacy run with no Session::wrapper, or a probe from a mismatched PID
+        // namespace) must behave exactly like the pre-probe rule: pre-boot is stale,
+        // post-boot is not.
+        assert!(library::stale_core(State::Recording, 100, Some(200), None));
+        assert!(!library::stale_core(State::Recording, 300, Some(200), None));
+    }
+
+    #[test]
+    fn stale_core_pre_boot_rule_stands_alone_even_with_an_alive_verdict() {
+        // A same pid+starttime recurring across a reboot must never rescue a run that
+        // predates the current boot - the boot rule is unconditional.
+        assert!(library::stale_core(
+            State::Recording,
+            100,
+            Some(200),
+            Some(true)
+        ));
+    }
+
+    #[test]
+    fn stale_core_never_flags_settled_states_even_with_a_dead_verdict() {
+        for state in [State::Done, State::Error] {
+            assert!(
+                !library::stale_core(state, 100, Some(200), Some(false)),
                 "{state:?} must never be stale"
             );
         }
