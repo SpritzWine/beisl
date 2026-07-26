@@ -602,8 +602,9 @@ fn tools_list() -> Value {
             "name": "get_artifact",
             "description": "The analyzed trace as JSON: frame stats and spikes, the per-layer \
                             CPU split (who ate the frame: kernel/driver/dxvk/wine/game), \
-                            hottest functions, timeline, diagnostics. Only analyzed runs \
-                            have one.",
+                            hottest functions, timeline (a max-per-bucket peak envelope for \
+                            charting, NOT a frametime distribution), diagnostics. Only \
+                            analyzed runs have one.",
             "inputSchema": { "type": "object", "properties": { "run_id": run_id },
                              "required": ["run_id"], "additionalProperties": false }
         },

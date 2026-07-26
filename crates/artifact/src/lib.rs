@@ -122,11 +122,23 @@ pub struct TraceArtifact {
     /// Worst frametime spikes, worst first (bookmarks into the timeline).
     pub spikes: Vec<Spike>,
     /// A downsampled frametime timeline for the chart — `(t_seconds, frametime_ms)`, capped
-    /// at a few hundred points (max-per-bucket, so hitches survive the downsample) to keep
-    /// the artifact small. Empty when no MangoHud CSV was logged. Defaulted so pre-timeline
-    /// artifacts still load.
+    /// at a few hundred points. Each point is the **maximum** frametime in its bucket (see
+    /// `timeline_aggregation`), not a mean or a sample, so a hitch inside a bucket still
+    /// shows as a peak instead of averaging away. That makes this a peak *envelope* for
+    /// charting - NOT a distribution and NOT a representative sample of frametimes:
+    /// percentiles, means, or "share of frames below X" computed from it will be wrong
+    /// (use `FrameStats`, or the raw MangoHud CSV, for those). Empty when no MangoHud CSV
+    /// was logged. Defaulted so pre-timeline artifacts still load.
     #[serde(default)]
     pub timeline: Vec<(f64, f32)>,
+    /// Names `timeline`'s per-bucket aggregation (currently always [`TIMELINE_AGGREGATION`],
+    /// `"max-per-bucket"`) so a consumer reading raw `artifact.json` - with no view of the
+    /// Rust doc comment above - can't mistake the timeline for a distribution (a real
+    /// session misread it as one, twice, before this field existed). Defaulted to an empty
+    /// string so pre-field artifacts still load; treat an empty string the same as
+    /// `"max-per-bucket"`, the only value that has ever existed.
+    #[serde(default)]
+    pub timeline_aggregation: String,
     /// The layer split — where CPU went across the stack (kernel/driver/dxvk/wine/game),
     /// biggest first. This is what the headline "who ate the frame" bar renders. The shares
     /// are over the *attributed* samples only (see `attributed_pct`), not the whole trace:
@@ -152,6 +164,11 @@ pub struct TraceArtifact {
 /// readable; the raw perf.data stays in the run dir for a deeper look).
 const TOP_SYMBOLS: usize = 25;
 const TOP_SPIKES: usize = 10;
+
+/// The one aggregation `timeline` has ever used - see the field doc on
+/// [`TraceArtifact::timeline`] and [`TraceArtifact::timeline_aggregation`] for why this is
+/// also serialized, not just documented.
+const TIMELINE_AGGREGATION: &str = "max-per-bucket";
 
 impl TraceArtifact {
     /// Build the artifact for a trace run directory: resolve its `perf.data` and fold in
@@ -274,6 +291,7 @@ impl TraceArtifact {
             frame_stats,
             spikes,
             timeline,
+            timeline_aggregation: TIMELINE_AGGREGATION.to_string(),
             layers,
             attributed_pct,
             hot_symbols,
@@ -706,6 +724,8 @@ fn frames_from_csv_gated(path: &Path, uptime_end_s: Option<f64>) -> Option<CsvFr
 
 /// Cap the timeline at [`TIMELINE_POINTS`] for the chart. Buckets take the *max* frametime
 /// (not the mean) so a hitch inside a bucket still shows as a peak instead of averaging away.
+/// Changing this fold means changing [`TIMELINE_AGGREGATION`] too - that string is what tells
+/// a raw-JSON reader which aggregation they're looking at, and nothing else enforces the pair.
 const TIMELINE_POINTS: usize = 240;
 fn downsample(timeline: &[(f64, f32)]) -> Vec<(f64, f32)> {
     if timeline.len() <= TIMELINE_POINTS {
@@ -906,6 +926,7 @@ mod tests {
             }),
             spikes: vec![],
             timeline: vec![],
+            timeline_aggregation: TIMELINE_AGGREGATION.to_string(),
             layers: vec![],
             attributed_pct: 0.0,
             hot_symbols: vec![],
@@ -938,6 +959,7 @@ mod tests {
             frame_stats: None,
             spikes: vec![],
             timeline: vec![],
+            timeline_aggregation: TIMELINE_AGGREGATION.to_string(),
             layers: vec![
                 LayerShare {
                     layer: "wine".into(),
@@ -990,6 +1012,7 @@ mod tests {
             frame_stats: None,
             spikes: vec![],
             timeline: vec![],
+            timeline_aggregation: TIMELINE_AGGREGATION.to_string(),
             layers: vec![],
             attributed_pct: 0.0,
             hot_symbols: vec![],
@@ -1118,6 +1141,7 @@ mod tests {
             frame_stats: None,
             spikes: vec![],
             timeline: vec![],
+            timeline_aggregation: TIMELINE_AGGREGATION.to_string(),
             layers: vec![],
             attributed_pct: 0.0,
             hot_symbols: vec![],
@@ -1148,6 +1172,10 @@ mod tests {
 
         let back = TraceArtifact::read_json(&artifact_path).unwrap();
         assert_eq!(back.game, "Persisted");
+        // `timeline_aggregation` must survive the JSON round-trip like any other field -
+        // it's the whole point of writing it (a consumer re-reading the file must still
+        // see the aggregation name, not just the process that built it in-memory).
+        assert_eq!(back.timeline_aggregation, TIMELINE_AGGREGATION);
 
         let report = std::fs::read_to_string(&report_path).unwrap();
         assert!(!report.is_empty());
@@ -1192,8 +1220,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// An artifact written before the `layers` field must still deserialize (schema stayed
-    /// v1 because the addition is read-compatible) — `layers` just defaults to empty.
+    /// An artifact written before the `layers` field (and, likewise, before
+    /// `timeline_aggregation`) must still deserialize (schema stayed v1 because both
+    /// additions are read-compatible) - each just defaults to empty.
     #[test]
     fn an_artifact_without_layers_still_loads() {
         let json = r#"{
@@ -1204,6 +1233,7 @@ mod tests {
         }"#;
         let back: TraceArtifact = serde_json::from_str(json).unwrap();
         assert!(back.layers.is_empty());
+        assert!(back.timeline_aggregation.is_empty());
         // Pre-`game_maps_pe` artifacts default to `None` (we never checked) and must render
         // the old plain "unknown" — NOT the affirmative "native" claim, which the old code
         // never made and would be a false positive for a wine trace whose flavor simply
@@ -1229,6 +1259,7 @@ mod tests {
             frame_stats: None,
             spikes: vec![],
             timeline: vec![],
+            timeline_aggregation: TIMELINE_AGGREGATION.to_string(),
             layers: vec![],
             attributed_pct: 0.0,
             hot_symbols: vec![],
