@@ -39,7 +39,9 @@ Main workspace (`Cargo.toml`, crates.io deps only, mostly std):
 
 Dependency direction: `beisl`, `beisl-gui`, and `beisl-mcp` all depend on `preflight` +
 `session`; `beisl` and `beisl-gui` also depend on `artifact` (which itself depends on
-`symbol-resolver`); nothing depends on `beisl`.
+`symbol-resolver` + `session` - the latter so `TraceArtifact::persist` can name
+`artifact.json`/`report.txt` from the one place that owns those constants); nothing
+depends on `beisl`.
 
 ## Commands (verified)
 

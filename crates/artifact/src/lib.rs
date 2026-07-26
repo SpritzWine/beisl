@@ -13,7 +13,7 @@
 //! post-run step and `beisl symbols` share one code path.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use symbol_resolver::{FidelityTier, Layer, Resolution};
@@ -286,25 +286,29 @@ impl TraceArtifact {
         }
     }
 
-    /// Serialize to `path` as pretty JSON. Staged as a sibling temp file and renamed into
-    /// place: a re-analyze overwrites a good artifact, and a truncating write that dies
-    /// midway would destroy it — rename swaps whole files or not at all.
-    pub fn write_json(&self, path: &Path) -> io::Result<()> {
+    /// Write `artifact.json` and `report.txt` into `run_dir` - the one door every
+    /// analysis caller (the wrapper, `beisl symbols`, the GUI's Analyze) goes through, so
+    /// they can't drift apart the way they did before (one door printed the report and
+    /// saved nothing; another saved the artifact but not the report). Filenames come from
+    /// `session::library::{ARTIFACT_FILE, REPORT_FILE}`. Both are staged first and
+    /// renamed back to back (see [`write_staged`]), so a failure partway through - e.g.
+    /// disk full after the artifact but before the report - can't leave a fresh file
+    /// beside a stale sibling that a reader would treat as a matching, current pair.
+    pub fn persist(&self, run_dir: &Path) -> io::Result<()> {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let mut tmp = path.as_os_str().to_owned();
-        tmp.push(".tmp");
-        let tmp = std::path::PathBuf::from(tmp);
-        let staged = std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, path));
-        if staged.is_err() {
-            let _ = std::fs::remove_file(&tmp);
-        }
-        staged
+        let report = self.render_report();
+        let artifact_path = run_dir.join(session::library::ARTIFACT_FILE);
+        let report_path = run_dir.join(session::library::REPORT_FILE);
+        write_staged(&[
+            (artifact_path.as_path(), json.as_bytes()),
+            (report_path.as_path(), report.as_bytes()),
+        ])
     }
 
     /// Read a previously written `artifact.json`. Keeps deserialization inside this crate so
     /// consumers (the GUI, later the trace library) bind to the type without pulling serde
-    /// themselves — the same reason `write_json` lives here.
+    /// themselves - the same reason [`persist`](Self::persist) lives here.
     pub fn read_json(path: &Path) -> io::Result<Self> {
         let data = std::fs::read(path)?;
         serde_json::from_slice(&data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
@@ -466,6 +470,43 @@ impl TraceArtifact {
         }
         o
     }
+}
+
+/// Write each `(path, contents)` to a pid-unique sibling temp file, then rename all of
+/// them into place back to back, only once every write succeeded. A single truncating
+/// write that dies midway would destroy whatever was at `path`; staging first and
+/// renaming together additionally means a `persist` pair can't fail between the two
+/// files and leave a fresh one beside a stale sibling (rename needs no disk space, so
+/// it won't realistically fail once staging did). The pid in the temp name keeps two
+/// concurrent writers on the same run dir (`beisl symbols` racing a GUI re-analyze) from
+/// sharing - and corrupting - the same temp file. On any failure, every temp created so
+/// far is removed and no destination is touched.
+fn write_staged(files: &[(&Path, &[u8])]) -> io::Result<()> {
+    let pid = std::process::id();
+    let tmps: Vec<PathBuf> = files
+        .iter()
+        .map(|(path, _)| {
+            let mut tmp = path.as_os_str().to_owned();
+            tmp.push(format!(".tmp.{pid}"));
+            PathBuf::from(tmp)
+        })
+        .collect();
+    let result = files
+        .iter()
+        .zip(&tmps)
+        .try_for_each(|((_, contents), tmp)| std::fs::write(tmp, contents))
+        .and_then(|()| {
+            files
+                .iter()
+                .zip(&tmps)
+                .try_for_each(|((path, _), tmp)| std::fs::rename(tmp, path))
+        });
+    if result.is_err() {
+        for tmp in &tmps {
+            let _ = std::fs::remove_file(tmp);
+        }
+    }
+    result
 }
 
 /// The MangoHud CSV in a run dir (named after the game), if any.
@@ -1019,68 +1060,135 @@ mod tests {
         assert!(a.render_report().contains("unmapped"));
     }
 
-    #[test]
-    fn write_then_read_json_round_trips() {
-        let a = TraceArtifact {
-            schema_version: SCHEMA_VERSION,
-            game: "RoundTrip".into(),
-            wine_flavor: "example-wine-build".into(),
-            game_maps_pe: Some(true),
-            gpu_vendor: "amd".into(),
-            record_mode: "full".into(),
-            duration_s: 12.0,
-            frame_stats: None,
-            spikes: vec![],
-            timeline: vec![],
-            layers: vec![LayerShare {
-                layer: "game".into(),
-                pct: 100.0,
-                symbol_pct: 50.0,
-            }],
-            attributed_pct: 88.0,
-            hot_symbols: vec![],
-            diagnostics: Diagnostics {
-                fidelity: "Exports".into(),
-                total_samples: 10,
-                unresolved_pct: 0.0,
-                anonymous_modules: vec![],
-            },
-        };
-        let p = std::env::temp_dir().join(format!("beisl-art-{}.json", std::process::id()));
-        a.write_json(&p).unwrap();
-        let back = TraceArtifact::read_json(&p).unwrap();
-        assert_eq!(back.game, "RoundTrip");
-        assert_eq!(back.attributed_pct, 88.0);
-        assert_eq!(back.layers[0].symbol_pct, 50.0);
-        // Overwriting via the staged rename leaves no temp behind.
-        a.write_json(&p).unwrap();
-        let mut tmp = p.as_os_str().to_owned();
-        tmp.push(".tmp");
-        assert!(!Path::new(&tmp).exists(), "staging file left behind");
-        std::fs::remove_file(&p).ok();
-    }
-
     /// A write that fails after staging (rename onto a directory) must clean its temp and
-    /// leave the obstruction untouched — the point of the staged write is that a failed
-    /// overwrite can't destroy what's at the destination.
+    /// leave the obstruction untouched - the point of the staged write is that a failed
+    /// commit can't destroy what's at the destination.
     #[test]
     fn a_failed_write_cleans_its_staging_file() {
-        let json = r#"{
-            "schema_version": 1, "game": "Tmp", "wine_flavor": "unknown",
-            "duration_s": 1.0, "frame_stats": null, "spikes": [], "hot_symbols": [],
-            "diagnostics": {"fidelity": "Exports", "total_samples": 0,
-                            "unresolved_pct": 0.0, "anonymous_modules": []}
-        }"#;
-        let a: TraceArtifact = serde_json::from_str(json).unwrap();
         let dir = std::env::temp_dir().join(format!("beisl-art-dir-{}", std::process::id()));
         let dst = dir.join("dst-is-a-dir");
         std::fs::create_dir_all(&dst).unwrap();
-        assert!(a.write_json(&dst).is_err());
+        assert!(write_staged(&[(dst.as_path(), b"data")]).is_err());
         assert!(
-            !dir.join("dst-is-a-dir.tmp").exists(),
+            !dir.join(format!("dst-is-a-dir.tmp.{}", std::process::id()))
+                .exists(),
             "staging file survived a failed rename"
         );
         assert!(dst.is_dir(), "obstruction was disturbed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The pairing guarantee `persist` relies on: a stage-write failure on the SECOND
+    /// file (the realistic ENOSPC-mid-persist case) must not leave the first file's
+    /// fresh rename sitting next to a stale sibling - neither may land, so an old pair
+    /// stays exactly as it was.
+    #[test]
+    fn write_staged_leaves_no_partial_pair_when_the_second_stage_fails() {
+        let dir = std::env::temp_dir().join(format!("beisl-staged-pair-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = dir.join("good.txt");
+        // A parent that doesn't exist makes the second file's stage write itself fail,
+        // before either rename is attempted.
+        let bad = dir.join("missing-subdir").join("bad.txt");
+        assert!(write_staged(&[(good.as_path(), b"ok"), (bad.as_path(), b"nope")]).is_err());
+        assert!(
+            !good.exists(),
+            "the first file must not land if its sibling's stage failed"
+        );
+        assert!(
+            !dir.join(format!("good.txt.tmp.{}", std::process::id()))
+                .exists(),
+            "good's staging temp left behind"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A minimal, otherwise-uninteresting artifact for `persist` tests that only care
+    /// about identity (which pair of files landed, whether a re-persist changed `game`) -
+    /// so a new non-defaulted field breaks one fixture, not every hand-written literal.
+    fn sample_artifact(game: &str) -> TraceArtifact {
+        TraceArtifact {
+            schema_version: SCHEMA_VERSION,
+            game: game.into(),
+            wine_flavor: "unknown".into(),
+            game_maps_pe: Some(false),
+            gpu_vendor: String::new(),
+            record_mode: "full".into(),
+            duration_s: 1.0,
+            frame_stats: None,
+            spikes: vec![],
+            timeline: vec![],
+            layers: vec![],
+            attributed_pct: 0.0,
+            hot_symbols: vec![],
+            diagnostics: Diagnostics {
+                fidelity: "Exports".into(),
+                total_samples: 0,
+                unresolved_pct: 0.0,
+                anonymous_modules: vec![],
+            },
+        }
+    }
+
+    /// The regression `persist` exists to close: `beisl symbols` used to print the report
+    /// and write nothing. Both files must land, `artifact.json` must parse back as the
+    /// same artifact, and `report.txt` must actually be the rendered report (not just
+    /// non-empty by accident).
+    #[test]
+    fn persist_writes_both_files_and_they_read_back() {
+        let a = sample_artifact("Persisted");
+        let dir = std::env::temp_dir().join(format!("beisl-persist-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        a.persist(&dir).unwrap();
+
+        let artifact_path = dir.join(session::library::ARTIFACT_FILE);
+        let report_path = dir.join(session::library::REPORT_FILE);
+        assert!(artifact_path.is_file(), "artifact.json missing");
+        assert!(report_path.is_file(), "report.txt missing");
+
+        let back = TraceArtifact::read_json(&artifact_path).unwrap();
+        assert_eq!(back.game, "Persisted");
+
+        let report = std::fs::read_to_string(&report_path).unwrap();
+        assert!(!report.is_empty());
+        // Match the header's two halves, not the punctuation between them, so this
+        // pins "report.txt is the rendered report" without pinning its typography.
+        assert!(report.contains("Beisl trace report"));
+        assert!(report.contains("Persisted"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Persisting twice over an existing pair (the re-analyze path) must leave both files
+    /// readable and, since this exercises the staged-rename write rather than a
+    /// truncate-in-place, no pid-tagged temp file behind for either.
+    #[test]
+    fn persisting_twice_leaves_both_files_readable() {
+        let mut a = sample_artifact("First");
+        let dir = std::env::temp_dir().join(format!("beisl-persist-twice-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        a.persist(&dir).unwrap();
+
+        a.game = "Second".into();
+        a.persist(&dir).unwrap();
+
+        let artifact_path = dir.join(session::library::ARTIFACT_FILE);
+        let report_path = dir.join(session::library::REPORT_FILE);
+        let back = TraceArtifact::read_json(&artifact_path).unwrap();
+        assert_eq!(back.game, "Second");
+        let report = std::fs::read_to_string(&report_path).unwrap();
+        assert!(report.contains("Second"));
+
+        let pid = std::process::id();
+        for path in [&artifact_path, &report_path] {
+            let mut tmp = path.as_os_str().to_owned();
+            tmp.push(format!(".tmp.{pid}"));
+            assert!(
+                !Path::new(&tmp).exists(),
+                "staging file left behind: {tmp:?}"
+            );
+        }
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

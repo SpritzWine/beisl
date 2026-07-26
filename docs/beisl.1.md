@@ -8,7 +8,7 @@ beisl — game perf tracing: perf CPU samples + MangoHud frametimes, wine-agnost
                                      (Steam launch option: `beisl %command%`)
     beisl --check                    setup checklist in the terminal
                                      (aliases: --preflight, doctor)
-    beisl symbols <trace-run-dir>    resolve + report a captured trace
+    beisl symbols <trace-run-dir>    resolve, report, and save a captured trace
     beisl install                    copy beisl into ~/.local/bin
                                      (+ "Beisl Setup" menu entry when bundled)
     beisl uninstall                  remove the per-user install
@@ -54,9 +54,10 @@ raw trace in place for on-demand analysis from the trace library.
 advisory rows, and the exact fix command for anything missing. Exit status 1
 when a required check needs setup.
 
-**symbols <trace-run-dir>** — re-resolve a captured trace and print its
-report (fetches GPU-driver debug symbols on demand via debuginfod when the
-local perf supports it).
+**symbols <trace-run-dir>** - re-resolve a captured trace, print its report,
+and, when the run dir is writable, save artifact.json + report.txt into it
+(fetches GPU-driver debug symbols on demand via debuginfod when the local
+perf supports it).
 
 **install / uninstall** — per-user install into ~/.local/bin, desktop entry,
 icons, and man pages; uninstall names anything root-owned it cannot remove.

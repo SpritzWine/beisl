@@ -1105,15 +1105,15 @@ fn load_artifact(dir: &Path) -> Option<TraceArtifact> {
 
 /// Run `TraceArtifact::build_with_debuginfod` (resolve `perf.data` + fold in the CSV,
 /// honoring the session's record mode and the debuginfod URL policy) on a background
-/// thread, writing `artifact.json` on success. `record_mode` and `debuginfod_urls` are
-/// computed at the call site (`SessionApp::start_analyze`, which reads `self.session` and
-/// `self.config`) rather than here, so the worker thread itself stays env-free — the same
-/// split `beisl symbols` and the wrapper's post-run analysis use (see
-/// `crates/beisl/src/symbols.rs`, `crates/beisl/src/run.rs`). Previously this called the
-/// record-mode/URL-blind `build`, so a GUI re-analyze silently lost both — most visibly,
-/// re-analyzing after installing a driver's debuginfo package wouldn't pick it up because
-/// no `DEBUGINFOD_URLS` was ever passed to `perf`. The UI polls the returned handle each
-/// Tick.
+/// thread, persisting `artifact.json` + `report.txt` via `TraceArtifact::persist` on
+/// success. `record_mode` and `debuginfod_urls` are computed at the call site
+/// (`SessionApp::start_analyze`, which reads `self.session` and `self.config`) rather
+/// than here, so the worker thread itself stays env-free - the same split `beisl
+/// symbols` and the wrapper's post-run analysis use (see `crates/beisl/src/symbols.rs`,
+/// `crates/beisl/src/run.rs`). Previously this called the record-mode/URL-blind `build`,
+/// so a GUI re-analyze silently lost both - most visibly, re-analyzing after installing a
+/// driver's debuginfo package wouldn't pick it up because no `DEBUGINFOD_URLS` was ever
+/// passed to `perf`. The UI polls the returned handle each Tick.
 fn spawn_analyze(
     dir: PathBuf,
     game: String,
@@ -1131,7 +1131,7 @@ fn spawn_analyze(
             &record_mode,
             debuginfod_urls.as_deref(),
         )
-        .and_then(|a| a.write_json(&dir.join(session::library::ARTIFACT_FILE)));
+        .and_then(|a| a.persist(&dir));
         let mut a = s2.lock().unwrap();
         if let Err(e) = result {
             a.error = Some(e.to_string());

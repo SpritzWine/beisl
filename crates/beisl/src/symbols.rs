@@ -1,8 +1,12 @@
 //! `beisl symbols <run-dir>` — the headless face of the trace-analysis pipeline.
 //!
 //! Builds the same [`artifact::TraceArtifact`] the wrapper writes at the end of a trace
-//! (resolve `perf.data` via `symbol-resolver`, fold in the frametime CSV) and prints its
-//! report. Binds to exactly the library the GUI/MCP will — same relationship as `beisl
+//! (resolve `perf.data` via `symbol-resolver`, fold in the frametime CSV), prints its
+//! report, and persists `artifact.json` + `report.txt` into the run dir via
+//! [`artifact::TraceArtifact::persist`] - the same door the wrapper's post-run step and
+//! the GUI's Analyze use, so this documented recovery command (`clean-run-analysis =
+//! keep`'s default tells the user to run it later) leaves a run MCP can actually read
+//! back. Binds to exactly the library the GUI/MCP will - same relationship as `beisl
 //! --check` and the setup page both binding to `preflight`.
 
 use std::path::Path;
@@ -45,6 +49,11 @@ pub fn run(run_dir: &str) -> ExitCode {
             // A retry succeeded on the same perf.data — drop any stale failure verdict.
             session::library::clear_invalid(dir);
             out!("{}", a.render_report().trim_end());
+            // The report already printed above - that's this command's whole point - so
+            // a persistence failure (e.g. a read-only run dir) must not fail the command.
+            if let Err(e) = a.persist(dir) {
+                eprintln!("beisl: couldn't save artifact.json/report.txt in {run_dir} ({e})");
+            }
             ExitCode::SUCCESS
         }
         Err(e) => {

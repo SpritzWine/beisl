@@ -65,11 +65,12 @@ doesn't warrant the seconds to resolve or the tens of MB kept. So:
 **The ask** (the default GUI surface — window sees `analysis_offer` and no
 `artifact.json`): a plain line ("Clean run — not analyzed yet") + two buttons. **Analyze**
 runs `TraceArtifact::build` on a background thread (the setup app's worker + `Tick`-poll
-pattern — resolve is ~seconds and must never block the event loop), writes the artifact,
-and flips to the results view. **Discard** deletes the run dir. Because the wrapper keeps
-the trace by default, this ask is the normal path for a clean run — the window is where
-"analyze or throw away" is decided, not the launch-options wrapper. A crash never shows
-the ask: it's already analyzed, so the window opens straight on the results.
+pattern - resolve is ~seconds and must never block the event loop), writes the artifact
+and report, and flips to the results view. **Discard** deletes the run dir. Because the
+wrapper keeps the trace by default, this ask is the normal path for a clean run - the
+window is where "analyze or throw away" is decided, not the launch-options wrapper. A
+crash never shows the ask: it's already analyzed, so the window opens straight on the
+results.
 *(2026-07-11)* Stop-&-save mid-game gets the same ask, under a **`Saved`** state whose
 caption says the game is still running — a complete trace never masquerades as a
 finished session.

@@ -708,11 +708,9 @@ fn write_report(
             return None;
         }
     };
-    let _ = art.write_json(&run_dir.join(session::library::ARTIFACT_FILE));
-    let _ = std::fs::write(
-        run_dir.join(session::library::REPORT_FILE),
-        art.render_report(),
-    );
+    // Best-effort, same stance as the resolve above: a write failure (disk full, a
+    // read-only run dir) must never turn a captured trace into a wrapper error.
+    let _ = art.persist(run_dir);
     // A retry succeeded on the same perf.data — drop any stale failure verdict.
     session::library::clear_invalid(run_dir);
     let headline = art.headline();
