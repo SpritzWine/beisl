@@ -210,10 +210,11 @@ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
 name = "artifact"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
+ "session",
  "symbol-resolver",
 ]
 
@@ -272,7 +273,7 @@ dependencies = [
 
 [[package]]
 name = "assets"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "async-broadcast"
@@ -3730,7 +3731,7 @@ dependencies = [
 
 [[package]]
 name = "preflight"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "assets",
  "serde",
@@ -4282,7 +4283,7 @@ dependencies = [
 
 [[package]]
 name = "session"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -4549,7 +4550,7 @@ dependencies = [
 
 [[package]]
 name = "symbol-resolver"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "syn"
