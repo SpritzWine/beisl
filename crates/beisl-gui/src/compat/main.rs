@@ -19,13 +19,16 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use cosmic::app::{Core, Settings, Task};
+use cosmic::app::{ApplicationExt, Core, Settings, Task};
 use cosmic::iced::{Length, Subscription};
 use cosmic::widget;
 use cosmic::{Application, Element};
 
 /// gamebus-setup's stash, relative to `$XDG_DATA_HOME` (its `CompatStash::default_path`).
 const STASH_REL: &str = "gamebus-presenced/compat-findings.json";
+
+/// Lowercase, like `beisl setup`: the family's windows name themselves the same way.
+const BASE_TITLE: &str = "beisl compat findings";
 
 /// Upstream targets as gamebus-setup names them, with what a person calls them and
 /// whether gamebus-setup can draft for them (`--export`). gamedb has no draft: its
@@ -260,6 +263,9 @@ struct App {
     pending_key: Option<String>,
     /// What the last finished job said, shown under the toolbar.
     note: Option<String>,
+    /// What the header and taskbar currently say, so the title is pushed on change and
+    /// not on every tick.
+    title: String,
     draft: Option<Draft>,
 }
 
@@ -392,6 +398,8 @@ impl Application for App {
     }
 
     fn init(core: Core, key: Self::Flags) -> (Self, Task<Self::Message>) {
+        let mut core = core;
+        core.set_header_title(BASE_TITLE.to_string());
         let mut app = App {
             core,
             gamebus_setup: preflight::find_tool("gamebus-setup"),
@@ -404,6 +412,7 @@ impl Application for App {
             job: None,
             pending_key: key,
             note: None,
+            title: String::new(),
             draft: None,
         };
         app.reload();
@@ -417,6 +426,16 @@ impl Application for App {
     fn update(&mut self, message: Self::Message) -> Task<Self::Message> {
         match message {
             Message::Tick => {
+                // The window exists only after init, so the taskbar title is pushed here -
+                // same place beisl-setup pushes its own.
+                let want = self.window_title();
+                if want != self.title {
+                    self.title = want.clone();
+                    self.set_header_title(want.clone());
+                    if let Some(id) = self.core.main_window_id() {
+                        let _ = self.set_window_title(want, id);
+                    }
+                }
                 let done = self.job.as_ref().and_then(|(job, shared)| {
                     let s = shared.lock().unwrap();
                     s.finished.then(|| (job.clone(), s.log.clone(), s.ok))
@@ -515,6 +534,15 @@ impl Application for App {
 }
 
 impl App {
+    /// The header and taskbar name this window by what it is, plus the finding in view -
+    /// several of these can be open beside a session window and a setup page.
+    fn window_title(&self) -> String {
+        match self.selected() {
+            Some(f) => format!("{} - {BASE_TITLE}", f.display_title()),
+            None => BASE_TITLE.to_string(),
+        }
+    }
+
     /// One line on what this window can reach: the tool it drives, the daemon that names
     /// games, and the server the scan reads.
     fn status_line(&self) -> String {
