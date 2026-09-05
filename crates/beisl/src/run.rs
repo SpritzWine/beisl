@@ -11,7 +11,7 @@ use preflight::RecordMode;
 use session::{Session, State};
 
 use crate::mangohud::TOGGLE_KEY;
-use crate::{cue, gpu, mangohud, perf, presence, steam, walls};
+use crate::{cue, gpu, handoff, mangohud, perf, presence, steam, walls};
 
 /// Run `cmd` under tracing; returns the game's exit code.
 pub fn trace(cmd: &[String]) -> io::Result<i32> {
@@ -234,6 +234,7 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
         std::iter::once(run_dir.join("game.log")).chain(proton_log.clone()),
         started_at,
     );
+    let mut walls_seen: Vec<(&'static str, String)> = Vec::new();
 
     let start = Instant::now();
     let mut stopped = false;
@@ -252,7 +253,7 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
             }
             // A hang often coincides with the game dying — one last look.
             drain_gpu_events(&mut gpuwatch, &mut log, &mut sess, &run_dir);
-            note_walls(walls.poll(), &mut log, &mut sess);
+            note_walls(walls.poll(), &mut log, &mut sess, &mut walls_seen);
             if let Some(src) = &proton_log {
                 match walls::preserve_proton_log(src, &run_dir, started_at) {
                     Some(bytes) => log.line(&format!(
@@ -320,6 +321,31 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
                 "Game exited.".to_string()
             };
             let _ = sess.write(&run_dir);
+            // Hand the wall to gamebus, after the analysis so the drop can carry the
+            // artifact's facts; a keyless run has nothing their side can file.
+            let tool =
+                handoff::compat_tool_name(std::env::var("STEAM_COMPAT_TOOL_PATHS").ok().as_deref());
+            let drop = handoff::deliveries(&run_dir, &sess, &walls_seen, tool.as_deref());
+            if !walls_seen.is_empty() && drop.is_empty() {
+                log.line("compat wall: no Steam appid to key it on, not handed to gamebus");
+            } else if !drop.is_empty() {
+                let run_id = run_dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                match handoff::inbox_dir().map(|d| handoff::spool(&d, &run_id, &drop)) {
+                    Some(Ok(path)) => log.line(&format!(
+                        "compat wall: handed to gamebus as {} ({} finding(s); gamebus-setup \
+                         picks it up on its next run)",
+                        path.display(),
+                        drop.len()
+                    )),
+                    Some(Err(e)) => {
+                        log.line(&format!("compat wall: could not spool for gamebus: {e}"))
+                    }
+                    None => log.line("compat wall: no HOME, nowhere to spool for gamebus"),
+                }
+            }
             // The one place a silent presence miss gets said out loud: a run named from
             // argv alone is the first thing anyone debugging the integration looks for.
             if name_source < NameSource::Presence && presence_asks > 0 {
@@ -350,7 +376,7 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
         sess.trace_bytes = trace_size(&run_dir);
         drain_gpu_events(&mut gpuwatch, &mut log, &mut sess, &run_dir);
 
-        note_walls(walls.poll(), &mut log, &mut sess);
+        note_walls(walls.poll(), &mut log, &mut sess, &mut walls_seen);
 
         // MangoHud names its CSV after the *real* game process; with launcher chains
         // that beats the argv guess (which names the wrapper, e.g. "upc.exe").
@@ -820,13 +846,19 @@ fn write_report(
 /// A compat wall just showed up in a log: say so in beisl.log and in the window's
 /// warning list, once per signature. The wall's own evidence line goes to the log, the
 /// human explanation to the window.
-fn note_walls(hits: Vec<(&'static str, String)>, log: &mut Log, sess: &mut Session) {
+fn note_walls(
+    hits: Vec<(&'static str, String)>,
+    log: &mut Log,
+    sess: &mut Session,
+    seen: &mut Vec<(&'static str, String)>,
+) {
     for (signature, line) in hits {
         log.line(&format!("compat wall: {signature}: {line}"));
         sess.warnings.push(format!(
             "Compat wall ({signature}): {}",
             compat::explain(signature)
         ));
+        seen.push((signature, line));
     }
 }
 

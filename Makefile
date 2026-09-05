@@ -54,6 +54,7 @@ package: build man
 	install -m755 $(CLI_TARGET)/release/beisl $(DIST)/$(BUNDLE)/
 	install -m755 $(CLI_TARGET)/release/beisl-mcp $(DIST)/$(BUNDLE)/
 	install -m755 $(GUI_TARGET)/release/beisl-setup $(DIST)/$(BUNDLE)/
+	install -m755 $(GUI_TARGET)/release/beisl-compat $(DIST)/$(BUNDLE)/
 	install -m644 README.md LICENSE $(DIST)/$(BUNDLE)/
 	install -m644 man/*.1 $(DIST)/$(BUNDLE)/man/
 	tar -C $(DIST) -czf $(DIST)/$(BUNDLE)-$(ARCH).tar.gz $(BUNDLE)

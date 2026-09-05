@@ -1113,6 +1113,18 @@ fn ok_or_fix(present: bool) -> Status {
     }
 }
 
+/// Locate a sibling tool: `PATH`, then `~/.local/bin`. A window opened from the app menu
+/// need not carry a login shell's PATH, and that is exactly where `beisl install` and
+/// `gamebus-setup apply install --target user` both put their binaries.
+pub fn find_tool(bin: &str) -> Option<PathBuf> {
+    which(bin).or_else(|| {
+        let cand = PathBuf::from(std::env::var_os("HOME")?)
+            .join(".local/bin")
+            .join(bin);
+        cand.is_file().then_some(cand)
+    })
+}
+
 /// Locate an executable on `PATH` (no external deps).
 fn which(bin: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;

@@ -61,7 +61,13 @@ you can also hit "Stop & save" in the session window: the recorder stops and the
 saved while the game keeps running, so you don't have to quit to keep a capture.
 `beisl-setup`'s **Traces** page lists every past run (newest first) — open one to see its
 results, reveal its folder, or delete it. `beisl uninstall` removes the install. Every
-binary takes `--version` (`beisl --version`, `beisl-setup --version`, `beisl-mcp --version`).
+binary takes `--version` (`beisl --version`, `beisl-setup --version`, `beisl-mcp --version`,
+`beisl-compat --version`).
+
+`beisl-compat` is the compat-findings window: it scans your traces for walls a game hit
+(an anti-cheat's kernel driver, a missing Wine export), shows the evidence, and drafts a
+ProtonDB report or an AreWeAntiCheatYet issue for you to review and file. It drives
+`gamebus-setup compat` from the gamebus-presenced project and never submits anything itself.
 
 ## Status
 

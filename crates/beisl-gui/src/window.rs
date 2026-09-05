@@ -54,6 +54,10 @@ pub enum Msg {
     /// `preflight::debuginfo::debuginfo_role_for_module` for which modules qualify.
     InstallDebuginfo(Option<String>),
     OpenFolder,
+    /// Hand this run's wall to the review window (`beisl-compat --key steam:<appid>`),
+    /// which is where a finding is drafted and filed. Shown only when that binary is
+    /// installed and the run carries an appid to key on.
+    ReportWall,
     Close,
 }
 
@@ -351,6 +355,18 @@ impl Application for SessionApp {
                     .stderr(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
                     .spawn();
+            }
+            Msg::ReportWall => {
+                // Detached: the review window outlives this one, and a missing binary is
+                // impossible here (the button only exists when it was found).
+                if let Some(tool) = preflight::find_tool("beisl-compat") {
+                    let mut cmd = std::process::Command::new(tool);
+                    if !self.session.steam_appid.is_empty() {
+                        cmd.arg("--key")
+                            .arg(format!("steam:{}", self.session.steam_appid));
+                    }
+                    let _ = cmd.spawn();
+                }
             }
             Msg::Close => std::process::exit(0),
         }
@@ -1057,6 +1073,21 @@ impl SessionApp {
                         d.attempts
                     )));
                 }
+            }
+            // The hop to where a finding is acted on. Without beisl-compat installed the
+            // section still shows the evidence; there is just nowhere to send it.
+            if !c.walls.is_empty() && preflight::find_tool("beisl-compat").is_some() {
+                compat = compat.push(
+                    widget::Row::new()
+                        .spacing(12)
+                        .push(
+                            widget::button::suggested("Report this wall").on_press(Msg::ReportWall),
+                        )
+                        .push(widget::text::caption(
+                            "Opens the review window: drafts a ProtonDB or AreWeAntiCheatYet \
+                             report for you to check and file. Nothing is sent by itself.",
+                        )),
+                );
             }
             col = col.push(
                 widget::settings::section()

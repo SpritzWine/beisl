@@ -22,6 +22,8 @@ const LEGACY_DESKTOP_FILE: &str = "org.spritzwine.beisl-setup.desktop";
 /// compositors can pair its windows with the icon and a human name (a window whose
 /// app_id has no desktop file gets a generic gear and the raw id in the taskbar).
 const SESSION_DESKTOP_FILE: &str = "org.spritzwine.BeislSession.desktop";
+/// The compat-finding window's entry; basename = its APP_ID, for the same pairing.
+const COMPAT_DESKTOP_FILE: &str = "org.spritzwine.BeislCompat.desktop";
 
 // Das Glasl — embedded via the assets crate, so `beisl install` works from a bare
 // binary with no assets directory around it.
@@ -74,7 +76,7 @@ fn man1_dir() -> PathBuf {
     data_home().join("man/man1")
 }
 
-const MAN_PAGES: [&str; 3] = ["beisl.1", "beisl-setup.1", "beisl-mcp.1"];
+const MAN_PAGES: [&str; 4] = ["beisl.1", "beisl-setup.1", "beisl-mcp.1", "beisl-compat.1"];
 
 fn do_install() -> Result<String, String> {
     let exe = std::env::current_exe().map_err(|e| format!("cannot find own path: {e}"))?;
@@ -93,6 +95,14 @@ fn do_install() -> Result<String, String> {
         install_file(&setup_src, &setup_dst)?;
         write_desktop(&setup_dst)?;
         extra.push_str("\n  + beisl-setup, and \"Beisl Setup\" added to your app menu");
+    }
+    // The compat-finding review window rides along the same way when the bundle has it.
+    let compat_src = here.join("beisl-compat");
+    if compat_src.is_file() {
+        let compat_dst = bindir.join("beisl-compat");
+        install_file(&compat_src, &compat_dst)?;
+        write_compat_desktop(&compat_dst)?;
+        extra.push_str("\n  + beisl-compat, and \"Beisl Compat Findings\" added to your app menu");
     }
     // The MCP server rides along when the bundle carries it — inert unless the user
     // wires `beisl-mcp` into an AI client's config (stdio only, no ports).
@@ -148,7 +158,9 @@ fn do_uninstall() -> Result<String, String> {
         bin_dir().join("beisl"),
         bin_dir().join("beisl-setup"),
         bin_dir().join("beisl-mcp"),
+        bin_dir().join("beisl-compat"),
         applications_dir().join(DESKTOP_FILE),
+        applications_dir().join(COMPAT_DESKTOP_FILE),
         applications_dir().join(LEGACY_DESKTOP_FILE),
         applications_dir().join(SESSION_DESKTOP_FILE),
         icons.join(format!("scalable/apps/{ICON_NAME}.svg")),
@@ -246,6 +258,25 @@ fn write_desktop(exec: &Path) -> Result<(), String> {
 /// Put das Glasl where the icon theme looks for it. Same artwork under both names
 /// (the setup entry's and the session app_id's); the symbolic variant rides along
 /// for shells that prefer it (tray/menu contexts).
+/// The compat window's own menu entry: same artwork as the setup app, its own app_id.
+fn write_compat_desktop(exec: &Path) -> Result<(), String> {
+    let dir = applications_dir();
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let contents = format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name=Beisl Compat Findings\n\
+         Comment=Review the compat walls beisl found and file them upstream\n\
+         Exec={}\n\
+         Icon={ICON_NAME}\n\
+         Terminal=false\n\
+         Categories=Utility;System;\n",
+        exec.display(),
+    );
+    fs::write(dir.join(COMPAT_DESKTOP_FILE), contents)
+        .map_err(|e| format!("write desktop entry: {e}"))
+}
+
 fn write_icons() -> Result<(), String> {
     let icons = home().join(".local/share/icons/hicolor");
     let scalable = icons.join("scalable/apps");
