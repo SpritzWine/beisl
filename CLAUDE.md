@@ -39,7 +39,8 @@ Main workspace (`Cargo.toml`, crates.io deps only, mostly std):
 - `crates/beisl` - the wrapper binary; subcommands: trace (default via `%command%`),
   `--check` (aliases `--preflight`, `doctor`), `install`/`uninstall`, `symbols <dir>`
   (resolve a captured trace), `--version`. `run.rs` orchestrates a trace; `mangohud.rs`,
-  `perf.rs`, `gpu.rs` handle the pieces.
+  `perf.rs`, `gpu.rs` handle the pieces; `walls.rs` watches the logs for a compat wall
+  live and `handoff.rs` drops the finding into gamebus-setup's inbox at exit.
 - `crates/preflight` - UI-agnostic setup checks (perf/llvm/paranoid/mangohud/GPU) +
   persisted config. Detection only; privileged fixes are *described* (`Fix` +
   `fix_command()`) and executed by the caller via pkexec, never from inside the crate.

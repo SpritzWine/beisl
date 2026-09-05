@@ -26,6 +26,7 @@ dependencies = [
  "compat",
  "libc",
  "preflight",
+ "serde_json",
  "session",
 ]
 

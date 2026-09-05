@@ -90,6 +90,9 @@ analysis step only.
 # FILES
 
     ~/.local/share/beisl/traces/run-*/    one directory per trace run
+    ~/.local/share/gamebus-presenced/compat-inbox/
+                                          one JSON drop per run that hit a compat wall,
+                                          for gamebus-setup to take into its findings
     $XDG_CONFIG_HOME/beisl/config.toml    persisted preferences
     /usr/bin/beisl                        optional launcher shim (see beisl-setup(1):
                                           Steam's containerized client needs it for
