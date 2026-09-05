@@ -31,3 +31,11 @@ dist
 
 # obsidian-second-brain project vault (agent knowledge base, not source)
 .second-brain/
+
+# Never let a private key be staged from this tree. A stale duplicate of the vault
+# checkout once sat here for weeks holding its own deploy key: untracked, but NOT
+# ignored, so one `git add -A` would have committed it. The vault's own ignore file
+# has this rule; the code repo had no reason to assume the vault always lands in the
+# one directory ignored above.
+*.ed25519
+*.ed25519.pub
