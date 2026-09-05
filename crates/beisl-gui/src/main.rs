@@ -29,11 +29,10 @@ use enumflags2::BitFlags;
 use preflight::gpu::GpuPinCandidate;
 use preflight::{
     all_checks, detect_distro, detect_record_mode, detect_system_kind, disk_check,
-    driver_debuginfo_check, fix_command, gpu_dump_check, locked_system_message,
-    gamebus_presence_check, mangohud_hotkey_check, multi_gpu_check, ostree_install_note,
-    perf_debuginfod_check,
-    perf_record_fix, steam_visible_beisl_check, Check, CheckId, Config, Distro, DumpAccessPolicy,
-    Fix, GpuPin, RecordMode, Status, SystemKind, STEAM_PATH_ISSUE_URL,
+    driver_debuginfo_check, fix_command, gamebus_presence_check, gpu_dump_check,
+    locked_system_message, mangohud_hotkey_check, multi_gpu_check, ostree_install_note,
+    perf_debuginfod_check, perf_record_fix, steam_visible_beisl_check, Check, CheckId, Config,
+    Distro, DumpAccessPolicy, Fix, GpuPin, RecordMode, Status, SystemKind, STEAM_PATH_ISSUE_URL,
 };
 
 mod chart; // frametime timeline (plotters, drawn on cosmic's Canvas)
@@ -261,6 +260,14 @@ impl AppModel {
         for c in checks.iter_mut() {
             c.detect();
         }
+        // gamebus presence belongs with the data sources, right under MangoHud: it is what
+        // turns a process name into a game and an appid. Advisory rows at the bottom of the
+        // page don't get installed, and this one is worth installing.
+        let under_mangohud = checks
+            .iter()
+            .position(|c| c.id == CheckId::MangoHud)
+            .map_or(checks.len(), |i| i + 1);
+        checks.insert(under_mangohud, gamebus_presence_check());
         checks.push(disk_check(trace_dir));
         // The optional, opt-in GPU dump-access row. Kept separate so it never joins the
         // blocking "set everything up" sweep (see `pending_fixes`).
@@ -277,7 +284,6 @@ impl AppModel {
         // from `driver_debuginfo_check` (are the files reachable) — this asks whether `perf`
         // was even built with the support Beisl's on-demand fetch depends on.
         checks.push(perf_debuginfod_check());
-        checks.push(gamebus_presence_check());
         // Steam's containerized client scrubs the launch-option PATH — without the
         // /usr/bin launcher, `beisl %command%` (the tool's whole entry point) silently
         // fails. That makes this the most actionable row on the page, so it goes FIRST

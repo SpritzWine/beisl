@@ -93,11 +93,12 @@ pub enum CheckId {
     /// per-user at run time, so multi-user systems stay correct and updates flow through
     /// without touching the shim (see [`steam_visible_beisl_check`]).
     SteamVisibleBeisl,
-    /// Optional, informational: gamebus-presenced isn't installed, so a trace can only
-    /// name its run after a process (`acs`, `Icarus-Win64-Shipping`) and never learns the
-    /// game's human name or Steam appid. beisl reads those off
-    /// `org.gamebus.Presence.v1` when it is there (see the wrapper's `presence` module);
-    /// without it, enrichment is simply skipped. No fix: installing a separate project's
+    /// Optional, informational: gamebus-presenced isn't installed. Steam launches still
+    /// get their appid and store name from Steam itself (the wrapper's `steam` module);
+    /// every other launcher's run stays named after a process (`acs`,
+    /// `Icarus-Win64-Shipping`) with no appid. beisl reads the rest off
+    /// `org.gamebus.Presence.v1` when it is there (the `presence` module); without it,
+    /// enrichment is simply skipped. No fix: installing a separate project's
     /// daemon is gamebus-setup's job, not something to run under our pkexec sweep - the
     /// same consent line [`gpu_dump_check`] and [`kernel_symbols_check`] hold - so the
     /// `why` carries the command (see [`gamebus_presence_check`]).
@@ -450,15 +451,15 @@ fn gamebus_presence_available() -> bool {
 
 fn gamebus_presence_why(present: bool) -> String {
     if present {
-        "gamebus-presenced is installed, so a trace records the game's real name and its \
-         Steam appid instead of just the process name - which is what makes a finding \
-         reportable to ProtonDB or AreWeAntiCheatYet."
+        "gamebus-presenced is installed, so a trace is named after the game as Steam and \
+         Discord call it, whichever launcher started it - the identity a compatibility \
+         finding is filed under on ProtonDB or AreWeAntiCheatYet."
             .to_string()
     } else {
-        "gamebus-presenced isn't installed. Traces still record everything they measure, \
-         but get named after the game's process (`acs`, `Icarus-Win64-Shipping`) with no \
-         Steam appid, so a compatibility finding can't be tied to the game it came from. \
-         Install it with `gamebus-setup apply install --target user --confirm`."
+        "gamebus-presenced isn't installed. Steam launches still get their appid and store \
+         name from Steam itself; anything else (Lutris, Heroic, umu-run) is named after \
+         the game's process (`acs`, `Icarus-Win64-Shipping`) with no appid a finding can \
+         be tied to. Install it with `gamebus-setup apply install --target user --confirm`."
             .to_string()
     }
 }
