@@ -266,36 +266,27 @@
       <p class="kicker">In the cellar, not yet on tap</p>
       <h2 id="walls-h">And a wall is a result too.</h2>
       <p>
-        Some games don’t stutter. They hit a wall: an anti-cheat’s kernel-mode
-        driver wine can’t load, a function this wine never implemented, a
-        volume-GUID path it can’t resolve. There is no frame to itemize,
-        because the game never got one. The line Beisl is pouring now knows
-        those walls by shape and calls them <em>while the game is still up</em>,
-        under “Heads up” in the session window, instead of sitting there
-        reporting “No problems detected” beside the game’s own error dialog.
+        Some games don’t stutter. They hit a wall: an anti-cheat driver wine
+        can’t load, a function it never implemented, a path it can’t resolve.
+        No frames to itemize, because none were ever poured. Beisl knows those
+        walls by shape and says so <em>while the game is still up</em>:
+        “Heads up”, not “No problems detected” beside the game’s own error
+        dialog.
       </p>
       <p>
-        The trace keeps the receipt: the wall in plain words, the log line that
-        proves it, and every kernel driver the game asked wine to load, each
-        marked <code>Wine builtin</code> or <code>NOT shipped by Wine</code>,
-        with the number of attempts. There is no baked-in roster of wine’s
-        drivers; Beisl reads them out of the wine tree that actually ran, and
-        says “unknown” rather than guess.
+        The trace keeps the receipt: the wall in plain words, the line that
+        proves it, and every driver the game asked for, marked builtin or not.
+        That roster is read from the wine tree that actually ran, so Beisl says
+        “unknown” instead of guessing.
       </p>
       <p class="muted">
-        One honest catch, and it stays honest. A default Proton launch runs with
-        <code>WINEDEBUG=-all</code>, so the driver wall leaves nothing to find.
-        Turn <code>PROTON_LOG</code> on yourself and Beisl reads that log too,
-        keeping a copy beside the trace as <code>proton.log</code> before Proton
-        deletes it at the next launch. Beisl won’t flip that switch for you:
-        the switch is yours, the reading is ours.
-      </p>
-      <p class="muted">
-        What Beisl finds, it hands on. <b>gamebus</b> is where compat findings
-        are housed and filed; a small <code>beisl-compat</code> window reviews
-        them, drafts a ProtonDB report or an AreWeAntiCheatYet issue, and marks
-        what was filed. Every button is a <code>gamebus-setup compat</code>
-        command run for you, and nothing submits anything by itself.
+        A default Proton launch runs <code>WINEDEBUG=-all</code>, so the wall
+        leaves nothing to find. Turn <code>PROTON_LOG</code> on and Beisl reads
+        that too, keeping a copy as <code>proton.log</code> before Proton bins
+        it. The switch is yours; the reading is ours. What turns up goes to
+        <b>gamebus</b>, where findings are housed and filed:
+        <code>beisl-compat</code> drafts the ProtonDB or AreWeAntiCheatYet
+        report and marks what you sent. Nothing is submitted behind your back.
       </p>
     </div>
     <div class="card">
