@@ -1,4 +1,4 @@
-# Unreleased
+# beisl 0.3.0
 
 Still in the cellar, on the current development line: beisl learns the
 game's real name from Steam, and learns to say "this one never had a

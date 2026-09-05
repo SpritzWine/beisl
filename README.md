@@ -12,8 +12,8 @@ assets/site.js        the interactive layer bar, frametime figure, hero trace, t
 assets/*.svg          brand icons (Das Glasl app icon, bare light/dark glasses,
                       symbolic mono variant, Der Deckel coaster mark)
 releasenotes.md       verbatim copy of the repo's RELEASENOTES.md (main branch),
-                      under an "Unreleased" entry when the development line has
-                      moved on; rendered into the "Release notes" section by
+                      with an entry for the next version on top when the
+                      development line has moved on; rendered by
                       site.js (same-origin fetch; under file:// the section
                       keeps its Codeberg fallback link)
 .domains              custom-domain config for Codeberg Pages (commented example)
@@ -34,9 +34,9 @@ git commit -m "update landing page"
 git push origin pages
 ```
 
-That refresh overwrites whatever "Unreleased" entry the page was carrying,
-which is right the moment the work it described has shipped. Write a new one
-by hand, above the copy, once the development line has moved on again.
+That refresh overwrites whatever unshipped entry the page was carrying, which
+is right the moment the work it described has shipped. Write a new one by hand,
+above the copy, once the development line has moved on again.
 
 Published at:
 
