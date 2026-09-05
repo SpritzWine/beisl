@@ -1,3 +1,70 @@
+# Unreleased
+
+Still in the cellar, on the current development line: beisl learns the
+game's real name from Steam, and learns to say "this one never had a
+chance" while the game is still up.
+
+## New
+
+- **The game's name, not the launcher's.** A trace is filed under the game
+  it traced. beisl reads the Steam appid from the launch environment
+  (`SteamAppId` / `SteamGameId`, or the `AppId=` token in reaper's argv) and
+  the product name out of the library's `appmanifest`, both at spawn: a run
+  that used to be recorded as `WardogsLauncher-Shipping.exe` now reads
+  *WARDOGS Playtest*. Name sources are ranked (the argv guess names the
+  launcher, MangoHud the process, Steam's manifest the product, gamebus the
+  product as Steam and Discord together call it), and only a better source
+  may replace a name, so a good one never degrades into a worse one. The
+  appid and the title are read out of Steam's own bookkeeping; nothing is
+  asked of the game to get them.
+- **Compat walls, called while the game is still up.** Some games do not
+  stutter, they simply cannot run: an anti-cheat's kernel-mode driver wine
+  cannot load, a missing wine export, a volume-GUID path bug. beisl now
+  recognizes the shape of those walls as they happen and says so in the
+  session window, instead of reporting "No problems detected" next to the
+  game's own error dialog.
+- **A Compatibility section on the trace.** A trace's detail page gains the
+  wall in plain words with the log line that is the evidence for it, plus
+  every kernel driver the game asked wine to load, whether wine ships that
+  driver ("Wine builtin" or "NOT shipped by Wine"), and how many times it was
+  tried. The report file carries the same. There is no baked-in roster of
+  wine's drivers: beisl reads them out of the wine tree that actually ran,
+  and if it finds none it says "unknown" rather than guess.
+- **The Proton log, preserved.** A default Proton launch suppresses wine's
+  diagnostics (`WINEDEBUG=-all`), so the driver wall leaves nothing to find.
+  If you turn `PROTON_LOG` on yourself, beisl reads that log too and keeps a
+  copy beside the trace as `proton.log`, because Proton deletes it at the
+  next launch. beisl does not switch wine's logging on for you, then or
+  ever: the switch is yours, the reading is ours.
+- **`beisl-compat`, a review window over gamebus.** beisl detects compat
+  findings; the gamebus project houses and files them. The new window
+  reviews what was found, drafts a ProtonDB report or an AreWeAntiCheatYet
+  issue, and marks what was filed. Every action is a `gamebus-setup compat`
+  command run for you: none of it is reimplemented here, and nothing submits
+  anything by itself.
+- **A wall reaches gamebus even if gamebus was not listening.** A detected
+  wall is handed over as a JSON file dropped in gamebus's inbox at exit, so
+  the finding survives whether or not gamebus-presenced happened to be
+  running when the game stopped. Only walls with a Steam appid are handed
+  over, because an appid is what a finding can be filed under.
+- **Four binaries in the bundle.** `beisl`, `beisl-setup`, `beisl-compat`
+  and `beisl-mcp`, each with a man page.
+
+## Heads-up
+
+- **The anti-cheat wall needs your own `PROTON_LOG`.** Without it, wine's
+  diagnostic lines never reach a file and the driver wall stays invisible.
+  beisl will not switch it on for you.
+- **`beisl-compat` has not been through a design review yet.** It works, and
+  it is deliberately thin over `gamebus-setup compat`, but the shape of the
+  window is not settled.
+- **gamebus-presenced stays optional.** Without it, Steam launches still get
+  their identity from the Steam manifest, and games from other launchers
+  keep the process name. A new row in the `beisl-setup` checklist says which
+  of the two you are in.
+
+---
+
 # beisl 0.2.0
 
 The Frosted Glass release: the trace library learns to be honest about

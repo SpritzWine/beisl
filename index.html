@@ -259,6 +259,73 @@
   </div>
 </section>
 
+<!-- ======================= COMPAT WALLS ======================= -->
+<section id="walls" aria-labelledby="walls-h">
+  <div class="wrap split">
+    <div>
+      <p class="kicker">In the cellar, not yet on tap</p>
+      <h2 id="walls-h">And a wall is a result too.</h2>
+      <p>
+        Some games don’t stutter. They hit a wall: an anti-cheat’s kernel-mode
+        driver wine can’t load, a function this wine never implemented, a
+        volume-GUID path it can’t resolve. There is no frame to itemize,
+        because the game never got one. The line Beisl is pouring now knows
+        those walls by shape and calls them <em>while the game is still up</em>,
+        under “Heads up” in the session window, instead of sitting there
+        reporting “No problems detected” beside the game’s own error dialog.
+      </p>
+      <p>
+        The trace keeps the receipt: the wall in plain words, the log line that
+        proves it, and every kernel driver the game asked wine to load, each
+        marked <code>Wine builtin</code> or <code>NOT shipped by Wine</code>,
+        with the number of attempts. There is no baked-in roster of wine’s
+        drivers; Beisl reads them out of the wine tree that actually ran, and
+        says “unknown” rather than guess.
+      </p>
+      <p class="muted">
+        One honest catch, and it stays honest. A default Proton launch runs with
+        <code>WINEDEBUG=-all</code>, so the driver wall leaves nothing to find.
+        Turn <code>PROTON_LOG</code> on yourself and Beisl reads that log too,
+        keeping a copy beside the trace as <code>proton.log</code> before Proton
+        deletes it at the next launch. Beisl won’t flip that switch for you:
+        the switch is yours, the reading is ours.
+      </p>
+      <p class="muted">
+        What Beisl finds, it hands on. <b>gamebus</b> is where compat findings
+        are housed and filed; a small <code>beisl-compat</code> window reviews
+        them, drafts a ProtonDB report or an AreWeAntiCheatYet issue, and marks
+        what was filed. Every button is a <code>gamebus-setup compat</code>
+        command run for you, and nothing submits anything by itself.
+      </p>
+    </div>
+    <div class="card">
+      <table class="tier-table">
+        <caption class="kicker" style="caption-side:top;text-align:left;padding-bottom:12px;">Walls Beisl knows by shape</caption>
+        <thead>
+          <tr><th scope="col">Signature</th><th scope="col">What happened</th><th scope="col">Fixable</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row"><span class="tier-name">kernel-driver</span></th>
+            <td>the game asked wine to load a kernel-mode driver it doesn’t ship (an anti-cheat, most likely)</td>
+            <td>not on this machine</td>
+          </tr>
+          <tr>
+            <th scope="row"><span class="tier-name">wine-stub</span></th>
+            <td>the game called a function this wine doesn’t implement</td>
+            <td>upstream wine</td>
+          </tr>
+          <tr>
+            <th scope="row"><span class="tier-name">volume-guid</span></th>
+            <td>wine couldn’t resolve a volume-GUID path (status <code>c00000cb</code>)</td>
+            <td>upstream wine</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
 <!-- ======================= HOW IT WORKS ======================= -->
 <section id="how" aria-labelledby="how-h">
   <div class="wrap">
@@ -338,7 +405,10 @@
         man pages, and a degraded recording tier so a locked-down box still gets
         a userspace-only trace instead of nothing. The
         <code>Exports</code> symbol tier is proven on real captures;
-        <code>Full</code>-tier symbols are en route. Grab the tarball from
+        <code>Full</code>-tier symbols are en route. What the cellar has poured
+        since (a trace named after the game Steam knows, compat walls called
+        while the game is up, <code>beisl-compat</code>) is in the notes below
+        under <em>Unreleased</em>. Grab the tarball from
         <a href="https://codeberg.org/SpritzWine/beisl/releases" rel="external">releases</a>,
         or source and issues at
         <a href="https://codeberg.org/SpritzWine/beisl" rel="external">codeberg.org/SpritzWine/beisl</a>.
