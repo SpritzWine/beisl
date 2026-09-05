@@ -12,8 +12,10 @@
 //! `get_report`, `get_log`, `get_crash_summary`, `list_events`.
 //! Deleting and analyzing stay in the GUI/CLI, where a human confirms them.
 
+use std::collections::BTreeSet;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use serde_json::{json, Value};
 
@@ -49,6 +51,94 @@ const LOG_SIGNALS: &[&str] = &[
 ];
 const MAX_SIGNAL_LINES: usize = 40;
 const MAX_LINE_LEN: usize = 300;
+
+/// The kernel drivers Wine actually SHIPS on this machine, keyed by STEM (`winebus`, not
+/// `winebus.sys`) - discovered once, on first
+/// need, and cached for the life of the process. Wine loading one of these is Wine doing
+/// its job; a driver from OUTSIDE this set is a vendor kernel module, which no Wine can
+/// honour. That difference is the whole gate of the `kernel-driver` wall signature -
+/// without it, every ordinary run that brings up winebus and mountmgr would fire.
+///
+/// Discovered rather than listed on purpose. Wine's driver roster changes release to
+/// release, and two trees on one machine need not agree (a distro wine and a Proton build
+/// ship different sets), so a roster baked into this binary would start rotting the day it
+/// was written and would be wrong for anyone whose Wine is newer than their beisl. The
+/// scan is the same "builtins live under the wine tree" rule `symbol-resolver`'s
+/// `classify_layer` already uses to tell a wine PE from a game's own.
+///
+/// Keyed by stem because Wine names a driver two ways and only the stem is common to
+/// both: the file is `winebus.sys`, but `NtLoadDriver` logs the registry service name,
+/// `...\\Services\\MountMgr`. Verified against a real log: all seven services Wine loaded
+/// there (MountMgr, NDIS, nsiproxy, winebth, winebus, winehid, wineusb) map onto shipped
+/// files by stem, and the vendor one did not.
+///
+/// An EMPTY result is meaningful: no Wine tree was found, so builtin and vendor cannot be
+/// told apart - and [`wall_signature`] then declines to fire rather than guessing. Silent
+/// beats wrong here, per this tool's whole stance.
+fn wine_builtin_drivers() -> &'static BTreeSet<String> {
+    static CACHE: OnceLock<BTreeSet<String>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let mut found = BTreeSet::new();
+        for root in wine_tree_roots() {
+            // Builtin PEs live at <root>/lib{,64}/wine/<arch>-windows/. Both libdirs:
+            // Fedora puts the tree in lib64, Debian and every Proton build in lib.
+            for libdir in ["lib", "lib64"] {
+                let Ok(arches) = std::fs::read_dir(root.join(libdir).join("wine")) else {
+                    continue;
+                };
+                for arch in arches.flatten() {
+                    let Ok(files) = std::fs::read_dir(arch.path()) else {
+                        continue;
+                    };
+                    for file in files.flatten() {
+                        let name = file.file_name().to_string_lossy().to_ascii_lowercase();
+                        if let Some(stem) = name.strip_suffix(".sys") {
+                            found.insert(stem.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        found
+    })
+}
+
+/// Where a Wine tree plausibly lives on this machine, for [`wine_builtin_drivers`].
+/// Cheap by construction - a handful of `read_dir`s, no walk: every Steam
+/// `compatibilitytools.d` entry IS a wine build, and official Proton is picked out of
+/// `steamapps/common` BY NAME rather than by descending into every installed game.
+/// Proton and GE trees nest the wine tree one level down (`dist/` or `files/`), so each
+/// root is offered in all three shapes.
+fn wine_tree_roots() -> Vec<PathBuf> {
+    let mut roots = vec![PathBuf::from("/usr"), PathBuf::from("/usr/local")];
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    // The same two Steam roots preflight's own `steam_client_scrubs_path` checks.
+    for steam in [".local/share/Steam", ".steam/steam"] {
+        let steam = home.join(steam);
+        if let Ok(tools) = std::fs::read_dir(steam.join("compatibilitytools.d")) {
+            roots.extend(tools.flatten().map(|e| e.path()));
+        }
+        if let Ok(games) = std::fs::read_dir(steam.join("steamapps/common")) {
+            roots.extend(
+                games
+                    .flatten()
+                    .filter(|e| e.file_name().to_string_lossy().starts_with("Proton"))
+                    .map(|e| e.path()),
+            );
+        }
+    }
+    roots
+        .into_iter()
+        .flat_map(|r| [r.join("dist"), r.join("files"), r])
+        .collect()
+}
+
+/// The `compat-wall` signatures, WORST FIRST - worst meaning "least liftable from here":
+/// a vendor kernel driver is a wall nobody on this side can remove, while a missing export
+/// or a path bug are Wine bugs somebody can actually fix. The first one a run matches
+/// becomes the event's `signature`; the rest ride along in `signatures`, so one event per
+/// run keeps `list_events`' dedupe-by-`(run_id, kind)` contract intact.
+const WALL_PRIORITY: &[&str] = &["kernel-driver", "wine-stub", "volume-guid"];
 
 pub struct Server {
     traces_root: PathBuf,
@@ -326,9 +416,22 @@ impl Server {
     ///   `drain_gpu_events` always folds "GPU" into that wording, so a case-insensitive
     ///   "gpu" match is exact, not a guess — and no OTHER warning text in this codebase
     ///   mentions a GPU, so it can't misfire on an unrelated warning).
+    /// * `compat-wall` - the game log names a structural reason this game cannot run
+    ///   here: a vendor kernel-mode driver, a missing Wine export, or a volume-GUID
+    ///   path bug (see [`wall_signature`] for the exact per-signature evidence). A wall
+    ///   is the one finding worth reporting outward rather than just fixing - which is
+    ///   why it is its own kind and not a `log-signal`. Note the reach: `wine-stub` needs
+    ///   no debug channel and so works for everyone, while the other two are channel
+    ///   output that only appears for a user who turned those channels on. Ungated,
+    ///   like `gpu` and for the same reason - each signature is an exact match on text a
+    ///   healthy run cannot produce - and deliberately NOT gated behind `crash`, because
+    ///   a wall usually ends in a *clean* exit: the anti-cheat refuses, the game quits
+    ///   politely, and every other kind here stays silent. One event per run carries the
+    ///   worst signature in `signature` and all of them in `signatures`.
     /// * `log-signal` — the game log's tail has an error-shaped line (`LOG_SIGNALS`),
-    ///   but ONLY when a `crash`/`gpu` event already fired for the same run, or the run
-    ///   is `invalid` (a prior analysis attempt failed against this `perf.data`).
+    ///   but ONLY when a `crash`/`gpu`/`compat-wall` event already fired for the same
+    ///   run, or the run is `invalid` (a prior analysis attempt failed against this
+    ///   `perf.data`).
     ///   Without that gate, ordinary loader noise ("err:" in a benign wine warning, say)
     ///   would turn every noisy-but-healthy run into an event — exactly the spam this
     ///   tool exists to avoid.
@@ -356,6 +459,11 @@ impl Server {
             let crash = stale_crash || spawn_failed || exit_crashed;
             let gpu_detail = session.and_then(gpu_detail);
             let game = run.title().to_string();
+            // One read of game.log serves both log-dependent kinds below. Unlike the
+            // others this happens for every run, gated or not: a compat wall is its own
+            // hard signal, so there is nothing to gate it behind.
+            let (log_head, log_tail) = log_ends(&run.dir.join("game.log"));
+            let walls = compat_walls(&log_head, &log_tail, wine_builtin_drivers());
 
             if crash {
                 events.push(json!({
@@ -369,8 +477,16 @@ impl Server {
                     "kind": "gpu", "detail": detail,
                 }));
             }
-            if crash || gpu_detail.is_some() || run.invalid.is_some() {
-                let (lines, _) = signal_lines(&log_tail(&run.dir.join("game.log")));
+            if let Some((signature, detail)) = walls.first() {
+                let all: Vec<&str> = walls.iter().map(|(s, _)| *s).collect();
+                events.push(json!({
+                    "run_id": run.id, "unix": run.started, "game": game,
+                    "kind": "compat-wall", "signature": signature,
+                    "signatures": all, "detail": detail,
+                }));
+            }
+            if crash || gpu_detail.is_some() || !walls.is_empty() || run.invalid.is_some() {
+                let (lines, _) = signal_lines(&log_tail);
                 if let Some(newest) = lines.last() {
                     events.push(json!({
                         "run_id": run.id, "unix": run.started, "game": game,
@@ -441,6 +557,165 @@ fn log_tail(path: &std::path::Path) -> String {
     let data = std::fs::read(path).unwrap_or_default();
     let start = data.len().saturating_sub(LOG_TAIL_BYTES as usize);
     String::from_utf8_lossy(&data[start..]).into_owned()
+}
+
+/// The first and last `LOG_TAIL_BYTES` of `path`, from ONE read. A crash explains itself
+/// at the tail, but a compat wall announces itself at STARTUP - the anti-cheat loads
+/// before the menu does - so a game that hit a wall and then sat in a retry loop for an
+/// hour would look perfectly clean to a tail-only scan.
+///
+/// The two windows OVERLAP for any log smaller than twice the window (a short log is
+/// wholly in both), and that is deliberate: the tail half must stay byte-for-byte what
+/// `log_tail` alone would have returned, because `log-signal` still reads only the tail
+/// and a clamp here would silently empty it for every small log. The only cost of the
+/// overlap is scanning a short file twice for walls, which `compat_walls` dedupes anyway.
+///
+/// SEEKS rather than slurping, unlike `log_tail`: `list_events` calls this for every run
+/// in the library, gated or not, and a launcher chain leaves game logs measured in
+/// megabytes. Reading them whole would quietly turn "anything crash since we last
+/// talked?", sold as one cheap call, into gigabytes of I/O. Any read failure degrades to
+/// an empty window rather than an error, mirroring this server's "a run dir is never let
+/// down by one missing file" stance.
+fn log_ends(path: &std::path::Path) -> (String, String) {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let window = LOG_TAIL_BYTES;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return (String::new(), String::new());
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut head = vec![0u8; len.min(window) as usize];
+    if file.read_exact(&mut head).is_err() {
+        return (String::new(), String::new());
+    }
+    let head_text = String::from_utf8_lossy(&head).into_owned();
+    if len <= window {
+        return (head_text.clone(), head_text); // wholly in both windows
+    }
+    let mut tail = vec![0u8; window as usize];
+    if file.seek(SeekFrom::End(-(window as i64))).is_err() || file.read_exact(&mut tail).is_err() {
+        return (head_text, String::new());
+    }
+    (head_text, String::from_utf8_lossy(&tail).into_owned())
+}
+
+/// Driver identities named on one already-lowercased log line, normalised to a stem so
+/// they can be compared against [`wine_builtin_drivers`].
+///
+/// Two shapes, because Wine names a driver two ways and the interesting one is NOT the
+/// filename. `NtLoadDriver` logs the registry service path - `...\Services\MountMgr` - and
+/// a first version of this looked only for `.sys` filenames, found nothing on those lines,
+/// and so never fired at all. A `.sys` path is still matched because other Wine paths do
+/// carry one.
+fn driver_stems(lower_line: &str) -> Vec<String> {
+    let mut stems = Vec::new();
+    // Registry service path: everything after the last `services\` up to the closing
+    // quote or separator. Wine's debugstr doubles the backslashes, hence the trim.
+    if let Some(rest) = lower_line.rsplit("services\\").next() {
+        if rest != lower_line {
+            let name: String = rest
+                .trim_start_matches('\\')
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '-' || *c == '.')
+                .collect();
+            let name = name.strip_suffix(".sys").unwrap_or(&name);
+            if !name.is_empty() {
+                stems.push(name.to_string());
+            }
+        }
+    }
+    // A `.sys` filename anywhere on the line.
+    let mut from = 0;
+    while let Some(hit) = lower_line[from..].find(".sys") {
+        let end = from + hit;
+        let start = lower_line[..end]
+            .rfind(['\\', '/', '"', '\'', ' ', '\t', '(', ',', '=', ':'])
+            .map_or(0, |i| i + 1);
+        if start < end {
+            stems.push(lower_line[start..end].to_string());
+        }
+        from = end + ".sys".len();
+    }
+    stems
+}
+
+/// Which compat wall, if any, one log line is evidence of. Both arms are EXACT matches on
+/// text a healthy run cannot produce - the same stance as the `gpu` kind, and the reason
+/// this kind needs no crash to gate it (a wall often ends in a *clean* exit: the game
+/// refuses, quits politely, and every other signal stays silent).
+///
+/// * `wine-stub` - the game called an export this Wine doesn't have. Wine has TWO
+///   emitters that word it differently, so the match is on the words they share rather
+///   than on either one's full sentence. `dlls/ntdll/exception.c` says "wine: Call from
+///   %p to unimplemented function %s.%s, aborting" from the game process via `MESSAGE`;
+///   `programs/winedbg/info.c` says "unimplemented function %s.%s called" from winedbg,
+///   the debugger Wine spawns on an unhandled exception. The winedbg form is what an
+///   actual stub CRASH produces - the common case - and requiring the ntdll wording
+///   missed exactly that. Neither is channel-gated (`MESSAGE` resolves to
+///   `wine_dbg_printf` with no `TRACE_ON` test in the path, and winedbg's `dbg_printf`
+///   is a plain write from another process), so `WINEDEBUG` cannot suppress either and
+///   this signature costs the user nothing. The other two arms are channel output
+///   (`ntdll`/`file`) and only appear for a user who enabled those themselves.
+/// * `volume-guid` - `c00000cb` (STATUS_BAD_DEVICE_TYPE) on a volume-GUID path. The
+///   status alone is far too common to match on: in a real trace, 48 of its 48
+///   occurrences were `\??\pipe\...` named-pipe failures, entirely unrelated. It is the
+///   CO-OCCURRENCE with a `Volume{` path on the same line that makes it exact. Unlike
+///   `wine-stub` this is `TRACE()` output on the `file` channel, so it only appears for
+///   someone who has turned that channel on themselves; it can never fire by default.
+///
+/// * `kernel-driver` - a driver load naming a driver Wine does not ship: a vendor
+///   kernel-mode module, the wall no Wine can honour. The evidence is the load ATTEMPT,
+///   which Wine records even though it cannot satisfy it - the real WARDOGS line is
+///   `fixme:ntdll:NtLoadDriver (L"...\Services\elytra_ZkqZiVbyre8nFULw"), stub!`. What
+///   the line carries is a registry SERVICE name, not a filename, which is why matching
+///   only `.sys` paths made this arm inert; see [`driver_stems`]. `builtins` empty means
+///   no Wine tree was found to compare against, and the arm then stays silent rather than
+///   calling winebus an anti-cheat.
+fn wall_signature(lower_line: &str, builtins: &BTreeSet<String>) -> Option<&'static str> {
+    let driver_load = lower_line.contains("zwloaddriver") || lower_line.contains("ntloaddriver");
+    if driver_load
+        && !builtins.is_empty()
+        && driver_stems(lower_line)
+            .iter()
+            .any(|stem| !builtins.contains(stem))
+    {
+        return Some("kernel-driver");
+    }
+    if lower_line.contains("unimplemented function ") {
+        return Some("wine-stub");
+    }
+    if lower_line.contains("c00000cb") && lower_line.contains("volume{") {
+        return Some("volume-guid");
+    }
+    None
+}
+
+/// `list_events`' `compat-wall` gate and detail: the walls this run hit, worst first (see
+/// `WALL_PRIORITY`), at most one entry per signature - a wall repeats every frame in a
+/// retry loop, and a hundred copies of one line is not a hundred findings. Scans the log's
+/// head as well as its tail (see `log_ends`). Empty when the run is clean, which is the
+/// overwhelmingly common case and the point of the exactness above.
+fn compat_walls(
+    head: &str,
+    tail: &str,
+    builtins: &BTreeSet<String>,
+) -> Vec<(&'static str, String)> {
+    let mut hits: Vec<(&'static str, String)> = Vec::new();
+    for line in head.lines().chain(tail.lines()) {
+        let lower = line.to_lowercase();
+        if let Some(sig) = wall_signature(&lower, builtins) {
+            if !hits.iter().any(|(s, _)| *s == sig) {
+                hits.push((sig, clip(line.trim(), MAX_LINE_LEN)));
+            }
+        }
+    }
+    hits.sort_by_key(|(sig, _)| {
+        WALL_PRIORITY
+            .iter()
+            .position(|p| p == sig)
+            .unwrap_or(usize::MAX)
+    });
+    hits
 }
 
 /// The wrapper-log lines worth surfacing to a human forensics reader: launch/exit/
@@ -655,8 +930,14 @@ fn tools_list() -> Value {
                             provably gone - from a previous boot, or its pid dying within \
                             this one - but NOT a run that was cleanly stopped and kept \
                             playing before an ordinary reboot), 'gpu' (a GPU hang/\
-                            devcoredump warning), 'log-signal' (an error-shaped game-log \
-                            line, only alongside a harder signal or an invalid run). Each \
+                            devcoredump warning), 'compat-wall' (this game structurally \
+                            cannot run here: a vendor kernel-mode driver, a missing \
+                            Wine export, or a volume-GUID path bug - note a wall often \
+                            ends in a CLEAN exit, so it fires on its own with no crash \
+                            beside it; 'signature' names the worst one, 'signatures' \
+                            lists all), 'log-signal' (an error-shaped \
+                            game-log line, only alongside a harder signal or an invalid \
+                            run). Each \
                             event's detail is a short pointer — get_crash_summary is the \
                             deep dive. Capped at the newest 100 events (truncated: true \
                             if hit).",
@@ -1235,6 +1516,164 @@ mod tests {
             .map(|e| e["run_id"].as_str().unwrap())
             .collect();
         assert_eq!(ids, ["run-300", "run-200", "run-100"]);
+    }
+
+    #[test]
+    fn both_of_wines_stub_phrasings_are_matched() {
+        // Wine says this two different ways from two different processes, and the rule
+        // originally required the ntdll wording ("to unimplemented function ... ,
+        // aborting"). That excluded the winedbg form - which is what an actual stub
+        // CRASH produces, so the common case was the one being missed. Both verbatim
+        // from Wine source (dlls/ntdll/exception.c, programs/winedbg/info.c).
+        let ntdll = "wine: Call from 0x7b00 to unimplemented function ntdll.dll.RtlStringFromGUIDEx, aborting";
+        let winedbg = "Unhandled exception: unimplemented function ntdll.dll.RtlStringFromGUIDEx called in 64-bit code (0x006ffffff67858).";
+        for line in [ntdll, winedbg] {
+            assert_eq!(
+                compat_walls(line, "", &builtins(&[]))
+                    .first()
+                    .map(|(s, _)| *s),
+                Some("wine-stub"),
+                "missed: {line}"
+            );
+        }
+    }
+
+    /// A pinned stand-in for what `wine_builtin_drivers()` discovers, keyed by stem the
+    /// way that function keys it. Passed in so these assertions don't depend on whatever
+    /// Wine the machine running the tests happens to have installed.
+    fn builtins(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    #[test]
+    fn a_vendor_driver_service_is_a_wall_but_wines_own_are_not() {
+        // Both lines verbatim from a real Proton log of the WARDOGS wall. The vendor one
+        // is what the anti-cheat actually produced; note it names a registry SERVICE, not
+        // a .sys file, which is what an earlier version of this arm looked for and why it
+        // never fired. The Wine ones load on every single run, so treating them as walls
+        // would have made the kind worthless.
+        let wine = builtins(&[
+            "mountmgr", "ndis", "nsiproxy", "winebth", "winebus", "winehid", "wineusb",
+        ]);
+        let vendor = r#"8122.268:0164:0184:fixme:ntdll:NtLoadDriver (L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\elytra_ZkqZiVbyre8nFULw"), stub!"#;
+        assert_eq!(
+            compat_walls(vendor, "", &wine).first().map(|(s, _)| *s),
+            Some("kernel-driver"),
+            "the real Elytra wall must fire"
+        );
+        for own in [
+            r#"8113.430:003c:004c:trace:ntoskrnl:ZwLoadDriver (L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\MountMgr")"#,
+            r#"8113.775:003c:004c:trace:ntoskrnl:ZwLoadDriver (L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\nsiproxy")"#,
+            r#"8113.779:003c:004c:trace:ntoskrnl:ZwLoadDriver (L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\NDIS")"#,
+        ] {
+            assert_eq!(
+                compat_walls(own, "", &wine),
+                Vec::new(),
+                "must stay silent: {own}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sys_filename_still_counts_and_an_unknown_wine_tree_declines() {
+        // The .sys shape is still matched, since not every Wine path uses a service name.
+        let wine = builtins(&["winebus"]);
+        let vendor = r#"trace:ntoskrnl:ZwLoadDriver (L"\\??\\C:\\windows\\system32\\drivers\\lighthouse_driver.sys")"#;
+        assert_eq!(
+            compat_walls(vendor, "", &wine).first().map(|(s, _)| *s),
+            Some("kernel-driver")
+        );
+        // Empty builtins means discovery found no Wine tree: builtin and vendor cannot be
+        // told apart, so the arm declines rather than accusing winebus.
+        assert_eq!(compat_walls(vendor, "", &builtins(&[])), Vec::new());
+    }
+
+    #[test]
+    fn one_run_yields_one_wall_carrying_the_worst_signature_first() {
+        // Dedupe-by-(run_id, kind) is the documented client contract, so a run that hit
+        // both walls still reports ONE: worst signature promoted, the other along for
+        // the ride. Repeats of one signature collapse too.
+        let game = "wine: Call from 0x7b00 to unimplemented function ntdll.dll.RtlStringFromGUIDEx, aborting\n\
+             err:ntdll:get_dos_device L\"\\\\??\\\\Volume{9c8e7d00-0000-0000-0000-100000000000}\\\\\" failed with c00000cb\n\
+             Unhandled exception: unimplemented function ntdll.dll.Another called in 64-bit code (0x1).";
+        let sigs: Vec<&str> = compat_walls(game, "", &builtins(&[]))
+            .iter()
+            .map(|(s, _)| *s)
+            .collect();
+        assert_eq!(sigs, ["wine-stub", "volume-guid"]);
+    }
+
+    #[test]
+    fn a_bare_bad_device_type_is_not_a_volume_guid_wall() {
+        // STATUS_BAD_DEVICE_TYPE is returned all over Wine's socket and file paths, so
+        // the status code ALONE must never fire - only its co-occurrence with a volume
+        // GUID on the same line is the path bug.
+        let root = fixture_root("events-wall-status-only");
+        put_events_run(
+            &root,
+            "run-100",
+            session::State::Done,
+            vec![],
+            CLEAN_EXIT,
+            "err:ntdll:some_socket_call failed, status c00000cb\n",
+        );
+        let listing = events_of(&Server::new(root), 0);
+        assert_eq!(listing["events"].as_array().unwrap(), &Vec::<Value>::new());
+    }
+
+    #[test]
+    fn a_startup_wall_survives_a_log_that_grew_past_the_tail() {
+        // End-to-end through list_events, on a CLEAN exit - a wall needs no crash beside
+        // it to be reported, and it ungates log-signal the way a crash does. Also why
+        // `log_ends` reads the head: the anti-cheat loads before the menu, then the game
+        // can idle in a retry loop long enough to push megabytes of noise in behind it,
+        // and a tail-only scan would call that run clean.
+        let root = fixture_root("events-wall-head");
+        let mut game = String::from(
+            "wine: Call from 0x7b00 to unimplemented function ntdll.dll.RtlStringFromGUIDEx, aborting\n",
+        );
+        game.push_str(&"gamemodeauto: dlopen failed\n".repeat(12_000));
+        assert!(
+            game.len() > 2 * LOG_TAIL_BYTES as usize,
+            "must outgrow both windows"
+        );
+        put_events_run(
+            &root,
+            "run-100",
+            session::State::Done,
+            vec![],
+            CLEAN_EXIT,
+            &game,
+        );
+        let listing = events_of(&Server::new(root), 0);
+        let events = listing["events"].as_array().unwrap();
+        assert_eq!(events[0]["kind"], "compat-wall");
+        assert_eq!(events[0]["signature"], "wine-stub");
+        assert_eq!(events[0]["signatures"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_wall_ungates_log_signal_on_an_otherwise_clean_run() {
+        // A wall is a hard signal, so it opens the log-signal gate the way a crash does -
+        // on a run that exited 0, where nothing else here would have said a word. (The
+        // volume-GUID signature is used because it needs no builtin-driver set to judge.)
+        let root = fixture_root("events-wall-ungates");
+        put_events_run(
+            &root,
+            "run-100",
+            session::State::Done,
+            vec![],
+            CLEAN_EXIT,
+            "err:ntdll:get_dos_device L\"\\\\??\\\\Volume{9c8e7d00-0000-0000-0000-100000000000}\\\\\" failed with c00000cb\n",
+        );
+        let listing = events_of(&Server::new(root), 0);
+        let kinds: Vec<&str> = listing["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, ["compat-wall", "log-signal"]);
     }
 
     #[test]
