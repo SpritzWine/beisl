@@ -159,8 +159,7 @@ impl Application for SessionApp {
         let invalid_marker = session::library::invalid_of(&dir);
         // Not `self.is_stale()` — there's no `Self` yet — but the same core, since
         // `is_stale()` is just this call wrapped around `self.dir`/`self.session`.
-        let stale =
-            session::library::stale_session(&session, session::library::run_started(&dir));
+        let stale = session::library::stale_session(&session, session::library::run_started(&dir));
         let title = window_title(
             artifact.is_some(),
             session.analysis_offer,
@@ -1031,6 +1030,39 @@ impl SessionApp {
                 issues = issues.push(all);
             }
             col = col.push(widget::settings::section().title("Issues").add(issues));
+        }
+
+        // 5. Compatibility — what the run's logs said about the game's ability to run at
+        //    all (see `artifact::Compat`). The driver list is shown even when no wall was
+        //    called: which drivers the game tried to load is the evidence a person reads the
+        //    wall from, and it says how far the game got before it gave up.
+        let c = &a.diagnostics.compat;
+        if !c.walls.is_empty() || !c.driver_loads.is_empty() {
+            let mut compat = widget::Column::new().spacing(8);
+            for w in &c.walls {
+                compat = compat
+                    .push(widget::text::body(format!("Wall: {}", w.signature)))
+                    .push(widget::text::caption(w.explanation.clone()))
+                    .push(widget::text::caption(format!("Evidence: {}", w.evidence)));
+            }
+            if !c.driver_loads.is_empty() {
+                compat = compat.push(widget::text::caption(
+                    "Kernel drivers the game asked Wine to load, in order:",
+                ));
+                for d in &c.driver_loads {
+                    compat = compat.push(widget::text::monotext(format!(
+                        "{:<32} {:<28} x{}",
+                        d.name,
+                        artifact::driver_verdict(d.builtin),
+                        d.attempts
+                    )));
+                }
+            }
+            col = col.push(
+                widget::settings::section()
+                    .title("Compatibility")
+                    .add(compat),
+            );
         }
         if let Some(note) = &self.install_note {
             col = col.push(widget::text::caption(note.clone()));

@@ -106,31 +106,59 @@ fn wine_tree_roots() -> Vec<PathBuf> {
 /// and so never fired at all. A `.sys` path is still matched because other Wine paths do
 /// carry one.
 pub fn driver_stems(lower_line: &str) -> Vec<String> {
+    stems_in(lower_line)
+}
+
+/// Whether a line records a driver-load attempt at all (`NtLoadDriver`/`ZwLoadDriver`,
+/// whichever channel wrote it).
+pub fn is_driver_load(lower_line: &str) -> bool {
+    lower_line.contains("zwloaddriver") || lower_line.contains("ntloaddriver")
+}
+
+/// The drivers a load line names, spelled as the log spelled them (`MountMgr`,
+/// `elytra_r7tC-LhUH4-egxUm`) - for showing a person what the game tried, where
+/// [`driver_stems`] is the lowercase form compared against builtins. Empty for a line
+/// that is not a load attempt.
+pub fn driver_names(line: &str) -> Vec<String> {
+    let lower = line.to_ascii_lowercase();
+    if is_driver_load(&lower) {
+        stems_in(line)
+    } else {
+        Vec::new()
+    }
+}
+
+/// Case-preserving core of [`driver_stems`]: searches an ASCII-lowercased copy and slices
+/// the original by the same byte offsets, so the caller decides the case.
+fn stems_in(line: &str) -> Vec<String> {
+    let lower = line.to_ascii_lowercase();
     let mut stems = Vec::new();
     // Registry service path: everything after the last `services\` up to the closing
     // quote or separator. Wine's debugstr doubles the backslashes, hence the trim.
-    if let Some(rest) = lower_line.rsplit("services\\").next() {
-        if rest != lower_line {
-            let name: String = rest
-                .trim_start_matches('\\')
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '-' || *c == '.')
-                .collect();
-            let name = name.strip_suffix(".sys").unwrap_or(&name);
-            if !name.is_empty() {
-                stems.push(name.to_string());
-            }
+    if let Some(idx) = lower.rfind("services\\") {
+        let rest = &line[idx + "services\\".len()..];
+        let name: String = rest
+            .trim_start_matches('\\')
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '-' || *c == '.')
+            .collect();
+        let name = match name.to_ascii_lowercase().strip_suffix(".sys") {
+            Some(_) => name[..name.len() - ".sys".len()].to_string(),
+            None => name,
+        };
+        if !name.is_empty() {
+            stems.push(name);
         }
     }
     // A `.sys` filename anywhere on the line.
     let mut from = 0;
-    while let Some(hit) = lower_line[from..].find(".sys") {
+    while let Some(hit) = lower[from..].find(".sys") {
         let end = from + hit;
-        let start = lower_line[..end]
+        let start = lower[..end]
             .rfind(['\\', '/', '"', '\'', ' ', '\t', '(', ',', '=', ':'])
             .map_or(0, |i| i + 1);
         if start < end {
-            stems.push(lower_line[start..end].to_string());
+            stems.push(line[start..end].to_string());
         }
         from = end + ".sys".len();
     }
@@ -170,8 +198,7 @@ pub fn driver_stems(lower_line: &str) -> Vec<String> {
 ///   no Wine tree was found to compare against, and the arm then stays silent rather than
 ///   calling winebus an anti-cheat.
 pub fn wall_signature(lower_line: &str, builtins: &BTreeSet<String>) -> Option<&'static str> {
-    let driver_load = lower_line.contains("zwloaddriver") || lower_line.contains("ntloaddriver");
-    if driver_load
+    if is_driver_load(lower_line)
         && !builtins.is_empty()
         && driver_stems(lower_line)
             .iter()
@@ -250,6 +277,20 @@ mod tests {
         assert_eq!(
             driver_stems(r#"(l"\\??\\c:\\windows\\system32\\drivers\\lighthouse_driver.sys")"#),
             ["lighthouse_driver"]
+        );
+    }
+
+    #[test]
+    fn driver_names_keep_the_logs_spelling() {
+        let line = r#"fixme:ntdll:NtLoadDriver (L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\elytra_r7tC-LhUH4-egxUm"), stub!"#;
+        assert_eq!(driver_names(line), ["elytra_r7tC-LhUH4-egxUm"]);
+        assert_eq!(
+            driver_stems(&line.to_lowercase()),
+            ["elytra_r7tc-lhuh4-egxum"]
+        );
+        assert_eq!(
+            driver_names("err:something else entirely"),
+            Vec::<String>::new()
         );
     }
 

@@ -12,6 +12,7 @@
 //! `perf.data` (via `symbol-resolver`) and read the frametime CSV — so the wrapper's
 //! post-run step and `beisl symbols` share one code path.
 
+use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -86,6 +87,124 @@ pub struct Diagnostics {
     pub unresolved_pct: f32,
     /// `(module, pct)` we couldn't name — ELF wants debuginfo, a PE wants the Full tier.
     pub anonymous_modules: Vec<(String, f32)>,
+    /// Defaulted so pre-field artifacts still load.
+    #[serde(default)]
+    pub compat: Compat,
+}
+
+/// What the run's logs say about the game's ability to run at all: the wall signatures
+/// beisl-mcp's `compat-wall` event rests on, plus every kernel driver the game asked Wine
+/// to load - the vendor one IS the wall, Wine's own are the context showing the game got
+/// that far. Read from game.log and, when the user had PROTON_LOG on, the proton.log the
+/// wrapper preserved. Same rules as the event, through the `compat` crate.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Compat {
+    /// Worst first.
+    pub walls: Vec<Wall>,
+    /// First attempt first.
+    pub driver_loads: Vec<DriverLoad>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Wall {
+    pub signature: String,
+    /// What it means for a person (`compat::explain`).
+    pub explanation: String,
+    /// The log line that showed it, clipped.
+    pub evidence: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DriverLoad {
+    /// As the log spelled it: a registry service (`MountMgr`, `elytra_r7tC-LhUH4-egxUm`)
+    /// or a `.sys` stem.
+    pub name: String,
+    /// Whether this Wine ships it; `None` when no Wine tree was found to check against.
+    pub builtin: Option<bool>,
+    pub attempts: u32,
+}
+
+impl Compat {
+    fn from_run_dir(run_dir: &Path) -> Self {
+        use std::io::BufRead;
+        let builtins = compat::wine_builtin_drivers();
+        let mut out = Compat::default();
+        for name in ["game.log", "proton.log"] {
+            let Ok(file) = std::fs::File::open(run_dir.join(name)) else {
+                continue;
+            };
+            // Whole file, streamed: a user who enabled channels has megabytes of trace
+            // lines around the one that matters.
+            let lines = std::io::BufReader::new(file)
+                .split(b'\n')
+                .map_while(Result::ok)
+                .map(|raw| String::from_utf8_lossy(&raw).into_owned());
+            out.absorb(lines, builtins);
+        }
+        out
+    }
+
+    /// Fold log lines in: one wall per signature, one row per driver with its attempts
+    /// counted. Pure, so the rules can be tested without a Wine tree on the machine.
+    fn absorb(&mut self, lines: impl Iterator<Item = String>, builtins: &BTreeSet<String>) {
+        for line in lines {
+            let lower = line.to_lowercase();
+            if let Some(sig) = compat::wall_signature(&lower, builtins) {
+                if !self.walls.iter().any(|w| w.signature == sig) {
+                    self.walls.push(Wall {
+                        signature: sig.to_string(),
+                        explanation: compat::explain(sig).to_string(),
+                        evidence: clip_line(line.trim()),
+                    });
+                }
+            }
+            for name in compat::driver_names(&line) {
+                match self
+                    .driver_loads
+                    .iter_mut()
+                    .find(|d| d.name.eq_ignore_ascii_case(&name))
+                {
+                    Some(d) => d.attempts += 1,
+                    None => {
+                        let builtin = (!builtins.is_empty())
+                            .then(|| builtins.contains(&name.to_ascii_lowercase()));
+                        self.driver_loads.push(DriverLoad {
+                            name,
+                            builtin,
+                            attempts: 1,
+                        });
+                    }
+                }
+            }
+        }
+        self.walls.sort_by_key(|w| {
+            compat::WALL_PRIORITY
+                .iter()
+                .position(|p| *p == w.signature)
+                .unwrap_or(usize::MAX)
+        });
+    }
+}
+
+/// Evidence lines are shown verbatim in a UI, so keep them to one readable line.
+fn clip_line(line: &str) -> String {
+    const MAX: usize = 300;
+    if line.chars().count() <= MAX {
+        line.to_string()
+    } else {
+        let mut s: String = line.chars().take(MAX).collect();
+        s.push_str("...");
+        s
+    }
+}
+
+/// One phrase per `DriverLoad::builtin` state, shared by the report and the GUI.
+pub fn driver_verdict(builtin: Option<bool>) -> &'static str {
+    match builtin {
+        Some(true) => "Wine builtin",
+        Some(false) => "NOT shipped by Wine",
+        None => "unknown (no Wine tree found)",
+    }
 }
 
 /// The merged, exportable trace.
@@ -202,7 +321,7 @@ impl TraceArtifact {
             .and_then(|csv| frames_from_csv(&csv))
             .map(|(stats, spikes, timeline)| (Some(stats), spikes, timeline))
             .unwrap_or((None, Vec::new(), Vec::new()));
-        Ok(Self::from_parts(
+        let mut art = Self::from_parts(
             game,
             duration_s,
             record_mode,
@@ -210,7 +329,9 @@ impl TraceArtifact {
             frame_stats,
             spikes,
             timeline,
-        ))
+        );
+        art.diagnostics.compat = Compat::from_run_dir(run_dir);
+        Ok(art)
     }
 
     fn from_parts(
@@ -300,6 +421,7 @@ impl TraceArtifact {
                 total_samples: res.diagnostics.total_samples,
                 unresolved_pct: res.diagnostics.unresolved_pct() as f32,
                 anonymous_modules,
+                compat: Compat::default(),
             },
         }
     }
@@ -350,7 +472,7 @@ impl TraceArtifact {
 
     /// A one-line headline for the session window / log: the hottest wine function and tier.
     pub fn headline(&self) -> String {
-        match self.hot_symbols.first() {
+        let top = match self.hot_symbols.first() {
             Some(h) => {
                 format!(
                     "Top: {} {} ({} tier)",
@@ -361,6 +483,12 @@ impl TraceArtifact {
                 "No wine symbols resolved ({} tier)",
                 self.diagnostics.fidelity
             ),
+        };
+        // A wall outranks a hot function: nothing about this run's performance matters if
+        // the game refused to start.
+        match self.diagnostics.compat.walls.first() {
+            Some(w) => format!("Compat wall: {}. {top}", w.signature),
+            None => top,
         }
     }
 
@@ -395,6 +523,28 @@ impl TraceArtifact {
                  kernel bar because kernel profiling wasn't available, not because the kernel \
                  was quiet."
             );
+        }
+
+        let c = &self.diagnostics.compat;
+        if !c.walls.is_empty() || !c.driver_loads.is_empty() {
+            let _ = writeln!(o, "\nCompatibility:");
+            for w in &c.walls {
+                let _ = writeln!(o, "  wall: {}", w.signature);
+                let _ = writeln!(o, "    {}", w.explanation);
+                let _ = writeln!(o, "    evidence: {}", w.evidence);
+            }
+            if !c.driver_loads.is_empty() {
+                let _ = writeln!(o, "  kernel drivers the game asked Wine to load:");
+                for d in &c.driver_loads {
+                    let _ = writeln!(
+                        o,
+                        "    {:<32} {}  x{}",
+                        d.name,
+                        driver_verdict(d.builtin),
+                        d.attempts
+                    );
+                }
+            }
         }
 
         if let Some(f) = &self.frame_stats {
@@ -935,6 +1085,7 @@ mod tests {
                 total_samples: 0,
                 unresolved_pct: 0.0,
                 anonymous_modules: vec![],
+                compat: Compat::default(),
             },
         };
         let report = a.render_report();
@@ -983,6 +1134,7 @@ mod tests {
                 total_samples: 100,
                 unresolved_pct: 80.0,
                 anonymous_modules: vec![("libvulkan_intel.so".into(), 16.6)],
+                compat: Compat::default(),
             },
         };
         let json = serde_json::to_string(&a).unwrap();
@@ -1021,6 +1173,7 @@ mod tests {
                 total_samples: 0,
                 unresolved_pct: 0.0,
                 anonymous_modules: vec![],
+                compat: Compat::default(),
             },
         };
         assert!(a.render_report().contains("degraded recording"));
@@ -1150,6 +1303,7 @@ mod tests {
                 total_samples: 0,
                 unresolved_pct: 0.0,
                 anonymous_modules: vec![],
+                compat: Compat::default(),
             },
         }
     }
@@ -1268,6 +1422,7 @@ mod tests {
                 total_samples: 0,
                 unresolved_pct: 0.0,
                 anonymous_modules: vec![],
+                compat: Compat::default(),
             },
         };
         assert_eq!(a.wine_display(), "none — native game");
@@ -1285,5 +1440,43 @@ mod tests {
         a.wine_flavor = "unknown".into();
         a.game_maps_pe = None;
         assert_eq!(a.wine_display(), "unknown");
+    }
+
+    #[test]
+    fn compat_lists_every_driver_attempt_and_names_the_wall() {
+        // The 20:55 WARDOGS run of 2026-09-05, condensed: Wine's own drivers load first,
+        // then the anti-cheat's, twice over as the launcher retries.
+        let wine: BTreeSet<String> = ["mountmgr", "ndis"].iter().map(|s| s.to_string()).collect();
+        let lines = [
+            r#"8113.430:003c:004c:trace:ntoskrnl:ZwLoadDriver (L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\MountMgr")"#,
+            r#"8113.779:003c:004c:trace:ntoskrnl:ZwLoadDriver (L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\NDIS")"#,
+            r#"8122.268:0164:0184:fixme:ntdll:NtLoadDriver (L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\elytra_r7tC-LhUH4-egxUm"), stub!"#,
+            r#"8122.270:0164:0184:fixme:ntdll:NtLoadDriver (L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\elytra_r7tC-LhUH4-egxUm"), stub!"#,
+            "ntsync: up and running.",
+        ];
+        let mut c = Compat::default();
+        c.absorb(lines.iter().map(|l| l.to_string()), &wine);
+        assert_eq!(c.walls.len(), 1);
+        assert_eq!(c.walls[0].signature, "kernel-driver");
+        let rows: Vec<(&str, Option<bool>, u32)> = c
+            .driver_loads
+            .iter()
+            .map(|d| (d.name.as_str(), d.builtin, d.attempts))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("MountMgr", Some(true), 1),
+                ("NDIS", Some(true), 1),
+                ("elytra_r7tC-LhUH4-egxUm", Some(false), 2),
+            ]
+        );
+        // No Wine tree to compare against: attempts are still listed, verdicts withheld,
+        // and the wall arm declines (see compat::wall_signature).
+        let mut unknown = Compat::default();
+        unknown.absorb(lines.iter().map(|l| l.to_string()), &BTreeSet::new());
+        assert!(unknown.walls.is_empty());
+        assert!(unknown.driver_loads.iter().all(|d| d.builtin.is_none()));
+        assert_eq!(unknown.driver_loads.len(), 3);
     }
 }
