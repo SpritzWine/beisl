@@ -30,7 +30,8 @@ use preflight::gpu::GpuPinCandidate;
 use preflight::{
     all_checks, detect_distro, detect_record_mode, detect_system_kind, disk_check,
     driver_debuginfo_check, fix_command, gpu_dump_check, locked_system_message,
-    mangohud_hotkey_check, multi_gpu_check, ostree_install_note, perf_debuginfod_check,
+    gamebus_presence_check, mangohud_hotkey_check, multi_gpu_check, ostree_install_note,
+    perf_debuginfod_check,
     perf_record_fix, steam_visible_beisl_check, Check, CheckId, Config, Distro, DumpAccessPolicy,
     Fix, GpuPin, RecordMode, Status, SystemKind, STEAM_PATH_ISSUE_URL,
 };
@@ -276,6 +277,7 @@ impl AppModel {
         // from `driver_debuginfo_check` (are the files reachable) — this asks whether `perf`
         // was even built with the support Beisl's on-demand fetch depends on.
         checks.push(perf_debuginfod_check());
+        checks.push(gamebus_presence_check());
         // Steam's containerized client scrubs the launch-option PATH — without the
         // /usr/bin launcher, `beisl %command%` (the tool's whole entry point) silently
         // fails. That makes this the most actionable row on the page, so it goes FIRST

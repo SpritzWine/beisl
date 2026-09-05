@@ -309,6 +309,7 @@ impl Server {
         checks.push(preflight::multi_gpu_check());
         checks.push(preflight::driver_debuginfo_check());
         checks.push(preflight::perf_debuginfod_check());
+        checks.push(preflight::gamebus_presence_check());
         checks.push(preflight::mangohud_hotkey_check());
         checks.push(preflight::steam_visible_beisl_check());
 
@@ -1003,6 +1004,7 @@ mod tests {
             DriverDebuginfo,
             PerfDebuginfod,
             SteamVisibleBeisl,
+            GamebusPresence,
         ]
         .iter()
         .map(|i| format!("{i:?}"))
@@ -1022,6 +1024,7 @@ mod tests {
                 "DriverDebuginfo",
                 "PerfDebuginfod",
                 "SteamVisibleBeisl",
+                "GamebusPresence",
             ]
         );
         use session::State::*;

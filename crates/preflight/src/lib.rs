@@ -93,6 +93,15 @@ pub enum CheckId {
     /// per-user at run time, so multi-user systems stay correct and updates flow through
     /// without touching the shim (see [`steam_visible_beisl_check`]).
     SteamVisibleBeisl,
+    /// Optional, informational: gamebus-presenced isn't installed, so a trace can only
+    /// name its run after a process (`acs`, `Icarus-Win64-Shipping`) and never learns the
+    /// game's human name or Steam appid. beisl reads those off
+    /// `org.gamebus.Presence.v1` when it is there (see the wrapper's `presence` module);
+    /// without it, enrichment is simply skipped. No fix: installing a separate project's
+    /// daemon is gamebus-setup's job, not something to run under our pkexec sweep - the
+    /// same consent line [`gpu_dump_check`] and [`kernel_symbols_check`] hold - so the
+    /// `why` carries the command (see [`gamebus_presence_check`]).
+    GamebusPresence,
 }
 
 /// How to repair a failing check. Turned into a concrete `pkexec` argv by [`fix_command`].
@@ -180,6 +189,7 @@ impl Check {
             CheckId::DiskSpace => return, // computed in `disk_check`
             CheckId::PerfDebuginfod => return, // computed in `perf_debuginfod_check`
             CheckId::SteamVisibleBeisl => return, // computed in `steam_visible_beisl_check`
+            CheckId::GamebusPresence => ok_or_fix(gamebus_presence_available()),
         };
     }
 }
@@ -389,6 +399,67 @@ pub fn perf_debuginfod_check() -> Check {
         },
         fix: None,
         advanced: false,
+    }
+}
+
+/// The optional, informational "gamebus presence" advisory. Advisory and `fix: None`
+/// like [`driver_debuginfo_check`]: gamebus-presenced is a separate project, and
+/// installing someone else's daemon is exactly the kind of thing that must not ride along
+/// in a one-click "set everything up" sweep. `gamebus-setup` already does the installing;
+/// beisl's job is to notice and to say so.
+///
+/// What is lost without it is identity, not measurement: the trace records the same
+/// frametimes either way, but names the run after a process rather than the game, and
+/// carries no Steam appid - which is the difference between a compat finding somebody can
+/// file and one nobody can act on.
+pub fn gamebus_presence_check() -> Check {
+    let present = gamebus_presence_available();
+    Check {
+        id: CheckId::GamebusPresence,
+        label: "gamebus presence (optional)",
+        why: gamebus_presence_why(present).into(),
+        blocking: false,
+        status: if present {
+            Status::Ok
+        } else {
+            Status::NeedsFix
+        },
+        fix: None,
+        advanced: false,
+    }
+}
+
+/// Whether `org.gamebus.Presence.v1` could serve us. Looks for the D-Bus service file
+/// rather than probing the bus: the service is activatable on demand, so "not running
+/// right now" says nothing - a game simply isn't up yet - while an installed service file
+/// means it will be there when one is. Checking a few paths also beats spawning `busctl`
+/// in a checklist the GUI runs on every open.
+fn gamebus_presence_available() -> bool {
+    const SERVICE_FILE: &str = "dbus-1/services/org.gamebus.Presence.v1.service";
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    let mut roots = vec![home.join(".local/share")];
+    roots.extend(
+        std::env::var("XDG_DATA_DIRS")
+            .unwrap_or_else(|_| "/usr/local/share:/usr/share".to_string())
+            .split(':')
+            .filter(|d| !d.is_empty())
+            .map(PathBuf::from),
+    );
+    roots.iter().any(|r| r.join(SERVICE_FILE).is_file())
+}
+
+fn gamebus_presence_why(present: bool) -> String {
+    if present {
+        "gamebus-presenced is installed, so a trace records the game's real name and its \
+         Steam appid instead of just the process name - which is what makes a finding \
+         reportable to ProtonDB or AreWeAntiCheatYet."
+            .to_string()
+    } else {
+        "gamebus-presenced isn't installed. Traces still record everything they measure, \
+         but get named after the game's process (`acs`, `Icarus-Win64-Shipping`) with no \
+         Steam appid, so a compatibility finding can't be tied to the game it came from. \
+         Install it with `gamebus-setup apply install --target user --confirm`."
+            .to_string()
     }
 }
 
@@ -1502,6 +1573,23 @@ mod tests {
         assert!(all_checks()
             .iter()
             .all(|c| c.id != CheckId::DriverDebuginfo));
+        // gamebus-presenced is a separate project: noticing it is fine, installing it
+        // from our privileged sweep is not, so it must never reach `all_checks`.
+        assert!(all_checks()
+            .iter()
+            .all(|c| c.id != CheckId::GamebusPresence));
+        let g = gamebus_presence_check();
+        assert!(!g.blocking, "advisory only");
+        assert!(
+            g.fix.is_none(),
+            "no auto-fix: gamebus-setup owns installing it"
+        );
+        assert!(
+            gamebus_presence_why(false).contains("gamebus-setup apply install"),
+            "the why must carry the command, since there is no fix button"
+        );
+        assert!(!gamebus_presence_why(true).contains("isn't installed"));
+
         let c = driver_debuginfo_check();
         assert!(
             !c.blocking,
