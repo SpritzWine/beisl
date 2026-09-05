@@ -5,6 +5,8 @@ beisl-compat - GUI: review the compat walls beisl found and file them upstream
 # SYNOPSIS
 
     beisl-compat              open the findings window
+    beisl-compat --key <key>  open it on one finding (as beisl-setup's
+                              Compatibility section does, key `steam:<appid>`)
     beisl-compat --version    print the version
     beisl-compat --help       this help
 
@@ -16,6 +18,10 @@ AreWeAntiCheatYet issue, and mark what you filed. Nothing is submitted by the
 program; every draft is text for you to review and file yourself.
 
 <!-- help-end -->
+
+On open it runs a bare `gamebus-setup compat` once, which drains gamebus's
+inbox: that is how a wall beisl dropped when the game exited reaches the
+findings list without you asking for a scan.
 
 Every action is one of `gamebus-setup compat`'s own subcommands, run for you:
 `--scan` pulls findings from beisl over its MCP server and records them,

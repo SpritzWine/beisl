@@ -162,18 +162,6 @@ fn load_stash(path: &Path) -> Result<Vec<Finding>, String> {
     Ok(out)
 }
 
-/// `gamebus-setup` on PATH, or in `~/.local/bin` where its user-level install puts it
-/// (a desktop launch does not always carry a login shell's PATH).
-fn find_tool(name: &str) -> Option<PathBuf> {
-    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
-    if let Some(home) = std::env::var_os("HOME") {
-        dirs.push(PathBuf::from(home).join(".local/bin"));
-    }
-    dirs.into_iter().map(|d| d.join(name)).find(|p| p.is_file())
-}
-
 // ---------------------------------------------------------------------------------------
 // Background command worker
 // ---------------------------------------------------------------------------------------
@@ -216,9 +204,19 @@ fn spawn_cmd(argv: Vec<String>) -> Arc<Mutex<Shared>> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Job {
+    /// A bare `compat` run: gamebus drains its inbox before every command, so this is
+    /// how a finding beisl dropped at game exit reaches the stash without the user
+    /// pressing anything. Runs once at open.
+    Drain,
     Scan,
-    Draft { key: String, target: String },
-    MarkReported { key: String, target: String },
+    Draft {
+        key: String,
+        target: String,
+    },
+    MarkReported {
+        key: String,
+        target: String,
+    },
 }
 
 /// A draft as gamebus-setup printed it, plus the file-it URL pulled out for a button.
@@ -256,6 +254,10 @@ struct App {
     load_error: Option<String>,
     selected: Option<String>,
     job: Option<(Job, Arc<Mutex<Shared>>)>,
+    /// A finding to select as soon as it exists, from `--key`. Held until the opening
+    /// drain lands, because the wall we were opened for may still be sitting in the
+    /// inbox unread.
+    pending_key: Option<String>,
     /// What the last finished job said, shown under the toolbar.
     note: Option<String>,
     draft: Option<Draft>,
@@ -275,6 +277,18 @@ impl App {
             if !self.findings.iter().any(|f| &f.key == sel) {
                 self.selected = None;
             }
+        }
+    }
+
+    /// Select the `--key` finding once the stash actually holds it. Silent while it does
+    /// not: the drop may still be in the inbox, and the opening drain will bring it.
+    fn take_pending_key(&mut self) {
+        let Some(key) = self.pending_key.clone() else {
+            return;
+        };
+        if self.findings.iter().any(|f| f.key == key) {
+            self.selected = Some(key);
+            self.pending_key = None;
         }
     }
 
@@ -301,6 +315,14 @@ impl App {
     /// A finished job's output becomes a note, a draft, or a reload - never silence.
     fn finish(&mut self, job: Job, log: Vec<String>, ok: bool) {
         match job {
+            Job::Drain => {
+                self.reload();
+                let took = log.iter().filter(|l| l.starts_with("Took ")).count();
+                if took > 0 {
+                    self.note = Some(format!("{took} finding(s) just arrived from beisl."));
+                }
+                self.take_pending_key();
+            }
             Job::Scan => {
                 self.reload();
                 let recorded = log.iter().filter(|l| l.starts_with("Recorded ")).count();
@@ -356,7 +378,7 @@ impl App {
 
 impl Application for App {
     type Executor = cosmic::executor::Default;
-    type Flags = ();
+    type Flags = Option<String>;
     type Message = Message;
 
     const APP_ID: &'static str = "org.spritzwine.BeislCompat";
@@ -369,21 +391,26 @@ impl Application for App {
         &mut self.core
     }
 
-    fn init(core: Core, _flags: ()) -> (Self, Task<Self::Message>) {
+    fn init(core: Core, key: Self::Flags) -> (Self, Task<Self::Message>) {
         let mut app = App {
             core,
-            gamebus_setup: find_tool("gamebus-setup"),
-            mcp_found: find_tool("beisl-mcp").is_some(),
+            gamebus_setup: preflight::find_tool("gamebus-setup"),
+            mcp_found: preflight::find_tool("beisl-mcp").is_some(),
             presenced: preflight::gamebus_presence_check(),
             stash_path: stash_path(),
             findings: Vec::new(),
             load_error: None,
             selected: None,
             job: None,
+            pending_key: key,
             note: None,
             draft: None,
         };
         app.reload();
+        app.take_pending_key();
+        // Even when the key already resolved: a drain costs one short-lived process and
+        // is the only thing that moves beisl's drops into the stash.
+        app.start(Job::Drain, &[]);
         (app, Task::none())
     }
 
@@ -715,8 +742,13 @@ impl App {
 }
 
 fn main() -> cosmic::iced::Result {
-    for a in std::env::args().skip(1) {
+    let mut key = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
         match a.as_str() {
+            // Open straight on one finding, as beisl-setup's Compatibility section does
+            // when it hands a wall over. An unknown key just opens the list.
+            "--key" => key = args.next().filter(|k| !k.is_empty()),
             "--version" => {
                 println!("beisl-compat {}", preflight::VERSION);
                 return Ok(());
@@ -737,5 +769,5 @@ fn main() -> cosmic::iced::Result {
         }
     }
     let settings = Settings::default().size(cosmic::iced::Size::new(880.0, 640.0));
-    cosmic::app::run::<App>(settings, ())
+    cosmic::app::run::<App>(settings, key)
 }
