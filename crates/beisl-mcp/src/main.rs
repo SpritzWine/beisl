@@ -9,6 +9,7 @@
 //! ```
 
 use std::io;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 /// The user docs are the single source of truth: this is the man-page source
@@ -37,7 +38,20 @@ fn main() -> ExitCode {
         }
         _ => {}
     }
-    let server = beisl_mcp::Server::new(session::library::default_root());
+    // `--traces-dir` serves a library other than the default one. Only reason it exists:
+    // testing against a fixture tree previously meant setting XDG_DATA_HOME around the
+    // process, which also moves every other tool's data - a blunt instrument for a
+    // read-only server. Not a security boundary: the server is already read-only and the
+    // caller already chose to run this binary.
+    let root = match std::env::args().skip(1).collect::<Vec<_>>().as_slice() {
+        [] => session::library::default_root(),
+        [flag, dir] if flag == "--traces-dir" => PathBuf::from(dir),
+        _ => {
+            eprintln!("beisl-mcp: usage: beisl-mcp [--traces-dir DIR]");
+            return ExitCode::from(2);
+        }
+    };
+    let server = beisl_mcp::Server::new(root);
     match server.serve(io::stdin().lock(), io::stdout().lock()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

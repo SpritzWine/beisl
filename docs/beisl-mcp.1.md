@@ -9,6 +9,12 @@ beisl-mcp — read-only MCP server over recorded beisl traces (JSON-RPC on stdio
     beisl-mcp --version   print the version
     beisl-mcp --help      this help
 
+    beisl-mcp --traces-dir DIR
+                          serve a trace library other than the default
+                          (~/.local/share/beisl/traces); for testing a
+                          consumer against a fixture tree without moving
+                          XDG_DATA_HOME for every other tool
+
 # DESCRIPTION
 
 Wire it into an AI client's config:
