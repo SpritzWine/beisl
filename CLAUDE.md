@@ -92,6 +92,12 @@ make                             # release-build BOTH workspaces + package the b
   `tests/` dirs.
 - **Deps:** main workspace stays light and crates.io-only; planned deps are noted in
   Cargo.toml comments before being added. Heavy GUI deps live only in `beisl-gui`.
+  Run `cargo audit` (cargo-audit is installed) before and after touching a lockfile, and
+  read the diff of a `cargo update` rather than committing it blind - `Cargo.lock` pinning
+  is what kept us out of the crates.io `arrayref` build-script attack of 2026-08-20, and
+  the light-deps rule is why the root workspace was never even exposed (only `beisl-gui`
+  pulls `arrayref`, transitively via `tiny-skia`). See the vault note "arrayref
+  Supply-Chain Attack 2026-08-20 - Not Affected".
 - **Comments** explain the *why* (often referencing DESIGN.md case studies) — keep that
   style when editing.
 - No privilege escalation inside library code; preflight fixes run via pkexec from the
