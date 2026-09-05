@@ -25,6 +25,7 @@ mod presence;
 mod run;
 mod steam;
 mod symbols;
+mod walls;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();

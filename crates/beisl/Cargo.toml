@@ -18,5 +18,6 @@ path = "src/main.rs"
 assets = { path = "../assets" }
 preflight = { path = "../preflight" }
 session = { path = "../session" }
+compat = { path = "../compat" }     # live compat-wall warnings in the session window
 artifact = { path = "../artifact" }   # post-run: resolve + merge -> artifact.json + report.txt
 libc = "0.2"        # PR_SET_PDEATHSIG so perf dies with us (no orphaned recorder)

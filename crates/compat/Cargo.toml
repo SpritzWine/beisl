@@ -1,0 +1,11 @@
+[package]
+name = "compat"
+description = "What a game log says about the game's ability to run at all - shared by the beisl wrapper and beisl-mcp"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# std only: the wrapper links this and must stay light.
+[dependencies]

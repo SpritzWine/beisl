@@ -38,7 +38,7 @@ deleting traces stay in the app, where a human confirms them.
     get_artifact        a run's analyzed trace as JSON: frame stats and spikes,
                         the per-layer CPU split, hottest functions, diagnostics
     get_report          the same analysis as human-readable prose
-    get_log             the tail of a run's beisl, game, or perf log
+    get_log             the tail of a run's beisl, game, perf, or proton log
     get_crash_summary   pre-chewed crash forensics for a run that "just died"
     list_events         crash/gpu/compat-wall/log-signal events from every run
                         since a since_unix cursor - "anything crash since we

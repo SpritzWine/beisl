@@ -74,6 +74,11 @@ launch; beisl stamps the trace with the appid (`session.json`, the MCP server's
 events) and names the run from the library's `appmanifest_<appid>.acf`. A running
 gamebus-presenced refines that name over D-Bus.
 
+**PROTON_LOG**, **PROTON_LOG_DIR** - read, never set. When you turned Proton's
+log on, Wine's output goes to `~/steam-<appid>.log` instead of the game's stderr;
+beisl watches that file for compat-wall signatures during the run and preserves it
+as `proton.log` in the run directory, since Proton deletes it at the next launch.
+
 **MANGOHUD_CONFIG** — honored and appended to, never replaced. Beisl adds its
 logging keys last; a user `log_duration` is overridden to 0 (last-wins) so the
 frametime log is never truncated mid-session, with a note in beisl.log.

@@ -47,6 +47,9 @@ Main workspace (`Cargo.toml`, crates.io deps only, mostly std):
   writer and the GUI session window reader.
 - `crates/symbol-resolver` - perf.data addresses → wine symbols, tiered fidelity.
 - `crates/artifact` - merged exportable trace, frametimes ⋈ samples.
+- `crates/compat` - what a log line says about a game's ability to run at all: the
+  compat-wall signatures, shared by the wrapper (live warning in the session window) and
+  `beisl-mcp` (post-hoc `compat-wall` event). std only.
 - `crates/beisl-mcp` - `beisl-mcp` binary: read-only MCP server (JSON-RPC over stdio,
   hand-rolled - no async runtime) over the trace library; opt-in, ships in the bundle.
 - `crates/docs-gen` - packaging tool: renders `docs/*.1.md` into man pages (mandown).
@@ -62,8 +65,8 @@ Main workspace (`Cargo.toml`, crates.io deps only, mostly std):
 Dependency direction: `beisl`, `beisl-gui`, and `beisl-mcp` all depend on `preflight` +
 `session`; `beisl` and `beisl-gui` also depend on `artifact` (which itself depends on
 `symbol-resolver` + `session` - the latter so `TraceArtifact::persist` can name
-`artifact.json`/`report.txt` from the one place that owns those constants); nothing
-depends on `beisl`.
+`artifact.json`/`report.txt` from the one place that owns those constants); `beisl` and
+`beisl-mcp` both depend on `compat`; nothing depends on `beisl`.
 
 ## Commands (verified)
 

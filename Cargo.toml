@@ -7,6 +7,7 @@ members = [
     "crates/session",         # live session state shared with the session window
     "crates/symbol-resolver", # perf.data addresses -> wine symbols (tiered fidelity)
     "crates/artifact",        # the merged, exportable trace (frametimes ⋈ samples)
+    "crates/compat",          # compat-wall signatures shared by the wrapper and beisl-mcp
     "crates/beisl-mcp",       # MCP server binary over the trace library (opt-in, stdio)
     "crates/docs-gen",        # docs/*.1.md -> man pages (packaging tool; runtime binaries
                               #   embed the same files for --help — single source of truth)

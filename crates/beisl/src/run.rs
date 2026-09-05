@@ -11,7 +11,7 @@ use preflight::RecordMode;
 use session::{Session, State};
 
 use crate::mangohud::TOGGLE_KEY;
-use crate::{cue, gpu, mangohud, perf, presence, steam};
+use crate::{cue, gpu, mangohud, perf, presence, steam, walls};
 
 /// Run `cmd` under tracing; returns the game's exit code.
 pub fn trace(cmd: &[String]) -> io::Result<i32> {
@@ -95,6 +95,9 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
     // Lutris log window / Steam console, and a beisl injected into launch options must
     // not swallow the game's output. Two handles onto the same file; interleaving of
     // the two streams is acceptable.
+    // Everything this run writes is younger than this; a log file older than it is a
+    // previous launch's leftover (see `walls::LogTail`).
+    let started_at = std::time::SystemTime::now();
     let game_log = match std::fs::File::create(run_dir.join("game.log")) {
         Ok(f) => {
             child.stdout(Stdio::piped());
@@ -217,6 +220,21 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
     perf::install_teardown();
     let _ = sess.write(&run_dir);
 
+    // Watch the logs for a compat wall while the game runs, so the window can say what the
+    // game's own error dialog won't. With PROTON_LOG on, the user's own choice, the
+    // evidence lands in Proton's file rather than game.log; we read it, never enable it.
+    let proton_log = walls::proton_log_path(|k| std::env::var(k).ok());
+    if let Some(p) = &proton_log {
+        log.line(&format!(
+            "proton log: PROTON_LOG is set by the user - watching {} for wall signatures",
+            p.display()
+        ));
+    }
+    let mut walls = walls::WallWatch::new(
+        std::iter::once(run_dir.join("game.log")).chain(proton_log.clone()),
+        started_at,
+    );
+
     let start = Instant::now();
     let mut stopped = false;
     let mut last_presence_ask: Option<Duration> = None;
@@ -234,6 +252,18 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
             }
             // A hang often coincides with the game dying — one last look.
             drain_gpu_events(&mut gpuwatch, &mut log, &mut sess, &run_dir);
+            note_walls(walls.poll(), &mut log, &mut sess);
+            if let Some(src) = &proton_log {
+                match walls::preserve_proton_log(src, &run_dir, started_at) {
+                    Some(bytes) => log.line(&format!(
+                        "proton log: preserved as proton.log ({bytes} bytes) - Proton deletes \
+                         the original at the next launch"
+                    )),
+                    None => log.line(
+                        "proton log: PROTON_LOG was set but Proton wrote no log for this run",
+                    ),
+                }
+            }
             sess.state = State::Done;
             sess.elapsed_secs = start.elapsed().as_secs();
             sess.trace_bytes = trace_size(&run_dir);
@@ -319,6 +349,8 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
         sess.elapsed_secs = start.elapsed().as_secs();
         sess.trace_bytes = trace_size(&run_dir);
         drain_gpu_events(&mut gpuwatch, &mut log, &mut sess, &run_dir);
+
+        note_walls(walls.poll(), &mut log, &mut sess);
 
         // MangoHud names its CSV after the *real* game process; with launcher chains
         // that beats the argv guess (which names the wrapper, e.g. "upc.exe").
@@ -783,6 +815,19 @@ fn write_report(
     let headline = art.headline();
     log.line(&format!("post-run: {headline}"));
     Some(headline)
+}
+
+/// A compat wall just showed up in a log: say so in beisl.log and in the window's
+/// warning list, once per signature. The wall's own evidence line goes to the log, the
+/// human explanation to the window.
+fn note_walls(hits: Vec<(&'static str, String)>, log: &mut Log, sess: &mut Session) {
+    for (signature, line) in hits {
+        log.line(&format!("compat wall: {signature}: {line}"));
+        sess.warnings.push(format!(
+            "Compat wall ({signature}): {}",
+            compat::explain(signature)
+        ));
+    }
 }
 
 /// Where a run's name came from, in rising order of trust; a name is only replaced from
