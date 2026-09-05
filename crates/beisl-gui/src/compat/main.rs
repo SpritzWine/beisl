@@ -191,7 +191,9 @@ fn spawn_cmd(argv: Vec<String>) -> Arc<Mutex<Shared>> {
     let shared = Arc::new(Mutex::new(Shared::default()));
     let s2 = shared.clone();
     std::thread::spawn(move || {
-        let result = std::process::Command::new(&argv[0]).args(&argv[1..]).output();
+        let result = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .output();
         let mut s = s2.lock().unwrap();
         match result {
             Ok(out) => {
@@ -321,7 +323,9 @@ impl App {
                     let text: Vec<&str> = log
                         .iter()
                         .map(String::as_str)
-                        .filter(|l| !l.starts_with("=== ") && !l.starts_with("Nothing was submitted"))
+                        .filter(|l| {
+                            !l.starts_with("=== ") && !l.starts_with("Nothing was submitted")
+                        })
                         .collect();
                     self.draft = Some(Draft {
                         target,
@@ -340,7 +344,10 @@ impl App {
                 self.note = Some(if ok {
                     format!("Marked as reported to {target}.")
                 } else {
-                    format!("Could not mark: {}", log.last().cloned().unwrap_or_default())
+                    format!(
+                        "Could not mark: {}",
+                        log.last().cloned().unwrap_or_default()
+                    )
                 });
             }
         }
@@ -448,11 +455,31 @@ impl Application for App {
     }
 
     fn view(&self) -> Element<'_, Self::Message> {
-        let page = match self.selected() {
-            Some(f) => self.detail(f),
-            None => self.list(),
+        // Same frame as the setup app's traces page: the content scrolls, and navigation
+        // sits in a footer under it, where the rest of the beisl windows keep it.
+        let (content, footer) = match self.selected() {
+            Some(f) => (
+                self.detail(f),
+                Some(
+                    widget::Row::new()
+                        .spacing(8)
+                        .push(widget::button::text("Back").on_press(Message::Back))
+                        .push(widget::Space::new().width(Length::Fill)),
+                ),
+            ),
+            None => (self.list(), None),
         };
-        widget::container(widget::scrollable(page))
+        let mut col = widget::Column::new().spacing(14).push(
+            widget::scrollable(
+                widget::container(content).padding(cosmic::iced::Padding::from([0, 14, 0, 0])),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill),
+        );
+        if let Some(footer) = footer {
+            col = col.push(footer);
+        }
+        widget::container(col)
             .padding(28)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -534,7 +561,8 @@ impl App {
             if f.dismissed.is_some() {
                 head = head.push(widget::text::caption("dismissed"));
             }
-            head = head.push(widget::button::standard("Open").on_press(Message::Select(f.key.clone())));
+            head = head
+                .push(widget::button::standard("Open").on_press(Message::Select(f.key.clone())));
             let latest = f
                 .latest()
                 .map(|o| {
@@ -571,12 +599,7 @@ impl App {
     fn detail<'a>(&'a self, f: &'a Finding) -> Element<'a, Message> {
         let mut col = widget::Column::new()
             .spacing(14)
-            .push(
-                widget::Row::new()
-                    .spacing(12)
-                    .push(widget::button::text("Back").on_press(Message::Back))
-                    .push(widget::text::title1(f.display_title().to_string())),
-            )
+            .push(widget::text::title1(f.display_title().to_string()))
             .push(widget::text::caption(format!(
                 "{}{}  |  seen {} .. {}",
                 f.key,
@@ -596,13 +619,15 @@ impl App {
 
         let mut obs = widget::settings::section().title("Evidence, newest first");
         for o in f.observations.iter().rev() {
-            let mut item = widget::Column::new().spacing(4).push(widget::text::body(format!(
-                "{}  via {}  |  {} on {}",
-                o.observed,
-                o.source,
-                o.wine.as_deref().unwrap_or("unknown wine"),
-                o.gpu.as_deref().unwrap_or("unknown GPU")
-            )));
+            let mut item = widget::Column::new()
+                .spacing(4)
+                .push(widget::text::body(format!(
+                    "{}  via {}  |  {} on {}",
+                    o.observed,
+                    o.source,
+                    o.wine.as_deref().unwrap_or("unknown wine"),
+                    o.gpu.as_deref().unwrap_or("unknown GPU")
+                )));
             if let Some(sig) = &o.signature {
                 item = item.push(widget::text::caption(format!("signature: {sig}")));
             }
@@ -667,7 +692,8 @@ impl App {
                 .push(widget::button::standard("Copy text").on_press(Message::CopyDraft));
             if let Some(url) = &d.url {
                 actions = actions.push(
-                    widget::button::suggested("Open the form").on_press(Message::OpenUrl(url.clone())),
+                    widget::button::suggested("Open the form")
+                        .on_press(Message::OpenUrl(url.clone())),
                 );
             }
             let draft = widget::Column::new()
@@ -678,7 +704,11 @@ impl App {
                 ))
                 .push(actions)
                 .push(widget::text::monotext(d.text.clone()));
-            col = col.push(widget::settings::section().title(format!("Draft for {label}")).add(draft));
+            col = col.push(
+                widget::settings::section()
+                    .title(format!("Draft for {label}"))
+                    .add(draft),
+            );
         }
         col.into()
     }
