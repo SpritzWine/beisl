@@ -34,26 +34,26 @@ comments, commit messages, docs, notes.
 
 Main workspace (`Cargo.toml`, crates.io deps only, mostly std):
 
-- `crates/assets` — embedded data payloads (brand icons, udev rule, tmpfiles conf);
+- `crates/assets` - embedded data payloads (brand icons, udev rule, tmpfiles conf);
   the `data/` files live inside this crate so `include_str!` paths stay short.
-- `crates/beisl` — the wrapper binary; subcommands: trace (default via `%command%`),
+- `crates/beisl` - the wrapper binary; subcommands: trace (default via `%command%`),
   `--check` (aliases `--preflight`, `doctor`), `install`/`uninstall`, `symbols <dir>`
   (resolve a captured trace), `--version`. `run.rs` orchestrates a trace; `mangohud.rs`,
   `perf.rs`, `gpu.rs` handle the pieces.
-- `crates/preflight` — UI-agnostic setup checks (perf/llvm/paranoid/mangohud/GPU) +
+- `crates/preflight` - UI-agnostic setup checks (perf/llvm/paranoid/mangohud/GPU) +
   persisted config. Detection only; privileged fixes are *described* (`Fix` +
   `fix_command()`) and executed by the caller via pkexec, never from inside the crate.
-- `crates/session` — small serde JSON state file (`session.json`) bridging the CLI
+- `crates/session` - small serde JSON state file (`session.json`) bridging the CLI
   writer and the GUI session window reader.
-- `crates/symbol-resolver` — perf.data addresses → wine symbols, tiered fidelity.
-- `crates/artifact` — merged exportable trace, frametimes ⋈ samples.
-- `crates/beisl-mcp` — `beisl-mcp` binary: read-only MCP server (JSON-RPC over stdio,
-  hand-rolled — no async runtime) over the trace library; opt-in, ships in the bundle.
-- `crates/docs-gen` — packaging tool: renders `docs/*.1.md` into man pages (mandown).
+- `crates/symbol-resolver` - perf.data addresses → wine symbols, tiered fidelity.
+- `crates/artifact` - merged exportable trace, frametimes ⋈ samples.
+- `crates/beisl-mcp` - `beisl-mcp` binary: read-only MCP server (JSON-RPC over stdio,
+  hand-rolled - no async runtime) over the trace library; opt-in, ships in the bundle.
+- `crates/docs-gen` - packaging tool: renders `docs/*.1.md` into man pages (mandown).
   `docs/*.1.md` are the SINGLE SOURCE for user-facing usage text: each binary embeds
   its file via `include_str!` and prints everything above the `<!-- help-end -->`
   marker as `--help`; `make man` renders the full files for the bundle.
-- `crates/beisl-gui` — `beisl-setup` binary (libcosmic): preflight checklist, plus an
+- `crates/beisl-gui` - `beisl-setup` binary (libcosmic): preflight checklist, plus an
   install/update page shown first when run from an extracted dist tree (a tiny fork of
   the SpritzWine installer wizard over `beisl install`). **Excluded** from the main
   workspace: it is its own workspace with its own `Cargo.lock` because libcosmic pulls
@@ -75,7 +75,7 @@ cargo fmt
 cargo check -p beisl             # or -p preflight, -p session, ...
 make man                         # docs/*.1.md -> man/*.1 (cargo run -p docs-gen)
 (cd crates/beisl-gui && cargo check)   # GUI: separate workspace; heavy git deps,
-                                       # slow first build — skip unless GUI changed
+                                       # slow first build - skip unless GUI changed
 make                             # release-build BOTH workspaces + package the bundle
                                  # tarball (beisl + beisl-mcp + beisl-setup + README/LICENSE)
                                  # into dist/
@@ -83,7 +83,7 @@ make                             # release-build BOTH workspaces + package the b
 
 ## Conventions
 
-- **Errors:** std only — `io::Result` / `io::Error` (no anyhow/thiserror). Top level
+- **Errors:** std only - `io::Result` / `io::Error` (no anyhow/thiserror). Top level
   prints `beisl: {e}` to stderr and maps to an exit code in `main.rs`.
 - **Logging:** no log crate. `eprintln!("beisl: ...")` for the terminal; during a trace,
   a `Log` helper appends timestamped lines to `beisl.log` in the run dir (perf output
@@ -98,7 +98,7 @@ make                             # release-build BOTH workspaces + package the b
   the light-deps rule is why the root workspace was never even exposed (only `beisl-gui`
   pulls `arrayref`, transitively via `tiny-skia`). See the vault note "arrayref
   Supply-Chain Attack 2026-08-20 - Not Affected".
-- **Comments** explain the *why* (often referencing DESIGN.md case studies) — keep that
+- **Comments** explain the *why* (often referencing DESIGN.md case studies) - keep that
   style when editing.
 - No privilege escalation inside library code; preflight fixes run via pkexec from the
   GUI/caller.
@@ -107,18 +107,18 @@ make                             # release-build BOTH workspaces + package the b
 
 Fixed on 2026-07-11 (see git history for the details): game stdout/stderr now teed
 into `game.log` in the run dir; MangoHud gets `pci_dev=` (from the GPU pin, or the
-sole GPU — with ≥2 GPUs and no pin it still guesses nothing, so *pin the GPU* on
+sole GPU - with ≥2 GPUs and no pin it still guesses nothing, so *pin the GPU* on
 multi-GPU boxes); the exit-status log line is labeled as the wrapper's, not the
 game's; `session.json`'s `game` is upgraded from the launcher argv guess to the real
-name once the MangoHud CSV appears; MangoHud logging is always-on (`autostart_log=1`
-— the CSV is flushed per frame, so frametimes survive up to a crash; the hotkey now
+name once the MangoHud CSV appears; MangoHud logging is always-on (`autostart_log=1` -
+the CSV is flushed per frame, so frametimes survive up to a crash; the hotkey now
 pauses/resumes instead of arming); a user's own `log_duration=N` no longer truncates
-the CSV (we append `log_duration=0` last — MangoHud resolves duplicate keys
-last-wins and 0 disables the auto-stop — with a beisl.log note when overriding).
+the CSV (we append `log_duration=0` last - MangoHud resolves duplicate keys
+last-wins and 0 disables the auto-stop - with a beisl.log note when overriding).
 
 Still open: nothing at the moment.
 (The driver-hotspots half of the Outlaws follow-ups is handled too: the advisory
 "driver debug symbols" check probes each hardware ICD's build-id against
-`/usr/lib/debug/.build-id/` — debuginfod counts as covered — and names the
+`/usr/lib/debug/.build-id/` - debuginfod counts as covered - and names the
 distro-specific install in its why; no auto-fix, mirroring the kernel-symbols
 check's consent stance.)
