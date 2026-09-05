@@ -23,6 +23,7 @@ mod out;
 mod perf;
 mod presence;
 mod run;
+mod steam;
 mod symbols;
 
 fn main() -> ExitCode {

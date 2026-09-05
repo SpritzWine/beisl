@@ -11,7 +11,7 @@ use preflight::RecordMode;
 use session::{Session, State};
 
 use crate::mangohud::TOGGLE_KEY;
-use crate::{cue, gpu, mangohud, perf, presence};
+use crate::{cue, gpu, mangohud, perf, presence, steam};
 
 /// Run `cmd` under tracing; returns the game's exit code.
 pub fn trace(cmd: &[String]) -> io::Result<i32> {
@@ -130,6 +130,25 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
         wrapper: session::WrapperProc::current(),
         ..Default::default()
     };
+    // Steam's own word on what this is, before anything runs: the appid a compat
+    // finding is keyed on, and the manifest's product name. Presence may refine the
+    // name later; nothing may take the appid away.
+    let mut name_source = NameSource::Argv;
+    if let Some(id) = steam::from_launch(&prog) {
+        log.line(&format!(
+            "game identity from Steam: appid {}{}",
+            id.appid,
+            match &id.name {
+                Some(name) => format!(", {name}"),
+                None => ", no manifest found for a name".to_string(),
+            }
+        ));
+        sess.steam_appid = id.appid;
+        if let Some(name) = id.name {
+            sess.game = name;
+            name_source = NameSource::Steam;
+        }
+    }
     let _ = sess.write(&run_dir);
 
     cue::play(cue::Cue::Ready);
@@ -200,9 +219,9 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
 
     let start = Instant::now();
     let mut stopped = false;
-    // Sticky: presence is asked until it answers once, never after. The name it gives is
-    // the best one available, so nothing later should be allowed to overwrite it.
-    let mut named_by_presence = false;
+    let mut last_presence_ask: Option<Duration> = None;
+    let mut presence_asks = 0u32;
+    let mut presence_reachable = false;
     let mut stop_refused = false;
     loop {
         if let Some(status) = proc.try_wait()? {
@@ -271,6 +290,19 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
                 "Game exited.".to_string()
             };
             let _ = sess.write(&run_dir);
+            // The one place a silent presence miss gets said out loud: a run named from
+            // argv alone is the first thing anyone debugging the integration looks for.
+            if name_source < NameSource::Presence && presence_asks > 0 {
+                log.line(&format!(
+                    "gamebus presence: no answer in {presence_asks} asks ({})",
+                    if presence_reachable {
+                        "service up, no matching activity - its /proc sweep runs every \
+                         15 s, and a short run can end before it looks"
+                    } else {
+                        "service not on the bus"
+                    }
+                ));
+            }
             // With launcher chains (umu-run → launcher → game) this is the *wrapper's*
             // status — it can be 0 even when the real game process died. The marker
             // itself is `session::EXIT_LOG_MARKER`, shared with beisl-mcp's crash
@@ -291,35 +323,44 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
         // MangoHud names its CSV after the *real* game process; with launcher chains
         // that beats the argv guess (which names the wrapper, e.g. "upc.exe").
         if let Some(game) = mangohud_game_name(&run_dir) {
-            if sess.game != game && !named_by_presence {
+            if sess.game != game && name_source <= NameSource::MangoHud {
                 log.line(&format!(
                     "game name from MangoHud csv: {game} (was: {})",
                     sess.game
                 ));
                 sess.game = game;
+                name_source = NameSource::MangoHud;
             }
         }
 
-        // gamebus-presenced, if it's running, knows what a *human* calls this game and
-        // its Steam appid - neither of which is derivable from a process name, and both
-        // of which a compat finding needs to be worth filing. So it outranks the CSV
-        // name above. Polled until it answers once (it publishes only after Steam or
-        // Discord has, which is usually after we start), then left alone; a missing
-        // service just never answers, which is why this stays quiet rather than warning.
-        if !named_by_presence && presence_due(start.elapsed()) {
-            if let Some(found) = presence::lookup() {
-                log.line(&format!(
-                    "game identity from gamebus presence: {} (was: {}){}",
-                    found.name,
-                    sess.game,
-                    match &found.steam_appid {
-                        Some(id) => format!(", steam appid {id}"),
-                        None => String::new(),
+        // gamebus-presenced, if it's running, knows what a *human* calls this game -
+        // Discord's title, not the manifest's - so it outranks everything above. Polled
+        // until it answers once (it publishes only after its own sweep has seen the
+        // process, which is after we start), then left alone.
+        if name_source < NameSource::Presence && presence_due(start.elapsed(), last_presence_ask) {
+            last_presence_ask = Some(start.elapsed());
+            presence_asks += 1;
+            let known = (!sess.steam_appid.is_empty()).then_some(sess.steam_appid.as_str());
+            match presence::lookup(known) {
+                presence::Lookup::Found(found) => {
+                    log.line(&format!(
+                        "game identity from gamebus presence: {} (was: {}){}",
+                        found.name,
+                        sess.game,
+                        match &found.steam_appid {
+                            Some(id) => format!(", steam appid {id}"),
+                            None => String::new(),
+                        }
+                    ));
+                    sess.game = found.name;
+                    // Steam's own appid stays when presence has none to offer.
+                    if let Some(id) = found.steam_appid {
+                        sess.steam_appid = id;
                     }
-                ));
-                sess.game = found.name;
-                sess.steam_appid = found.steam_appid.unwrap_or_default();
-                named_by_presence = true;
+                    name_source = NameSource::Presence;
+                }
+                presence::Lookup::Nothing => presence_reachable = true,
+                presence::Lookup::Unreachable => {}
             }
         }
 
@@ -744,19 +785,25 @@ fn write_report(
     Some(headline)
 }
 
-/// Whether this poll tick should ask gamebus presence again.
-///
-/// The poll loop spins far faster than a presence record appears (Steam publishes one
-/// only once the game is really up), and every ask costs a `busctl` process. Once a
-/// second for the first half minute, then every five: past that the service is either
-/// absent or has nothing for us, and a trace can run for hours.
-fn presence_due(elapsed: Duration) -> bool {
-    let secs = elapsed.as_secs();
-    if secs <= 30 {
-        true
-    } else {
-        secs.is_multiple_of(5)
-    }
+/// Where a run's name came from, in rising order of trust; a name is only replaced from
+/// a higher rung. Argv names the launcher, MangoHud the process, Steam's manifest the
+/// product, presence the product as Discord and Steam together call it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum NameSource {
+    Argv,
+    MangoHud,
+    Steam,
+    Presence,
+}
+
+/// Whether to ask gamebus presence again, `last_ask` being when we last did (as an
+/// offset from the run's start). Every ask costs a `busctl` process, and a presence
+/// record takes a sweep or two to appear: once a second for the first half minute,
+/// then every five - past that the service is either absent or has nothing for us,
+/// and a trace can run for hours.
+fn presence_due(elapsed: Duration, last_ask: Option<Duration>) -> bool {
+    let gap = Duration::from_secs(if elapsed.as_secs() < 30 { 1 } else { 5 });
+    last_ask.is_none_or(|t| elapsed.saturating_sub(t) >= gap)
 }
 
 /// Best-effort human name for the game: the last `.exe` argument, else the command's
@@ -935,6 +982,19 @@ mod tests {
         let envs = gpu_pin_envs(&pin);
         assert_eq!(envs.len(), 1);
         assert_eq!(envs[0].0, "VK_DRIVER_FILES");
+    }
+
+    #[test]
+    fn presence_is_asked_once_a_second_then_every_five() {
+        let s = Duration::from_secs;
+        assert!(presence_due(s(0), None));
+        assert!(!presence_due(
+            s(10),
+            Some(s(9) + Duration::from_millis(800))
+        ));
+        assert!(presence_due(s(10), Some(s(9))));
+        assert!(!presence_due(s(63), Some(s(60))));
+        assert!(presence_due(s(65), Some(s(60))));
     }
 
     #[test]

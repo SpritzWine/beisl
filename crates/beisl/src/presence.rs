@@ -37,37 +37,55 @@ pub struct Presence {
     pub steam_appid: Option<String>,
 }
 
-/// Ask presence what is running, or `None` if it can't say.
+/// What one ask came back with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Lookup {
+    Found(Presence),
+    /// The service answered and had nothing for us: no activity, or none we would
+    /// stake a trace's name on.
+    Nothing,
+    /// No `busctl`, or no service on the bus. The caller's response is the same as for
+    /// `Nothing` - keep the name it has - but at the end of a run it is worth one log
+    /// line saying which it was.
+    Unreachable,
+}
+
+/// Ask presence what is running.
 ///
-/// `None` covers every uninteresting case identically - no `busctl`, no service on the
-/// bus, no activity, or more than one activity we can't choose between - because the
-/// caller's response to all of them is the same: keep the name it already had.
-pub fn lookup() -> Option<Presence> {
-    let paths = activity_paths()?;
-    // One activity is the ordinary case and needs no tie-break. With several we would be
-    // guessing which one is the game beisl launched - presence exposes a pid, but with a
-    // launcher chain the pid beisl knows is the launcher's, not the game's - so we take
-    // the only one that carries a Steam appid and otherwise decline. A wrong game name on
-    // a trace is worse than no upgrade at all.
-    let chosen = match paths.len() {
-        0 => return None,
-        1 => read_activity(&paths[0])?,
-        _ => {
+/// With `steam_appid` known (Steam told us at launch), the only acceptable answer is the
+/// activity carrying that appid: a second Steam game running alongside must not lend its
+/// name to this trace. Without one, a single activity is taken as is; among several, the
+/// only one with a Steam appid, else we decline. Presence exposes a pid too, but with a
+/// launcher chain the pid beisl knows is the launcher's, so it is no tie-break. A wrong
+/// game name on a trace is worse than no upgrade at all.
+pub fn lookup(steam_appid: Option<&str>) -> Lookup {
+    let Some(paths) = activity_paths() else {
+        return Lookup::Unreachable;
+    };
+    let chosen = match (steam_appid, paths.len()) {
+        (_, 0) => None,
+        (Some(want), _) => paths
+            .iter()
+            .filter_map(|p| read_activity(p))
+            .find(|a| a.steam_appid.as_deref() == Some(want)),
+        (None, 1) => read_activity(&paths[0]),
+        (None, _) => {
             let mut with_appid = paths
                 .iter()
                 .filter_map(|p| read_activity(p))
                 .filter(|a| a.steam_appid.is_some());
-            let first = with_appid.next()?;
+            let first = with_appid.next();
             if with_appid.next().is_some() {
-                return None;
+                None
+            } else {
+                first
             }
-            first
         }
     };
-    if chosen.name.is_empty() {
-        return None;
+    match chosen {
+        Some(p) if !p.name.is_empty() => Lookup::Found(p),
+        _ => Lookup::Nothing,
     }
-    Some(chosen)
 }
 
 /// `Manager.ListActivities()`, as object paths. `busctl` prints an `ao` reply as the

@@ -69,6 +69,11 @@ detected record tier (testing aid).
 
 **BEISL_NO_UI** — `1` disables the live session window (headless runs, CI).
 
+**SteamAppId**, **SteamGameId** - read, never set. Steam exports them for every
+launch; beisl stamps the trace with the appid (`session.json`, the MCP server's
+events) and names the run from the library's `appmanifest_<appid>.acf`. A running
+gamebus-presenced refines that name over D-Bus.
+
 **MANGOHUD_CONFIG** — honored and appended to, never replaced. Beisl adds its
 logging keys last; a user `log_duration` is overridden to 0 (last-wins) so the
 frametime log is never truncated mid-session, with a note in beisl.log.
