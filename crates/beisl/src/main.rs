@@ -21,6 +21,7 @@ mod install;
 mod mangohud;
 mod out;
 mod perf;
+mod presence;
 mod run;
 mod symbols;
 

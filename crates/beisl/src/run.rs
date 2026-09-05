@@ -11,7 +11,7 @@ use preflight::RecordMode;
 use session::{Session, State};
 
 use crate::mangohud::TOGGLE_KEY;
-use crate::{cue, gpu, mangohud, perf};
+use crate::{cue, gpu, mangohud, perf, presence};
 
 /// Run `cmd` under tracing; returns the game's exit code.
 pub fn trace(cmd: &[String]) -> io::Result<i32> {
@@ -200,6 +200,9 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
 
     let start = Instant::now();
     let mut stopped = false;
+    // Sticky: presence is asked until it answers once, never after. The name it gives is
+    // the best one available, so nothing later should be allowed to overwrite it.
+    let mut named_by_presence = false;
     let mut stop_refused = false;
     loop {
         if let Some(status) = proc.try_wait()? {
@@ -288,12 +291,35 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
         // MangoHud names its CSV after the *real* game process; with launcher chains
         // that beats the argv guess (which names the wrapper, e.g. "upc.exe").
         if let Some(game) = mangohud_game_name(&run_dir) {
-            if sess.game != game {
+            if sess.game != game && !named_by_presence {
                 log.line(&format!(
                     "game name from MangoHud csv: {game} (was: {})",
                     sess.game
                 ));
                 sess.game = game;
+            }
+        }
+
+        // gamebus-presenced, if it's running, knows what a *human* calls this game and
+        // its Steam appid - neither of which is derivable from a process name, and both
+        // of which a compat finding needs to be worth filing. So it outranks the CSV
+        // name above. Polled until it answers once (it publishes only after Steam or
+        // Discord has, which is usually after we start), then left alone; a missing
+        // service just never answers, which is why this stays quiet rather than warning.
+        if !named_by_presence && presence_due(start.elapsed()) {
+            if let Some(found) = presence::lookup() {
+                log.line(&format!(
+                    "game identity from gamebus presence: {} (was: {}){}",
+                    found.name,
+                    sess.game,
+                    match &found.steam_appid {
+                        Some(id) => format!(", steam appid {id}"),
+                        None => String::new(),
+                    }
+                ));
+                sess.game = found.name;
+                sess.steam_appid = found.steam_appid.unwrap_or_default();
+                named_by_presence = true;
             }
         }
 
@@ -716,6 +742,21 @@ fn write_report(
     let headline = art.headline();
     log.line(&format!("post-run: {headline}"));
     Some(headline)
+}
+
+/// Whether this poll tick should ask gamebus presence again.
+///
+/// The poll loop spins far faster than a presence record appears (Steam publishes one
+/// only once the game is really up), and every ask costs a `busctl` process. Once a
+/// second for the first half minute, then every five: past that the service is either
+/// absent or has nothing for us, and a trace can run for hours.
+fn presence_due(elapsed: Duration) -> bool {
+    let secs = elapsed.as_secs();
+    if secs <= 30 {
+        true
+    } else {
+        secs.is_multiple_of(5)
+    }
 }
 
 /// Best-effort human name for the game: the last `.exe` argument, else the command's

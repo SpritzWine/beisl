@@ -278,6 +278,14 @@ impl Server {
                     // A prior failed analysis attempt's error, or null — see
                     // `session::library::invalid_of` (cleared once perf.data changes).
                     "invalid": r.invalid,
+                    // The Steam appid, when gamebus-presenced supplied one at trace time
+                    // (see the wrapper's `presence` module). `null`, never "", when we
+                    // don't have it: a consumer keying a compat finding on this must be
+                    // able to tell "not a Steam launch / no gamebus" from a real id, and
+                    // an empty string reads as a value. Absent on every legacy run.
+                    "steam_appid": r.session.as_ref()
+                        .map(|s| s.steam_appid.as_str())
+                        .filter(|a| !a.is_empty()),
                 })
             })
             .collect();
@@ -459,6 +467,10 @@ impl Server {
             let crash = stale_crash || spawn_failed || exit_crashed;
             let gpu_detail = session.and_then(gpu_detail);
             let game = run.title().to_string();
+            // Same null-not-empty rule as list_traces: a compat finding is keyed on this.
+            let steam_appid = session
+                .map(|s| s.steam_appid.as_str())
+                .filter(|a| !a.is_empty());
             // One read of game.log serves both log-dependent kinds below. Unlike the
             // others this happens for every run, gated or not: a compat wall is its own
             // hard signal, so there is nothing to gate it behind.
@@ -468,12 +480,14 @@ impl Server {
             if crash {
                 events.push(json!({
                     "run_id": run.id, "unix": run.started, "game": game,
+                    "steam_appid": steam_appid,
                     "kind": "crash", "detail": crash_detail(session, &beisl_log, stale_crash),
                 }));
             }
             if let Some(detail) = &gpu_detail {
                 events.push(json!({
                     "run_id": run.id, "unix": run.started, "game": game,
+                    "steam_appid": steam_appid,
                     "kind": "gpu", "detail": detail,
                 }));
             }
@@ -481,6 +495,7 @@ impl Server {
                 let all: Vec<&str> = walls.iter().map(|(s, _)| *s).collect();
                 events.push(json!({
                     "run_id": run.id, "unix": run.started, "game": game,
+                    "steam_appid": steam_appid,
                     "kind": "compat-wall", "signature": signature,
                     "signatures": all, "detail": detail,
                 }));
@@ -490,6 +505,7 @@ impl Server {
                 if let Some(newest) = lines.last() {
                     events.push(json!({
                         "run_id": run.id, "unix": run.started, "game": game,
+                    "steam_appid": steam_appid,
                         "kind": "log-signal", "detail": newest,
                     }));
                 }
@@ -938,6 +954,9 @@ fn tools_list() -> Value {
                             lists all), 'log-signal' (an error-shaped \
                             game-log line, only alongside a harder signal or an invalid \
                             run). Each \
+                            event carries steam_appid (null unless gamebus-presenced \
+                            named one at trace time) so a finding can be keyed on the \
+                            game rather than on its title. Each \
                             event's detail is a short pointer — get_crash_summary is the \
                             deep dive. Capped at the newest 100 events (truncated: true \
                             if hit).",
@@ -1601,6 +1620,47 @@ mod tests {
             .map(|(s, _)| *s)
             .collect();
         assert_eq!(sigs, ["wine-stub", "volume-guid"]);
+    }
+
+    #[test]
+    fn a_wall_event_carries_the_steam_appid_when_presence_named_one() {
+        // The whole point of the appid reaching MCP: a compat finding is keyed on the
+        // game, and the only other identifier here is a display title. Null (not "")
+        // when we don't have it, so a consumer can tell "no gamebus / not Steam" from a
+        // real id instead of parsing an empty string as a value.
+        let root = fixture_root("events-wall-appid");
+        let dir = root.join("run-100");
+        std::fs::create_dir_all(&dir).unwrap();
+        session::Session {
+            game: "WARDOGS Playtest".into(),
+            state: session::State::Done,
+            steam_appid: "4809930".into(),
+            ..Default::default()
+        }
+        .write(&dir)
+        .unwrap();
+        std::fs::write(dir.join("beisl.log"), CLEAN_EXIT).unwrap();
+        std::fs::write(
+            dir.join("game.log"),
+            "wine: Call from 0x7b00 to unimplemented function ntdll.dll.RtlStringFromGUIDEx, aborting\n",
+        )
+        .unwrap();
+        // A second run with no appid at all: the field must be null, not "".
+        put_events_run(
+            &root,
+            "run-200",
+            session::State::Done,
+            vec![],
+            CLEAN_EXIT,
+            "wine: Call from 0x7b00 to unimplemented function ntdll.dll.Whatever, aborting\n",
+        );
+
+        let listing = events_of(&Server::new(root), 0);
+        let events = listing["events"].as_array().unwrap();
+        let with = events.iter().find(|e| e["run_id"] == "run-100").unwrap();
+        assert_eq!(with["steam_appid"], "4809930");
+        let without = events.iter().find(|e| e["run_id"] == "run-200").unwrap();
+        assert!(without["steam_appid"].is_null(), "{without:#?}");
     }
 
     #[test]

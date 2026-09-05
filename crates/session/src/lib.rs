@@ -80,6 +80,13 @@ pub struct Session {
     /// zero-byte-write failure, which reads `raw_bytes == 0` identically otherwise.
     #[serde(default)]
     pub trace_discarded: bool,
+    /// Steam appid for the game, from gamebus-presenced's correlated presence record
+    /// (`app_ids["steam"]`) when that service is running. The id ProtonDB and
+    /// gamebus-gamedb both key on, which no other source in a trace carries: beisl only
+    /// ever sees process names. Empty when gamebus isn't installed, when the launch
+    /// wasn't a Steam one, or on a legacy run - all normal, none of them an error.
+    #[serde(default)]
+    pub steam_appid: String,
     /// The wrapper's own process identity, captured at launch - lets a reader probe
     /// whether it's still alive (`WrapperProc::verdict`) instead of only trusting the
     /// last state it managed to write. `#[serde(default)]`/`None` on legacy runs and
