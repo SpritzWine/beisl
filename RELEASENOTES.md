@@ -1,3 +1,42 @@
+# beisl 0.3.0
+
+The Compat-Finding release: traces now know when a game hits a wall, the
+session window says so live, and a new beisl-compat window hands every wall
+to gamebus so it can be reported — all while the COSMIC toolkit pin marches
+forward and the MCP server learns to serve any trace library.
+
+## New
+
+- **Compat-finding review window.** A new beisl-compat window surfaces every
+  compat wall detected during a trace, shows the wall and every driver the
+  game tried, and hands the finding to gamebus through its inbox so it can
+  be reported.
+- **Live compat walls in the session window.** The session window now says it
+  while it happens: compat walls appear as they are detected, not just after
+  the fact.
+- **beisl-compat.** A dedicated window over gamebus's compat report flow:
+  open a trace, see its walls, and send them upstream without leaving beisl.
+- **COSMIC 1.3 alignment.** The setup app's toolkit pin moves forward in step
+  with the installer, keeping the frosted-glass look consistent across the
+  suite.
+- **MCP serves any trace library.** beisl-mcp can now serve any trace
+  library, not just the current run.
+
+## Fixed
+
+- Traces are named after the game, not the launcher.
+- The game's identity is taken from Steam before presence can override it.
+- beisl-mcp now says so when gamebus-presenced is missing.
+- Private keys are kept out of the repo for good.
+- A cargo audit is required around any lockfile change.
+
+## Compatibility
+
+- `artifact.json` remains schema v1; new fields are additive with defaults.
+  The MCP surface gains no breaking changes.
+
+---
+
 # beisl 0.2.0
 
 The Frosted Glass release: the trace library learns to be honest about
