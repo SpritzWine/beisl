@@ -8,13 +8,17 @@
 use std::fs;
 use std::process::ExitCode;
 
-const PAGES: [(&str, &str); 3] = [
+const PAGES: [(&str, &str); 4] = [
     ("BEISL", include_str!("../../../docs/beisl.1.md")),
     (
         "BEISL-SETUP",
         include_str!("../../../docs/beisl-setup.1.md"),
     ),
     ("BEISL-MCP", include_str!("../../../docs/beisl-mcp.1.md")),
+    (
+        "BEISL-COMPAT",
+        include_str!("../../../docs/beisl-compat.1.md"),
+    ),
 ];
 
 fn main() -> ExitCode {

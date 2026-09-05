@@ -498,11 +498,13 @@ name = "beisl-gui"
 version = "0.1.0"
 dependencies = [
  "artifact",
+ "compat",
  "enumflags2",
  "libcosmic",
  "plotters",
  "plotters-backend",
  "preflight",
+ "serde_json",
  "session",
 ]
 

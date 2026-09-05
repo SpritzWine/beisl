@@ -21,6 +21,12 @@ publish = false
 name = "beisl-setup"
 path = "src/main.rs"
 
+# The compat-finding review window: a second front-end over gamebus-setup's compat
+# flow (scan, draft, mark reported), sharing this workspace's libcosmic build.
+[[bin]]
+name = "beisl-compat"
+path = "src/compat/main.rs"
+
 [dependencies]
 preflight = { path = "../preflight" }
 session = { path = "../session" }
@@ -29,6 +35,9 @@ session = { path = "../session" }
 # and runs `TraceArtifact::build` for the "Analyze" action). Pulls in symbol-resolver +
 # serde_json, both light; the heavy tree here is still only libcosmic.
 artifact = { path = "../artifact" }
+# beisl-compat: the wrapper's wording for each wall, and the stash file as loose JSON.
+compat = { path = "../compat" }
+serde_json = "1"
 plotters-backend = "0.3"
 plotters = { version = "0.3", default-features = false, features = ["all_series", "all_elements"] }
 # BitFlags<Auto>::empty() for the Frosted Glass allow-mask (Core::set_auto_blur) — libcosmic

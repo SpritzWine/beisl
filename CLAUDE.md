@@ -56,11 +56,14 @@ Main workspace (`Cargo.toml`, crates.io deps only, mostly std):
   `docs/*.1.md` are the SINGLE SOURCE for user-facing usage text: each binary embeds
   its file via `include_str!` and prints everything above the `<!-- help-end -->`
   marker as `--help`; `make man` renders the full files for the bundle.
-- `crates/beisl-gui` - `beisl-setup` binary (libcosmic): preflight checklist, plus an
+- `crates/beisl-gui` - two libcosmic binaries. `beisl-setup`: preflight checklist, plus an
   install/update page shown first when run from an extracted dist tree (a tiny fork of
   the SpritzWine installer wizard over `beisl install`). **Excluded** from the main
   workspace: it is its own workspace with its own `Cargo.lock` because libcosmic pulls
   ~48 rev-pinned git deps (wgpu/winit tree). Build it separately, only when touching it.
+  `beisl-compat` (`src/compat/main.rs`): the compat-finding review window, a front-end
+  over `gamebus-setup compat` (scan, draft, mark reported) that reimplements none of it and
+  reads gamebus's stash file for display only. Nothing in it submits anywhere.
 
 Dependency direction: `beisl`, `beisl-gui`, and `beisl-mcp` all depend on `preflight` +
 `session`; `beisl` and `beisl-gui` also depend on `artifact` (which itself depends on
@@ -80,7 +83,8 @@ make man                         # docs/*.1.md -> man/*.1 (cargo run -p docs-gen
 (cd crates/beisl-gui && cargo check)   # GUI: separate workspace; heavy git deps,
                                        # slow first build - skip unless GUI changed
 make                             # release-build BOTH workspaces + package the bundle
-                                 # tarball (beisl + beisl-mcp + beisl-setup + README/LICENSE)
+                                 # tarball (beisl + beisl-mcp + beisl-setup + beisl-compat
+                                 # + README/LICENSE)
                                  # into dist/
 ```
 
