@@ -64,7 +64,8 @@ Main workspace (`Cargo.toml`, crates.io deps only, mostly std):
   ~48 rev-pinned git deps (wgpu/winit tree). Build it separately, only when touching it.
   `beisl-compat` (`src/compat/main.rs`): the compat-finding review window, a front-end
   over `gamebus-setup compat` (scan, draft, mark reported) that reimplements none of it and
-  reads gamebus's stash file for display only. Nothing in it submits anywhere.
+  drives it entirely through `--json` (gamebus 0.4.0+, added for this window). Nothing in
+  it submits anywhere.
 
 Dependency direction: `beisl`, `beisl-gui`, and `beisl-mcp` all depend on `preflight` +
 `session`; `beisl` and `beisl-gui` also depend on `artifact` (which itself depends on

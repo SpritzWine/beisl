@@ -7,15 +7,17 @@
 //! reimplements none of them, so the two UIs cannot drift apart on what a finding is
 //! (the rule from the ecosystem plan: the logic lives in gamebus, beisl-setup drives it).
 //!
-//! It reads the stash file directly for display, as a plain map keyed by finding, so a
-//! field this build does not know is ignored rather than fatal. Nothing here submits
-//! anywhere: a draft is text to review, and the file-it link opens the browser.
+//! Everything shown comes off `gamebus-setup compat --json`: the findings and what
+//! they still need reporting to, what the drain just took, the scan's tally, the
+//! drafts. gamebus grew that half for this window, so nothing here parses human output
+//! or reads gamebus's stash file behind its back. Nothing here submits anywhere
+//! either: a draft is text to review, and the file-it link opens the browser.
 //!
 //! Same worker-and-tick pattern as beisl-setup: each gamebus-setup call runs on a thread
 //! and the UI polls its captured output, keeping clear of the version-volatile async API.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -24,15 +26,13 @@ use cosmic::iced::{Length, Subscription};
 use cosmic::widget;
 use cosmic::{Application, Element};
 
-/// gamebus-setup's stash, relative to `$XDG_DATA_HOME` (its `CompatStash::default_path`).
-const STASH_REL: &str = "gamebus-presenced/compat-findings.json";
-
 /// Lowercase, like `beisl setup`: the family's windows name themselves the same way.
 const BASE_TITLE: &str = "beisl compat findings";
 
 /// Upstream targets as gamebus-setup names them, with what a person calls them and
 /// whether gamebus-setup can draft for them (`--export`). gamedb has no draft: its
 /// pages are written by `gamebus-setup gamedb`, so here it can only be marked done.
+/// Which of them a finding still wants is not decided here - `needs` says.
 const TARGETS: &[(&str, &str, bool)] = &[
     ("protondb", "ProtonDB", true),
     ("awacy", "AreWeAntiCheatYet", true),
@@ -45,13 +45,27 @@ struct Observation {
     observed: String,
     wine: Option<String>,
     gpu: Option<String>,
+    gpu_vendor: Option<String>,
     signature: Option<String>,
     log: Option<String>,
     trace_dir: Option<String>,
 }
 
-/// One finding as the stash holds it. Field names follow gamebus's `CompatFinding`;
-/// anything else in the file is left alone.
+impl Observation {
+    /// beisl reports a vendor tag and never a device name, so the vendor stands in
+    /// rather than letting a beisl-only finding read "unknown GPU".
+    fn gpu_label(&self) -> String {
+        match (&self.gpu, &self.gpu_vendor) {
+            (Some(g), _) => g.clone(),
+            (None, Some(v)) => format!("{v} GPU"),
+            (None, None) => "unknown GPU".to_string(),
+        }
+    }
+}
+
+/// One finding as `--json` reports it. Field names follow gamebus's `CompatFinding`,
+/// plus the two it computes onto each record: `key` and `needs`. Anything else in the
+/// record is left alone.
 #[derive(Debug, Clone, Default)]
 struct Finding {
     key: String,
@@ -63,6 +77,10 @@ struct Finding {
     observations: Vec<Observation>,
     reported: BTreeMap<String, String>,
     dismissed: Option<String>,
+    /// Targets that still want this finding, as gamebus decides it. Not recomputed
+    /// here: the AreWeAntiCheatYet rule (a Wine stub is Wine's bug, not theirs) is
+    /// gamebus's to own, and two copies of it would drift.
+    needs: Vec<String>,
 }
 
 impl Finding {
@@ -74,17 +92,8 @@ impl Finding {
         self.observations.last()
     }
 
-    /// gamebus-setup's own rule: a live finding a target has not seen, and
-    /// AreWeAntiCheatYet only for anti-cheat walls (a Wine stub is not theirs).
     fn needs(&self, target: &str) -> bool {
-        self.dismissed.is_none()
-            && !self.observations.is_empty()
-            && !self.reported.contains_key(target)
-            && (target != "awacy" || self.is_anti_cheat())
-    }
-
-    fn is_anti_cheat(&self) -> bool {
-        matches!(self.wall.as_str(), "kernel-anti-cheat" | "missing-runtime")
+        self.needs.iter().any(|t| t == target)
     }
 
     /// The wrapper's wording for this wall, where the two vocabularies meet.
@@ -102,31 +111,35 @@ impl Finding {
     }
 }
 
-fn stash_path() -> Option<PathBuf> {
-    let data = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
-    Some(data.join(STASH_REL))
-}
-
 fn str_of(v: &serde_json::Value, key: &str) -> Option<String> {
     v.get(key).and_then(|x| x.as_str()).map(str::to_string)
 }
 
-/// The stash, newest wall first. A missing file is an empty stash; a file that does not
-/// parse is an error to show, never "no findings" (gamebus-setup's stance too).
-fn load_stash(path: &Path) -> Result<Vec<Finding>, String> {
-    let raw = match std::fs::read_to_string(path) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(format!("{}: {e}", path.display())),
-    };
-    let map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&raw)
-        .map_err(|e| format!("{} exists but failed to parse: {e}", path.display()))?;
-    let mut out: Vec<Finding> = map
+fn strs_of(v: &serde_json::Value, key: &str) -> Vec<String> {
+    v.get(key)
+        .and_then(|x| x.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
+}
+
+/// What a bare `compat --json` answers: the whole stash, plus what this very call took
+/// off beisl's inbox on the way (gamebus drains before every command).
+#[derive(Debug, Default)]
+struct Listing {
+    findings: Vec<Finding>,
+    took: Vec<String>,
+    refused: Vec<(String, String)>,
+}
+
+fn parse_listing(out: &str) -> Result<Listing, String> {
+    let v: serde_json::Value = serde_json::from_str(out).map_err(|e| e.to_string())?;
+    let mut findings: Vec<Finding> = v
+        .get("findings")
+        .and_then(|f| f.as_array())
+        .ok_or_else(|| "no findings array".to_string())?
         .iter()
-        .map(|(key, v)| Finding {
-            key: key.clone(),
+        .map(|v| Finding {
+            key: str_of(v, "key").unwrap_or_default(),
             title: str_of(v, "title"),
             wall: str_of(v, "wall").unwrap_or_default(),
             steam_appid: str_of(v, "steam_appid"),
@@ -142,6 +155,7 @@ fn load_stash(path: &Path) -> Result<Vec<Finding>, String> {
                             observed: str_of(o, "observed").unwrap_or_default(),
                             wine: str_of(o, "wine"),
                             gpu: str_of(o, "gpu"),
+                            gpu_vendor: str_of(o, "gpu_vendor"),
                             signature: str_of(o, "signature"),
                             log: str_of(o, "log"),
                             trace_dir: str_of(o, "trace_dir"),
@@ -159,10 +173,92 @@ fn load_stash(path: &Path) -> Result<Vec<Finding>, String> {
                 })
                 .unwrap_or_default(),
             dismissed: str_of(v, "dismissed"),
+            needs: strs_of(v, "needs"),
         })
         .collect();
-    out.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then(a.key.cmp(&b.key)));
-    Ok(out)
+    // gamebus sorts by key; a review list wants the freshest wall on top.
+    findings.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then(a.key.cmp(&b.key)));
+
+    let inbox = v.get("inbox").cloned().unwrap_or_default();
+    Ok(Listing {
+        findings,
+        took: strs_of(&inbox, "took"),
+        refused: inbox
+            .get("refused")
+            .and_then(|r| r.as_array())
+            .map(|a| {
+                a.iter()
+                    .map(|r| {
+                        (
+                            str_of(r, "path").unwrap_or_default(),
+                            str_of(r, "why").unwrap_or_default(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    })
+}
+
+/// What `--scan --json` answers. `truncated` means walls were left unread, which the
+/// text output only ever mentioned in passing.
+#[derive(Debug, Default)]
+struct Scan {
+    recorded: Vec<String>,
+    skipped: Vec<String>,
+    truncated: bool,
+}
+
+fn parse_scan(out: &str) -> Result<Scan, String> {
+    let v: serde_json::Value = serde_json::from_str(out).map_err(|e| e.to_string())?;
+    if !v.is_object() {
+        return Err("not an object".into());
+    }
+    Ok(Scan {
+        recorded: strs_of(&v, "recorded"),
+        skipped: strs_of(&v, "skipped"),
+        truncated: v.get("truncated").and_then(|t| t.as_bool()).unwrap_or(false),
+    })
+}
+
+/// One draft out of `--export <target> --key <key> --json`. `missing` is the list of
+/// facts no trace can supply, which the text output buried under the body.
+#[derive(Debug, Default)]
+struct Report {
+    body: String,
+    url: Option<String>,
+    missing: Vec<String>,
+}
+
+fn parse_report(out: &str) -> Result<Option<Report>, String> {
+    let v: serde_json::Value = serde_json::from_str(out).map_err(|e| e.to_string())?;
+    let reports = v
+        .get("reports")
+        .and_then(|r| r.as_array())
+        .ok_or_else(|| "no reports array".to_string())?;
+    Ok(reports.first().map(|r| Report {
+        body: str_of(r, "body").unwrap_or_default(),
+        url: str_of(r, "url"),
+        missing: strs_of(r, "missing"),
+    }))
+}
+
+/// What to show when a call did not answer in JSON. A gamebus-setup older than 0.4.0
+/// ignores the flag and prints its human list instead, so a parse failure is how this
+/// window finds out the two halves are out of step.
+fn json_failure(parse_error: &str, err: &[String], ok: bool) -> String {
+    if ok {
+        format!(
+            "gamebus-setup answered, but not in JSON ({parse_error}). This window drives \
+             `gamebus-setup compat --json`, which gamebus-presenced grew in 0.4.0. Update \
+             it and reopen."
+        )
+    } else {
+        format!(
+            "gamebus-setup failed: {}",
+            err.last().cloned().unwrap_or_else(|| "no output".into())
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -171,13 +267,16 @@ fn load_stash(path: &Path) -> Result<Vec<Finding>, String> {
 
 #[derive(Default)]
 struct Shared {
-    log: Vec<String>,
+    /// stdout verbatim: gamebus-setup's JSON answer, which must not be interleaved
+    /// with anything else to stay parseable.
+    out: String,
+    /// stderr, line by line. gamebus-setup keeps its refusals and failures here, and
+    /// they are what a person needs to read when the answer did not come.
+    err: Vec<String>,
     finished: bool,
     ok: bool,
 }
 
-/// Run one argv, keeping stdout then stderr. gamebus-setup prints its drafts and lists on
-/// stdout and its refusals on stderr, and a person wants both.
 fn spawn_cmd(argv: Vec<String>) -> Arc<Mutex<Shared>> {
     let shared = Arc::new(Mutex::new(Shared::default()));
     let s2 = shared.clone();
@@ -188,15 +287,15 @@ fn spawn_cmd(argv: Vec<String>) -> Arc<Mutex<Shared>> {
         let mut s = s2.lock().unwrap();
         match result {
             Ok(out) => {
-                for stream in [&out.stdout, &out.stderr] {
-                    for line in String::from_utf8_lossy(stream).lines() {
-                        s.log.push(line.to_string());
-                    }
-                }
+                s.out = String::from_utf8_lossy(&out.stdout).into_owned();
+                s.err = String::from_utf8_lossy(&out.stderr)
+                    .lines()
+                    .map(str::to_string)
+                    .collect();
                 s.ok = out.status.success();
             }
             Err(e) => {
-                s.log.push(format!("could not run {}: {e}", argv[0]));
+                s.err.push(format!("could not run {}: {e}", argv[0]));
                 s.ok = false;
             }
         }
@@ -207,10 +306,11 @@ fn spawn_cmd(argv: Vec<String>) -> Arc<Mutex<Shared>> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Job {
-    /// A bare `compat` run: gamebus drains its inbox before every command, so this is
-    /// how a finding beisl dropped at game exit reaches the stash without the user
-    /// pressing anything. Runs once at open.
-    Drain,
+    /// A bare `compat --json` run, which is both halves of a refresh at once: gamebus
+    /// drains its inbox before every command, so this is how a finding beisl dropped at
+    /// game exit reaches the stash without the user pressing anything, and the same
+    /// answer carries the stash back. Runs at open and after anything that writes.
+    List,
     Scan,
     Draft {
         key: String,
@@ -222,12 +322,14 @@ enum Job {
     },
 }
 
-/// A draft as gamebus-setup printed it, plus the file-it URL pulled out for a button.
+/// A draft as gamebus-setup rendered it: the body to review, where to file it, and the
+/// facts it could not fill in from a trace.
 #[derive(Debug, Clone)]
 struct Draft {
     target: String,
     text: String,
     url: Option<String>,
+    missing: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------------------
@@ -252,8 +354,9 @@ struct App {
     gamebus_setup: Option<PathBuf>,
     mcp_found: bool,
     presenced: preflight::Check,
-    stash_path: Option<PathBuf>,
     findings: Vec<Finding>,
+    /// Why the last list call produced nothing usable. Never "no findings": an answer
+    /// that did not arrive must not read as an empty stash.
     load_error: Option<String>,
     selected: Option<String>,
     job: Option<(Job, Arc<Mutex<Shared>>)>,
@@ -271,19 +374,7 @@ struct App {
 
 impl App {
     fn reload(&mut self) {
-        match self.stash_path.as_deref().map(load_stash) {
-            Some(Ok(findings)) => {
-                self.findings = findings;
-                self.load_error = None;
-            }
-            Some(Err(e)) => self.load_error = Some(e),
-            None => self.load_error = Some("Cannot resolve the stash path (no HOME).".into()),
-        }
-        if let Some(sel) = &self.selected {
-            if !self.findings.iter().any(|f| &f.key == sel) {
-                self.selected = None;
-            }
-        }
+        self.start(Job::List, &["--json"]);
     }
 
     /// Select the `--key` finding once the stash actually holds it. Silent while it does
@@ -318,65 +409,114 @@ impl App {
         self.job = Some((job, spawn_cmd(argv)));
     }
 
-    /// A finished job's output becomes a note, a draft, or a reload - never silence.
-    fn finish(&mut self, job: Job, log: Vec<String>, ok: bool) {
+    /// A finished job's answer becomes a note, a draft, or a fresh list - never
+    /// silence. Every job answers in JSON on stdout; `start` clears the note, so a
+    /// chained refresh is kicked off before the note that describes it is set.
+    fn finish(&mut self, job: Job, out: String, err: Vec<String>, ok: bool) {
         match job {
-            Job::Drain => {
-                self.reload();
-                let took = log.iter().filter(|l| l.starts_with("Took ")).count();
-                if took > 0 {
-                    self.note = Some(format!("{took} finding(s) just arrived from beisl."));
+            Job::List => {
+                if !ok && out.trim().is_empty() {
+                    self.load_error = Some(json_failure("", &err, false));
+                    return;
                 }
-                self.take_pending_key();
+                match parse_listing(&out) {
+                    Ok(listing) => {
+                        self.findings = listing.findings;
+                        self.load_error = None;
+                        if let Some(sel) = &self.selected {
+                            if !self.findings.iter().any(|f| &f.key == sel) {
+                                self.selected = None;
+                            }
+                        }
+                        self.take_pending_key();
+                        let mut said = Vec::new();
+                        if !listing.took.is_empty() {
+                            said.push(format!(
+                                "{} finding(s) just arrived from beisl.",
+                                listing.took.len()
+                            ));
+                        }
+                        // A drop gamebus refused is a wall the user has and would never
+                        // hear about otherwise; it is kept on disk, not deleted.
+                        for (path, why) in &listing.refused {
+                            said.push(format!("A drop was refused ({why}): {path}"));
+                        }
+                        if !said.is_empty() {
+                            self.note = Some(said.join("\n"));
+                        }
+                    }
+                    Err(e) => self.load_error = Some(json_failure(&e, &err, ok)),
+                }
             }
             Job::Scan => {
-                self.reload();
-                let recorded = log.iter().filter(|l| l.starts_with("Recorded ")).count();
-                let skipped = log.iter().filter(|l| l.starts_with("Skipped ")).count();
-                self.note = Some(if !ok {
-                    format!("Scan failed: {}", log.last().cloned().unwrap_or_default())
-                } else if recorded == 0 && skipped == 0 {
-                    "Scan done: no compat walls in beisl's traces.".into()
-                } else {
-                    format!("Scan done: {recorded} finding(s) recorded, {skipped} skipped.")
-                });
+                if !ok {
+                    self.note = Some(format!(
+                        "Scan failed: {}",
+                        err.last().cloned().unwrap_or_default()
+                    ));
+                    return;
+                }
+                match parse_scan(&out) {
+                    Ok(scan) => {
+                        let mut said = if scan.recorded.is_empty() && scan.skipped.is_empty() {
+                            "Scan done: no compat walls in beisl's traces.".to_string()
+                        } else {
+                            format!(
+                                "Scan done: {} finding(s) recorded, {} skipped.",
+                                scan.recorded.len(),
+                                scan.skipped.len()
+                            )
+                        };
+                        // Loud on purpose, as gamebus is: a wall it could not key is a
+                        // wall the user has and does not know about.
+                        for why in &scan.skipped {
+                            said.push_str(&format!("\nSkipped: {why}"));
+                        }
+                        if scan.truncated {
+                            said.push_str(
+                                "\nThe event list was truncated; scan again for the rest.",
+                            );
+                        }
+                        self.reload();
+                        self.note = Some(said);
+                    }
+                    Err(e) => self.note = Some(json_failure(&e, &err, ok)),
+                }
             }
             Job::Draft { target, .. } => {
-                if ok {
-                    let url = log
-                        .iter()
-                        .find_map(|l| l.strip_prefix("File it at: "))
-                        .map(|u| u.trim().to_string());
-                    // Drop gamebus-setup's framing lines; the body is what gets reviewed.
-                    let text: Vec<&str> = log
-                        .iter()
-                        .map(String::as_str)
-                        .filter(|l| {
-                            !l.starts_with("=== ") && !l.starts_with("Nothing was submitted")
-                        })
-                        .collect();
-                    self.draft = Some(Draft {
-                        target,
-                        text: text.join("\n").trim().to_string(),
-                        url,
-                    });
-                } else {
+                if !ok {
                     self.note = Some(format!(
                         "Draft failed: {}",
-                        log.last().cloned().unwrap_or_default()
+                        err.last().cloned().unwrap_or_default()
                     ));
+                    return;
+                }
+                match parse_report(&out) {
+                    // One key in, so at most one draft out.
+                    Ok(Some(r)) => {
+                        self.draft = Some(Draft {
+                            target,
+                            text: r.body,
+                            url: r.url,
+                            missing: r.missing,
+                        })
+                    }
+                    Ok(None) => {
+                        self.note = Some(format!("gamebus-setup had nothing to draft for {target}."))
+                    }
+                    Err(e) => self.note = Some(json_failure(&e, &err, ok)),
                 }
             }
             Job::MarkReported { target, .. } => {
-                self.reload();
-                self.note = Some(if ok {
-                    format!("Marked as reported to {target}.")
+                if ok {
+                    self.reload();
+                    self.note = Some(format!("Marked as reported to {target}."));
                 } else {
-                    format!(
+                    self.note = Some(format!(
                         "Could not mark: {}",
-                        log.last().cloned().unwrap_or_default()
-                    )
-                });
+                        err.last().cloned().unwrap_or_default()
+                    ));
+                }
             }
         }
     }
@@ -405,7 +545,6 @@ impl Application for App {
             gamebus_setup: preflight::find_tool("gamebus-setup"),
             mcp_found: preflight::find_tool("beisl-mcp").is_some(),
             presenced: preflight::gamebus_presence_check(),
-            stash_path: stash_path(),
             findings: Vec::new(),
             load_error: None,
             selected: None,
@@ -415,11 +554,9 @@ impl Application for App {
             title: String::new(),
             draft: None,
         };
+        // The list call drains the inbox on its way, so the wall this window was opened
+        // for reaches the stash before anything tries to select it.
         app.reload();
-        app.take_pending_key();
-        // Even when the key already resolved: a drain costs one short-lived process and
-        // is the only thing that moves beisl's drops into the stash.
-        app.start(Job::Drain, &[]);
         (app, Task::none())
     }
 
@@ -438,20 +575,22 @@ impl Application for App {
                 }
                 let done = self.job.as_ref().and_then(|(job, shared)| {
                     let s = shared.lock().unwrap();
-                    s.finished.then(|| (job.clone(), s.log.clone(), s.ok))
+                    s.finished
+                        .then(|| (job.clone(), s.out.clone(), s.err.clone(), s.ok))
                 });
-                if let Some((job, log, ok)) = done {
+                if let Some((job, out, err, ok)) = done {
                     self.job = None;
-                    self.finish(job, log, ok);
+                    self.finish(job, out, err, ok);
                 }
             }
             Message::Reload => {
-                self.reload();
-                self.note = None;
+                if !self.busy() {
+                    self.reload();
+                }
             }
             Message::Scan => {
                 if !self.busy() {
-                    self.start(Job::Scan, &["--scan"]);
+                    self.start(Job::Scan, &["--scan", "--json"]);
                 }
             }
             Message::Select(key) => {
@@ -471,7 +610,7 @@ impl Application for App {
                         key: key.clone(),
                         target: target.clone(),
                     };
-                    self.start(job, &["--export", &target, "--key", &key]);
+                    self.start(job, &["--export", &target, "--key", &key, "--json"]);
                 }
             }
             Message::MarkReported(target) => {
@@ -596,14 +735,11 @@ impl App {
             col = col.push(widget::text::body(note.clone()));
         }
         if let Some(e) = &self.load_error {
-            col = col.push(widget::text::body(format!(
-                "The stash could not be read: {e}\nFix or move the file; nothing has \
-                 overwritten it."
-            )));
+            col = col.push(widget::text::body(e.clone()));
         }
 
         let mut section = widget::settings::section().title("Findings");
-        if self.findings.is_empty() && self.load_error.is_none() {
+        if self.findings.is_empty() && self.load_error.is_none() && !self.busy() {
             section = section.add(widget::text::caption(
                 "No compat findings yet. Run a game under beisl, then scan.",
             ));
@@ -624,7 +760,7 @@ impl App {
                     format!(
                         "  |  latest: {} on {}",
                         o.wine.as_deref().unwrap_or("unknown wine"),
-                        o.gpu.as_deref().unwrap_or("unknown GPU")
+                        o.gpu_label()
                     )
                 })
                 .unwrap_or_default();
@@ -681,7 +817,7 @@ impl App {
                     o.observed,
                     o.source,
                     o.wine.as_deref().unwrap_or("unknown wine"),
-                    o.gpu.as_deref().unwrap_or("unknown GPU")
+                    o.gpu_label()
                 )));
             if let Some(sig) = &o.signature {
                 item = item.push(widget::text::caption(format!("signature: {sig}")));
@@ -707,7 +843,9 @@ impl App {
             if let Some(when) = f.reported.get(*target) {
                 row = row.push(widget::text::caption(format!("reported {when}")));
             } else if !f.needs(target) {
-                row = row.push(widget::text::caption(if *target == "awacy" {
+                row = row.push(widget::text::caption(if f.dismissed.is_some() {
+                    "dismissed"
+                } else if *target == "awacy" {
                     "not theirs: they track anti-cheat behaviour"
                 } else {
                     "nothing to submit"
@@ -751,14 +889,20 @@ impl App {
                         .on_press(Message::OpenUrl(url.clone())),
                 );
             }
-            let draft = widget::Column::new()
+            let mut draft = widget::Column::new()
                 .spacing(8)
                 .push(widget::text::caption(
-                    "Review and complete it before filing. gamebus-setup lists what it could \
-                     not fill in; nothing was submitted.",
+                    "Review and complete it before filing. Nothing was submitted.",
                 ))
-                .push(actions)
-                .push(widget::text::monotext(d.text.clone()));
+                .push(actions);
+            // The facts no trace can supply, which the text output buried under the body.
+            if !d.missing.is_empty() {
+                draft = draft.push(widget::text::body(format!(
+                    "Before filing, this draft still needs: {}",
+                    d.missing.join(", ")
+                )));
+            }
+            let draft = draft.push(widget::text::monotext(d.text.clone()));
             col = col.push(
                 widget::settings::section()
                     .title(format!("Draft for {label}"))
@@ -798,4 +942,122 @@ fn main() -> cosmic::iced::Result {
     }
     let settings = Settings::default().size(cosmic::iced::Size::new(880.0, 640.0));
     cosmic::app::run::<App>(settings, key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Trimmed from a real `gamebus-setup compat --json`, unknown fields kept: this
+    /// window must not care that gamebus records a layer split it does not show.
+    const LIST: &str = r#"{
+      "findings": [
+        {
+          "awacy_slug": null,
+          "dismissed": null,
+          "first_seen": "2026-09-05",
+          "key": "steam:4809930",
+          "last_seen": "2026-09-05",
+          "needs": ["protondb", "awacy"],
+          "observations": [
+            {
+              "attributed_pct": 74.68,
+              "gpu_vendor": "amd",
+              "layer_split": {"game": 74.16},
+              "log": "beisl:run-1788635431",
+              "observed": "2026-09-05",
+              "signature": "fixme:ntdll:NtLoadDriver",
+              "source": "beisl",
+              "trace_dir": "/home/x/.local/share/beisl/traces/run-1788635431",
+              "wine": "SpritzWine-Prater"
+            }
+          ],
+          "reported": {"gamedb": "2026-09-06"},
+          "steam_appid": "4809930",
+          "title": "WARDOGS Playtest",
+          "wall": "kernel-anti-cheat"
+        },
+        {
+          "first_seen": "2026-08-01",
+          "key": "steam:1",
+          "last_seen": "2026-09-09",
+          "needs": [],
+          "observations": [],
+          "reported": {},
+          "title": null,
+          "wall": "wine-stub"
+        }
+      ],
+      "inbox": {
+        "took": ["steam:4809930"],
+        "refused": [{"path": "/x/0001-run-42.json", "why": "not JSON"}]
+      }
+    }"#;
+
+    #[test]
+    fn listing_carries_key_needs_and_inbox() {
+        let l = parse_listing(LIST).unwrap();
+        // Freshest wall first, not gamebus's key order.
+        assert_eq!(l.findings[0].key, "steam:1");
+        let f = &l.findings[1];
+        assert_eq!(f.display_title(), "WARDOGS Playtest");
+        assert_eq!(f.steam_appid.as_deref(), Some("4809930"));
+        assert_eq!(f.reported.get("gamedb").map(String::as_str), Some("2026-09-06"));
+        // The rule that stays gamebus's: needs is read, never recomputed.
+        assert!(f.needs("protondb") && f.needs("awacy") && !f.needs("gamedb"));
+        assert_eq!(l.took, ["steam:4809930"]);
+        assert_eq!(l.refused[0].1, "not JSON");
+    }
+
+    #[test]
+    fn a_finding_with_no_needs_is_offered_nothing() {
+        let l = parse_listing(LIST).unwrap();
+        let f = &l.findings[0];
+        assert!(TARGETS.iter().all(|(t, _, _)| !f.needs(t)));
+    }
+
+    /// A gamebus-setup older than 0.4.0 ignores `--json` and prints its list. That must
+    /// read as version skew, never as an empty stash.
+    #[test]
+    fn human_output_is_an_error_not_an_empty_stash() {
+        let human = "* WARDOGS Playtest  [steam:4809930]\n    wall: kernel-anti-cheat\n";
+        assert!(parse_listing(human).is_err());
+        assert!(json_failure("expected value", &[], true).contains("0.4.0"));
+    }
+
+    #[test]
+    fn scan_and_report_shapes() {
+        let s = parse_scan(r#"{"recorded":["steam:7"],"skipped":["a wall with no key"],"truncated":true}"#).unwrap();
+        assert_eq!(s.recorded, ["steam:7"]);
+        assert_eq!(s.skipped, ["a wall with no key"]);
+        assert!(s.truncated);
+
+        let r = parse_report(
+            r#"{"reports":[{"key":"steam:7","target":"protondb","url":"https://p/app/7",
+                "body":"text","missing":["GPU actually used: unknown."]}]}"#,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(r.url.as_deref(), Some("https://p/app/7"));
+        assert_eq!(r.missing.len(), 1);
+        assert!(parse_report(r#"{"reports":[]}"#).unwrap().is_none());
+    }
+
+    /// beisl supplies a vendor and no device, and the window used to print "unknown GPU"
+    /// over a finding that knew perfectly well it ran on an AMD card.
+    #[test]
+    fn vendor_stands_in_for_a_missing_device() {
+        let vendor = Observation {
+            gpu_vendor: Some("amd".into()),
+            ..Observation::default()
+        };
+        assert_eq!(vendor.gpu_label(), "amd GPU");
+        let device = Observation {
+            gpu: Some("Radeon RX 6750 XT".into()),
+            gpu_vendor: Some("amd".into()),
+            ..Observation::default()
+        };
+        assert_eq!(device.gpu_label(), "Radeon RX 6750 XT");
+        assert_eq!(Observation::default().gpu_label(), "unknown GPU");
+    }
 }
