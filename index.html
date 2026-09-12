@@ -5,7 +5,46 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>beisl — who ate the frame?</title>
 <meta name="description" content="Beisl is a Linux game performance-tracing tool. One line in your Steam launch options; it samples the whole stack with perf, bookmarks the hitches via MangoHud's frametime log, and hands you the verdict by layer: kernel, GPU driver, game, DXVK — or wine.">
+<meta name="keywords" content="beisl, Linux game performance tracing, perf, MangoHud, frametime, wine, Proton, DXVK, GPU driver, stutter, hitch, profiling, layer verdict, SpritzWine">
+<meta name="author" content="SpritzWine">
+<meta name="robots" content="index, follow">
+<meta name="theme-color" content="#9c2b3b">
+<link rel="canonical" href="https://spritzwine.codeberg.page/beisl/">
 <link rel="icon" type="image/svg+xml" href="assets/icon-glass-pour.svg">
+
+<!-- Open Graph — the wordmark, itemized for social previews -->
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="beisl">
+<meta property="og:locale" content="en">
+<meta property="og:url" content="https://spritzwine.codeberg.page/beisl/">
+<meta property="og:title" content="beisl — who ate the frame?">
+<meta property="og:description" content="Performance tracing for games on Linux. One line in your launch options; beisl samples the whole stack with perf, bookmarks hitches via MangoHud, and hands you the verdict by layer — kernel, GPU driver, game, DXVK, or wine.">
+<meta property="og:image" content="https://spritzwine.codeberg.page/beisl/assets/icon-glass-pour.svg">
+<meta property="og:image:alt" content="The beisl wordmark: a wine glass whose pour is the layer verdict and whose surface is a frametime trace.">
+
+<!-- Twitter card -->
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="beisl — who ate the frame?">
+<meta name="twitter:description" content="Performance tracing for games on Linux — the verdict by layer: kernel, GPU driver, game, DXVK, or wine.">
+<meta name="twitter:image" content="https://spritzwine.codeberg.page/beisl/assets/icon-glass-pour.svg">
+
+<!-- Structured data: beisl as a SoftwareApplication -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "beisl",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "Linux",
+  "url": "https://spritzwine.codeberg.page/beisl/",
+  "description": "Performance tracing for games on Linux. Samples the whole stack with perf, bookmarks hitches via MangoHud's frametime log, and reports the verdict by layer: kernel, GPU driver, the game, DXVK, or wine.",
+  "downloadUrl": "https://codeberg.org/SpritzWine/beisl/releases",
+  "codeRepository": "https://codeberg.org/SpritzWine/beisl",
+  "author": { "@type": "Organization", "name": "SpritzWine" },
+  "keywords": ["beisl", "perf", "Linux game performance", "frametime", "MangoHud", "wine", "Proton", "DXVK", "GPU driver", "stutter", "profiling", "tracing"]
+}
+</script>
+
 <link rel="stylesheet" href="assets/style.css">
 <script>
 /* apply a stored theme before first paint to avoid a flash */
@@ -24,7 +63,7 @@
   <div class="wrap bar">
     <a class="brand" href="#top" aria-label="beisl — home">
       <img src="assets/icon-glass-pour.svg" alt="" width="26" height="26">
-      <span class="wordmark">be<span class="i">ı<span class="tick" aria-hidden="true"></span></span>sl</span>
+      <span class="wordmark" aria-label="beisl">be<span class="i">ı<span class="tick" aria-hidden="true"></span></span>sl</span>
     </a>
     <nav aria-label="Site">
       <a href="#verdict" class="hide-sm">The verdict</a>
@@ -47,7 +86,7 @@
       <!-- Das Glasl, bare: the drink is the layer bar, the surface is the
            frametime trace with one hitch spike -->
       <svg class="glass" viewBox="0 0 48 48" role="img"
-           aria-label="The Beisl glass: a wine glass whose pour is the layer verdict — DXVK violet, game amber, wine red — its surface a frametime trace with one spike.">
+           aria-label="The beisl glass: a wine glass whose pour is the layer verdict — DXVK violet, game amber, wine red — its surface a frametime trace with one spike.">
         <defs>
           <linearGradient id="hero-pour" gradientUnits="userSpaceOnUse" x1="24" y1="10.5" x2="24" y2="27.2">
             <stop offset="0" stop-color="#8e6fd6"/><stop offset="0.27" stop-color="#8e6fd6"/>
@@ -62,7 +101,7 @@
         <rect x="16" y="35.2" width="16" height="2.8" rx="1.4" fill="#f4ede4"/>
       </svg>
       <div>
-        <h1 class="wordmark">be<span class="i">ı<span class="tick" aria-hidden="true"></span></span>sl</h1>
+        <h1 class="wordmark" aria-label="beisl">be<span class="i">ı<span class="tick" aria-hidden="true"></span></span>sl</h1>
         <p class="tagline">Who ate the frame?</p>
         <p class="lede">
           Beisl is performance tracing for games on Linux. One line in your launch
@@ -448,7 +487,7 @@
       <span class="dotsep" aria-hidden="true">◆</span>
       <span class="other">Prater</span>
       <span class="dotsep" aria-hidden="true">◆</span>
-      <span class="self wordmark" style="font-size:1.15em;">be<span class="i">ı<span class="tick" aria-hidden="true"></span></span>sl</span>
+      <span class="self wordmark" style="font-size:1.15em;" aria-label="beisl">be<span class="i">ı<span class="tick" aria-hidden="true"></span></span>sl</span>
     </div>
     <p class="muted" style="margin-top:18px;">
       Three Viennese siblings: the house pours the wine — and keeps the pub that vets it.
@@ -465,9 +504,9 @@
 
 <footer class="site-footer">
   <div class="wrap cols">
-    <img class="coaster" src="assets/icon-coaster-tab.svg" alt="Der Deckel — the Beisl coaster mark: the layer tally, struck through in wine red" width="72" height="72">
+    <img class="coaster" src="assets/icon-coaster-tab.svg" alt="Der Deckel — the beisl coaster mark: the layer tally, struck through in wine red" width="72" height="72">
     <div>
-      <span class="wordmark">be<span class="i">ı<span class="tick" aria-hidden="true"></span></span>sl</span>
+      <span class="wordmark" aria-label="beisl">be<span class="i">ı<span class="tick" aria-hidden="true"></span></span>sl</span>
       — your frame, itemized.
       <p class="fine">
         Free software for Linux. Wine-agnostic by design; opinions strictly data-backed.
