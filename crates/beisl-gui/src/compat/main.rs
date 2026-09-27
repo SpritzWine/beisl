@@ -24,7 +24,7 @@ use cosmic::app::{ApplicationExt, Core, Settings, Task};
 use cosmic::iced::{Length, Subscription};
 use cosmic::widget;
 use cosmic::{Application, Element};
-use gamebus_coupler::{CompatFinding, MissVerb, Observation, TARGETS};
+use gamebus_coupler::{pickable_stores, CompatFinding, MissVerb, Observation, TARGETS};
 
 mod identity;
 mod mcp;
@@ -81,6 +81,13 @@ fn tui_order(rows: &mut [&gamebus_coupler::MissRow]) {
             .then_with(|| a.miss.title.cmp(&b.miss.title))
             .then_with(|| a.key.cmp(&b.key))
     });
+}
+
+/// The store ids a picker may offer, in the data set's order. gamebus compiles these
+/// from gamebus-gamedb's `stores.toml`, and which ids are offerable is a flag in that
+/// data - so this is one call, never a list kept in step by hand.
+fn stores() -> Vec<&'static str> {
+    pickable_stores().collect()
 }
 
 fn gpu_label(o: &Observation) -> String {
@@ -367,6 +374,13 @@ enum Message {
     Tab(Tab),
     MissVerb(String, &'static str),
     ShowDismissed(bool),
+    /// Open the details pane on one miss, or on whatever is selected (the header
+    /// button, which is why the key is optional).
+    Details(Option<String>),
+    CloseDetails,
+    TitleDraft(String),
+    SaveTitle,
+    StorePicked(usize),
     Tick,
     Reload,
     Scan,
@@ -388,6 +402,12 @@ struct App {
     /// Dismissed misses are parked, not deleted, and most of the stash here is parked.
     /// Hidden by default so the list shows what still wants a decision.
     show_dismissed: bool,
+    /// The miss the details pane is showing. The pane is a context drawer, so COSMIC
+    /// owns whether it is visible; this owns what is in it.
+    details: Option<String>,
+    /// The title field's contents while it is being edited. Separate from the record so
+    /// a half-typed correction is never mistaken for a saved one.
+    title_draft: String,
     gamebus_setup: Option<PathBuf>,
     mcp_found: bool,
     presenced: preflight::Check,
@@ -432,6 +452,95 @@ impl App {
         };
         let w = self.mcp.get_or_insert_with(|| misses::Worker::start(bin));
         w.send(misses::Job::List);
+    }
+
+    /// One miss by key, from whatever the worker last fetched.
+    fn miss(&self, key: &str) -> Option<gamebus_coupler::MissRow> {
+        let w = self.mcp.as_ref()?;
+        let out = w.out.lock().ok()?;
+        out.misses.iter().find(|r| r.key == key).cloned()
+    }
+
+    /// The details pane: the facts gamebus holds about one miss, and the corrections
+    /// that need a field rather than a button. It folds in from the side instead of
+    /// widening every row, which is what COSMIC's own file manager does with file
+    /// details.
+    fn details_pane(&self, row: &gamebus_coupler::MissRow) -> Element<'_, Message> {
+        let m = &row.miss;
+        let fact = |k: &str, v: String| {
+            widget::Row::new()
+                .spacing(12)
+                .push(widget::text::caption(k.to_string()))
+                .push(widget::Space::new().width(Length::Fill))
+                .push(widget::text::body(v))
+        };
+
+        let mut facts = widget::settings::section().title("What gamebus knows");
+        facts = facts
+            .add(fact("Key", row.key.clone()))
+            .add(fact("Store", m.effective_store().to_string()))
+            .add(fact(
+                "Codename",
+                m.effective_codename().unwrap_or("-").to_string(),
+            ))
+            .add(fact("First seen", m.first_seen.clone()))
+            .add(fact("Last seen", m.last_seen.clone()));
+        if let Some(exe) = &m.executable {
+            facts = facts.add(fact("Executable", exe.clone()));
+        }
+        if let Some(l) = &m.launcher {
+            facts = facts.add(fact("Launcher", l.clone()));
+        }
+        // Where the name came from matters: a title the user set is not a resolution,
+        // and the pane should not present it as one.
+        let provenance = if m.title_override.is_some() {
+            "set by you".to_string()
+        } else {
+            m.title_source.clone().unwrap_or_else(|| "unresolved".into())
+        };
+        facts = facts.add(fact("Title from", provenance));
+
+        let title = widget::Column::new()
+            .spacing(8)
+            .push(widget::text::caption(
+                "A correction, not a resolution: it overrides what the daemon worked \
+                 out and survives its later writes.",
+            ))
+            .push(
+                widget::text_input("Game title", &self.title_draft)
+                    .on_input(Message::TitleDraft)
+                    .on_submit(|_| Message::SaveTitle),
+            )
+            .push(
+                widget::Row::new().spacing(8).push(
+                    widget::button::suggested("Save title").on_press(Message::SaveTitle),
+                ),
+            );
+
+        // The ids and their order are gamebus's (by how often the upstream database
+        // uses each), not a list retyped here.
+        let all = stores();
+        let picked = all.iter().position(|s| *s == m.effective_store());
+        let guess = if m.store_override.is_some() {
+            format!(
+                "Overridden. The daemon guessed \"{}\"; picking that again clears the \
+                 override.",
+                m.store
+            )
+        } else {
+            "The daemon's own guess. Picking another records a correction.".to_string()
+        };
+        let store = widget::Column::new()
+            .spacing(8)
+            .push(widget::text::caption(guess))
+            .push(widget::dropdown(all, picked, Message::StorePicked));
+
+        widget::Column::new()
+            .spacing(16)
+            .push(facts)
+            .push(widget::settings::section().title("Title").add(title))
+            .push(widget::settings::section().title("Store").add(store))
+            .into()
     }
 
     fn selected(&self) -> Option<&Finding> {
@@ -581,6 +690,8 @@ impl Application for App {
             tab: Tab::Compat,
             mcp: None,
             show_dismissed: false,
+            details: None,
+            title_draft: String::new(),
             gamebus_setup: preflight::find_tool("gamebus-setup"),
             mcp_found: preflight::find_tool("beisl-mcp").is_some(),
             presenced: preflight::gamebus_presence_check(),
@@ -630,6 +741,47 @@ impl Application for App {
                 }
             }
             Message::ShowDismissed(v) => self.show_dismissed = v,
+            Message::Details(key) => {
+                if let Some(key) = key.or_else(|| self.details.clone()) {
+                    self.title_draft = self
+                        .miss(&key)
+                        .and_then(|r| r.miss.effective_title().map(str::to_string))
+                        .unwrap_or_default();
+                    self.details = Some(key);
+                    self.core.window.show_context = true;
+                }
+            }
+            Message::CloseDetails => {
+                self.core.window.show_context = false;
+                self.details = None;
+            }
+            Message::TitleDraft(t) => self.title_draft = t,
+            Message::StorePicked(i) => {
+                let all = stores();
+                if let (Some(w), Some(key), Some(store)) =
+                    (&self.mcp, self.details.clone(), all.get(i))
+                {
+                    // The clearing rule is gamebus's: sending the daemon's own guess
+                    // drops the override. beisl just sends what was picked.
+                    w.send(misses::Job::Apply {
+                        key,
+                        verb: MissVerb::SetStore {
+                            store: (*store).to_string(),
+                        },
+                    });
+                }
+            }
+            Message::SaveTitle => {
+                let draft = self.title_draft.trim().to_string();
+                if let (Some(w), Some(key), false) =
+                    (&self.mcp, self.details.clone(), draft.is_empty())
+                {
+                    w.send(misses::Job::Apply {
+                        key,
+                        verb: MissVerb::SetTitle { title: draft },
+                    });
+                }
+            }
             Message::MissVerb(key, verb) => {
                 if let Some(w) = &self.mcp {
                     let verb = match verb {
@@ -691,6 +843,41 @@ impl Application for App {
             }
         }
         Task::none()
+    }
+
+    fn context_drawer(&self) -> Option<cosmic::app::context_drawer::ContextDrawer<'_, Message>> {
+        let row = self.details.as_ref().and_then(|k| self.miss(k))?;
+        let title = row
+            .miss
+            .effective_title()
+            .unwrap_or(&row.key)
+            .to_string();
+        Some(
+            cosmic::app::context_drawer::context_drawer(
+                self.details_pane(&row),
+                Message::CloseDetails,
+            )
+            .title(title),
+        )
+    }
+
+    /// The pane's own toggle, where COSMIC's file manager keeps it. Always present on
+    /// the misses tab, so the pane can be reopened without hunting for the row it was
+    /// last on.
+    fn header_start(&self) -> Vec<Element<'_, Message>> {
+        if self.tab != Tab::Misses || self.details.is_none() {
+            return Vec::new();
+        }
+        let showing = self.core.window.show_context;
+        vec![widget::button::icon(widget::icon::from_name(
+            "sidebar-show-right-symbolic",
+        ))
+        .on_press(if showing {
+            Message::CloseDetails
+        } else {
+            Message::Details(None)
+        })
+        .into()]
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {
@@ -962,6 +1149,10 @@ impl App {
             } else {
                 ("Dismiss", "dismiss")
             };
+            actions = actions.push(
+                widget::button::standard("Details")
+                    .on_press(Message::Details(Some(row.key.clone()))),
+            );
             actions = actions.push(
                 widget::button::standard(label)
                     .on_press(Message::MissVerb(row.key.clone(), verb)),
