@@ -209,6 +209,25 @@ fn parse_report(out: &str) -> Result<Option<Report>, String> {
     }))
 }
 
+/// Everything gamebus-setup said on stderr, not just the last line.
+///
+/// Its refusals are written as cause then reassurance ("Refused the payload: ..." /
+/// "Nothing was written."), and the auth refusals add a cure line. Taking only the last
+/// line showed the reassurance and dropped the reason, which is the half a person needs.
+/// Capped so a pathological run cannot fill the window.
+fn why(err: &[String]) -> String {
+    let lines: Vec<&str> = err
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return "no output".into();
+    }
+    let keep = lines.len().saturating_sub(6);
+    lines[keep..].join("\n")
+}
+
 /// What to show when a call did not answer in JSON. A gamebus-setup older than 0.4.0
 /// ignores the flag and prints its human list instead, so a parse failure is how this
 /// window finds out the two halves are out of step.
@@ -220,10 +239,7 @@ fn json_failure(parse_error: &str, err: &[String], ok: bool) -> String {
              it and reopen."
         )
     } else {
-        format!(
-            "gamebus-setup failed: {}",
-            err.last().cloned().unwrap_or_else(|| "no output".into())
-        )
+        format!("gamebus-setup failed: {}", why(err))
     }
 }
 
@@ -416,10 +432,7 @@ impl App {
             }
             Job::Scan => {
                 if !ok {
-                    self.note = Some(format!(
-                        "Scan failed: {}",
-                        err.last().cloned().unwrap_or_default()
-                    ));
+                    self.note = Some(format!("Scan failed: {}", why(&err)));
                     return;
                 }
                 match parse_scan(&out) {
@@ -451,10 +464,7 @@ impl App {
             }
             Job::Draft { target, .. } => {
                 if !ok {
-                    self.note = Some(format!(
-                        "Draft failed: {}",
-                        err.last().cloned().unwrap_or_default()
-                    ));
+                    self.note = Some(format!("Draft failed: {}", why(&err)));
                     return;
                 }
                 match parse_report(&out) {
@@ -478,10 +488,7 @@ impl App {
                     self.reload();
                     self.note = Some(format!("Marked as reported to {target}."));
                 } else {
-                    self.note = Some(format!(
-                        "Could not mark: {}",
-                        err.last().cloned().unwrap_or_default()
-                    ));
+                    self.note = Some(format!("Could not mark: {}", why(&err)));
                 }
             }
         }
@@ -1023,6 +1030,34 @@ mod tests {
         assert_eq!(r.url.as_deref(), Some("https://p/app/7"));
         assert_eq!(r.missing.len(), 1);
         assert!(parse_report(r#"{"reports":[]}"#).unwrap().is_none());
+    }
+
+    /// gamebus writes a refusal as cause then reassurance, and the auth refusals add a
+    /// cure. Showing only the last line lost the reason, which is the half worth reading.
+    #[test]
+    fn a_refusal_keeps_its_reason_not_just_its_reassurance() {
+        let two_line = [
+            "Refused the payload: delivery 1: missing field `wall`".to_string(),
+            "Nothing was written.".to_string(),
+        ];
+        let shown = why(&two_line);
+        assert!(shown.contains("missing field"), "the cause was dropped: {shown}");
+        assert!(shown.contains("Nothing was written."));
+
+        // A cause-plus-cure refusal, the shape the MCP work adds to the CLI.
+        let with_cure = [
+            "Refused: the ledger could not be verified.".to_string(),
+            "Re-initialise the passphrase: gamebus-setup auth init.".to_string(),
+        ];
+        assert!(why(&with_cure).contains("auth init"));
+        assert!(why(&with_cure).contains("could not be verified"));
+
+        assert_eq!(why(&[]), "no output");
+        assert_eq!(why(&["  ".to_string(), "real".to_string()]), "real");
+        // Capped, newest kept.
+        let many: Vec<String> = (0..20).map(|i| i.to_string()).collect();
+        assert_eq!(why(&many).lines().count(), 6);
+        assert!(why(&many).ends_with("19"));
     }
 
     /// beisl supplies a vendor and no device, and the window used to print "unknown GPU"
