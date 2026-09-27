@@ -26,6 +26,7 @@ use cosmic::widget;
 use cosmic::{Application, Element};
 use gamebus_coupler::{CompatFinding, Observation, TARGETS};
 
+mod identity;
 mod mcp;
 
 /// Lowercase, like `beisl setup`: the family's windows name themselves the same way.
