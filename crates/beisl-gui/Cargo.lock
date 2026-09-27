@@ -500,6 +500,7 @@ dependencies = [
  "artifact",
  "compat",
  "enumflags2",
+ "gamebus-coupler",
  "libcosmic",
  "plotters",
  "plotters-backend",
@@ -1750,6 +1751,14 @@ dependencies = [
  "memchr",
  "pin-project-lite",
  "slab",
+]
+
+[[package]]
+name = "gamebus-coupler"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

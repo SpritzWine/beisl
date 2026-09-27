@@ -16,7 +16,6 @@
 //! Same worker-and-tick pattern as beisl-setup: each gamebus-setup call runs on a thread
 //! and the UI polls its captured output, keeping clear of the version-volatile async API.
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -25,89 +24,75 @@ use cosmic::app::{ApplicationExt, Core, Settings, Task};
 use cosmic::iced::{Length, Subscription};
 use cosmic::widget;
 use cosmic::{Application, Element};
+use gamebus_coupler::{CompatFinding, Observation, TARGETS};
 
 /// Lowercase, like `beisl setup`: the family's windows name themselves the same way.
 const BASE_TITLE: &str = "beisl compat findings";
 
-/// Upstream targets as gamebus-setup names them, with what a person calls them and
-/// whether gamebus-setup can draft for them (`--export`). gamedb has no draft: its
-/// pages are written by `gamebus-setup gamedb`, so here it can only be marked done.
-/// Which of them a finding still wants is not decided here - `needs` says.
-const TARGETS: &[(&str, &str, bool)] = &[
-    ("protondb", "ProtonDB", true),
-    ("awacy", "AreWeAntiCheatYet", true),
-    ("gamedb", "gamebus-gamedb", false),
-];
-
-#[derive(Debug, Clone, Default)]
-struct Observation {
-    source: String,
-    observed: String,
-    wine: Option<String>,
-    gpu: Option<String>,
-    gpu_vendor: Option<String>,
-    signature: Option<String>,
-    log: Option<String>,
-    trace_dir: Option<String>,
-}
-
-impl Observation {
-    /// beisl reports a vendor tag and never a device name, so the vendor stands in
-    /// rather than letting a beisl-only finding read "unknown GPU".
-    fn gpu_label(&self) -> String {
-        match (&self.gpu, &self.gpu_vendor) {
-            (Some(g), _) => g.clone(),
-            (None, Some(v)) => format!("{v} GPU"),
-            (None, None) => "unknown GPU".to_string(),
-        }
+/// What a person calls each target, and whether gamebus-setup can draft for it
+/// (`--export`). gamedb has no draft: its pages are written by `gamebus-setup gamedb`,
+/// so here it can only be marked done.
+///
+/// The target NAMES are `gamebus_coupler::TARGETS` and are not repeated here - a list
+/// of three strings had drifted into three copies. Only the wording is beisl's. The
+/// draftable flag is still a guess about gamebus's CLI and belongs with them
+/// eventually; raised with that side 2026-09-27, deliberately not in their first cut.
+fn target_label(target: &str) -> (&'static str, bool) {
+    match target {
+        "protondb" => ("ProtonDB", true),
+        "awacy" => ("AreWeAntiCheatYet", true),
+        "gamedb" => ("gamebus-gamedb", false),
+        _ => ("", false),
     }
 }
 
-/// One finding as `--json` reports it. Field names follow gamebus's `CompatFinding`,
-/// plus the two it computes onto each record: `key` and `needs`. Anything else in the
-/// record is left alone.
-#[derive(Debug, Clone, Default)]
+/// beisl reports a vendor tag and never a device name, so the vendor stands in rather
+/// than letting a beisl-only finding read "unknown GPU".
+fn gpu_label(o: &Observation) -> String {
+    match (&o.gpu, &o.gpu_vendor) {
+        (Some(g), _) => g.clone(),
+        (None, Some(v)) => format!("{v} GPU"),
+        (None, None) => "unknown GPU".to_string(),
+    }
+}
+
+/// The wrapper's wording for a wall, where the two vocabularies meet. gamebus names
+/// the wall; `compat` is beisl's own crate and says what the log line meant.
+fn explanation(wall: &str) -> &'static str {
+    match wall {
+        "kernel-anti-cheat" => compat::explain("kernel-driver"),
+        "wine-stub" => compat::explain("wine-stub"),
+        "volume-guid-path" => compat::explain("volume-guid"),
+        "missing-runtime" => {
+            "The game needs an anti-cheat runtime (EAC or BattlEye for Proton) that is \
+             not installed here."
+        }
+        _ => compat::explain(""),
+    }
+}
+
+/// One row of `compat --json`: gamebus's own record, plus the two fields the CLI
+/// computes onto it. The record is `gamebus_coupler::CompatFinding` itself rather
+/// than a copy of its fields, so a field this build does not know still round-trips
+/// and no shape can drift between the two windows.
+#[derive(Debug, Clone)]
 struct Finding {
     key: String,
-    title: Option<String>,
-    wall: String,
-    steam_appid: Option<String>,
-    first_seen: String,
-    last_seen: String,
-    observations: Vec<Observation>,
-    reported: BTreeMap<String, String>,
-    dismissed: Option<String>,
-    /// Targets that still want this finding, as gamebus decides it. Not recomputed
-    /// here: the AreWeAntiCheatYet rule (a Wine stub is Wine's bug, not theirs) is
-    /// gamebus's to own, and two copies of it would drift.
+    /// Targets that still want this finding. Read from the envelope, NOT recomputed
+    /// with the coupler's `pending_targets`: the authority is the gamebus binary that
+    /// will do the marking, not the crate version linked here, and those two can drift
+    /// once this is a rev-pinned dependency.
     needs: Vec<String>,
+    record: CompatFinding,
 }
 
 impl Finding {
     fn display_title(&self) -> &str {
-        self.title.as_deref().unwrap_or(&self.key)
-    }
-
-    fn latest(&self) -> Option<&Observation> {
-        self.observations.last()
+        self.record.title.as_deref().unwrap_or(&self.key)
     }
 
     fn needs(&self, target: &str) -> bool {
         self.needs.iter().any(|t| t == target)
-    }
-
-    /// The wrapper's wording for this wall, where the two vocabularies meet.
-    fn explanation(&self) -> &'static str {
-        match self.wall.as_str() {
-            "kernel-anti-cheat" => compat::explain("kernel-driver"),
-            "wine-stub" => compat::explain("wine-stub"),
-            "volume-guid-path" => compat::explain("volume-guid"),
-            "missing-runtime" => {
-                "The game needs an anti-cheat runtime (EAC or BattlEye for Proton) that is \
-                 not installed here."
-            }
-            _ => compat::explain(""),
-        }
     }
 }
 
@@ -133,51 +118,32 @@ struct Listing {
 
 fn parse_listing(out: &str) -> Result<Listing, String> {
     let v: serde_json::Value = serde_json::from_str(out).map_err(|e| e.to_string())?;
-    let mut findings: Vec<Finding> = v
+    let rows = v
         .get("findings")
         .and_then(|f| f.as_array())
-        .ok_or_else(|| "no findings array".to_string())?
+        .ok_or_else(|| "no findings array".to_string())?;
+    // Each row is a CompatFinding with `key` and `needs` added on top, so the record
+    // deserializes with gamebus's own serde attributes and the two extras are read
+    // beside it. A row that will not deserialize is an error, never a silent skip.
+    let mut findings: Vec<Finding> = rows
         .iter()
-        .map(|v| Finding {
-            key: str_of(v, "key").unwrap_or_default(),
-            title: str_of(v, "title"),
-            wall: str_of(v, "wall").unwrap_or_default(),
-            steam_appid: str_of(v, "steam_appid"),
-            first_seen: str_of(v, "first_seen").unwrap_or_default(),
-            last_seen: str_of(v, "last_seen").unwrap_or_default(),
-            observations: v
-                .get("observations")
-                .and_then(|o| o.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .map(|o| Observation {
-                            source: str_of(o, "source").unwrap_or_default(),
-                            observed: str_of(o, "observed").unwrap_or_default(),
-                            wine: str_of(o, "wine"),
-                            gpu: str_of(o, "gpu"),
-                            gpu_vendor: str_of(o, "gpu_vendor"),
-                            signature: str_of(o, "signature"),
-                            log: str_of(o, "log"),
-                            trace_dir: str_of(o, "trace_dir"),
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-            reported: v
-                .get("reported")
-                .and_then(|r| r.as_object())
-                .map(|r| {
-                    r.iter()
-                        .filter_map(|(t, d)| d.as_str().map(|d| (t.clone(), d.to_string())))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            dismissed: str_of(v, "dismissed"),
-            needs: strs_of(v, "needs"),
+        .map(|v| {
+            let record: CompatFinding = serde_json::from_value(v.clone())
+                .map_err(|e| format!("a finding did not parse: {e}"))?;
+            Ok(Finding {
+                key: str_of(v, "key").unwrap_or_default(),
+                needs: strs_of(v, "needs"),
+                record,
+            })
         })
-        .collect();
+        .collect::<Result<_, String>>()?;
     // gamebus sorts by key; a review list wants the freshest wall on top.
-    findings.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then(a.key.cmp(&b.key)));
+    findings.sort_by(|a, b| {
+        b.record
+            .last_seen
+            .cmp(&a.record.last_seen)
+            .then(a.key.cmp(&b.key))
+    });
 
     let inbox = v.get("inbox").cloned().unwrap_or_default();
     Ok(Listing {
@@ -749,32 +715,36 @@ impl App {
                 .spacing(12)
                 .push(widget::text::body(f.display_title().to_string()))
                 .push(widget::Space::new().width(Length::Fill));
-            if f.dismissed.is_some() {
+            if f.record.dismissed.is_some() {
                 head = head.push(widget::text::caption("dismissed"));
             }
             head = head
                 .push(widget::button::standard("Open").on_press(Message::Select(f.key.clone())));
             let latest = f
+                .record
                 .latest()
                 .map(|o| {
                     format!(
                         "  |  latest: {} on {}",
                         o.wine.as_deref().unwrap_or("unknown wine"),
-                        o.gpu_label()
+                        gpu_label(o)
                     )
                 })
                 .unwrap_or_default();
             let pending: Vec<&str> = TARGETS
                 .iter()
-                .filter(|(t, _, _)| f.needs(t))
-                .map(|(t, _, _)| *t)
+                .copied()
+                .filter(|t| f.needs(t))
                 .collect();
             let mut item = widget::Column::new()
                 .spacing(4)
                 .push(head)
                 .push(widget::text::caption(format!(
                     "{}  |  wall: {}  |  seen {} .. {}{latest}",
-                    f.key, f.wall, f.first_seen, f.last_seen
+                    f.key,
+                    f.record.wall.as_str(),
+                    f.record.first_seen,
+                    f.record.last_seen
                 )));
             if !pending.is_empty() {
                 item = item.push(widget::text::caption(format!(
@@ -794,22 +764,23 @@ impl App {
             .push(widget::text::caption(format!(
                 "{}{}  |  seen {} .. {}",
                 f.key,
-                f.steam_appid
+                f.record
+                    .steam_appid
                     .as_deref()
                     .map(|a| format!("  |  Steam appid {a}"))
                     .unwrap_or_default(),
-                f.first_seen,
-                f.last_seen
+                f.record.first_seen,
+                f.record.last_seen
             )));
 
         let wall = widget::Column::new()
             .spacing(6)
-            .push(widget::text::body(format!("Wall: {}", f.wall)))
-            .push(widget::text::caption(f.explanation()));
+            .push(widget::text::body(format!("Wall: {}", f.record.wall.as_str())))
+            .push(widget::text::caption(explanation(f.record.wall.as_str())));
         col = col.push(widget::settings::section().title("What happened").add(wall));
 
         let mut obs = widget::settings::section().title("Evidence, newest first");
-        for o in f.observations.iter().rev() {
+        for o in f.record.observations.iter().rev() {
             let mut item = widget::Column::new()
                 .spacing(4)
                 .push(widget::text::body(format!(
@@ -817,7 +788,7 @@ impl App {
                     o.observed,
                     o.source,
                     o.wine.as_deref().unwrap_or("unknown wine"),
-                    o.gpu_label()
+                    gpu_label(o)
                 )));
             if let Some(sig) = &o.signature {
                 item = item.push(widget::text::caption(format!("signature: {sig}")));
@@ -835,23 +806,24 @@ impl App {
         // Report: one row per target. Drafting prints text to review; filing is the
         // user's, in the browser; marking done is what gamebus-setup remembers.
         let mut report = widget::settings::section().title("Report it");
-        for (target, label, draftable) in TARGETS {
+        for target in TARGETS.iter().copied() {
+            let (label, draftable) = target_label(target);
             let mut row = widget::Row::new()
                 .spacing(12)
                 .push(widget::text::body(label.to_string()))
                 .push(widget::Space::new().width(Length::Fill));
-            if let Some(when) = f.reported.get(*target) {
+            if let Some(when) = f.record.reported.get(target) {
                 row = row.push(widget::text::caption(format!("reported {when}")));
             } else if !f.needs(target) {
-                row = row.push(widget::text::caption(if f.dismissed.is_some() {
+                row = row.push(widget::text::caption(if f.record.dismissed.is_some() {
                     "dismissed"
-                } else if *target == "awacy" {
+                } else if target == "awacy" {
                     "not theirs: they track anti-cheat behaviour"
                 } else {
                     "nothing to submit"
                 }));
             } else {
-                if *draftable {
+                if draftable {
                     let mut b = widget::button::standard("Draft");
                     if !self.busy() {
                         b = b.on_press(Message::Draft(target.to_string()));
@@ -875,11 +847,10 @@ impl App {
             col = col.push(widget::text::body(note.clone()));
         }
         if let Some(d) = &self.draft {
-            let label = TARGETS
-                .iter()
-                .find(|(t, _, _)| *t == d.target)
-                .map(|(_, l, _)| *l)
-                .unwrap_or(d.target.as_str());
+            let label = match target_label(&d.target) {
+                ("", _) => d.target.as_str(),
+                (l, _) => l,
+            };
             let mut actions = widget::Row::new()
                 .spacing(12)
                 .push(widget::button::standard("Copy text").on_press(Message::CopyDraft));
@@ -962,6 +933,7 @@ mod tests {
           "observations": [
             {
               "attributed_pct": 74.68,
+              "a_field_from_a_newer_gamebus": 1,
               "gpu_vendor": "amd",
               "layer_split": {"game": 74.16},
               "log": "beisl:run-1788635431",
@@ -1001,8 +973,18 @@ mod tests {
         assert_eq!(l.findings[0].key, "steam:1");
         let f = &l.findings[1];
         assert_eq!(f.display_title(), "WARDOGS Playtest");
-        assert_eq!(f.steam_appid.as_deref(), Some("4809930"));
-        assert_eq!(f.reported.get("gamedb").map(String::as_str), Some("2026-09-06"));
+        assert_eq!(f.record.steam_appid.as_deref(), Some("4809930"));
+        assert_eq!(
+            f.record.reported.get("gamedb").map(String::as_str),
+            Some("2026-09-06")
+        );
+        // The record round-trips through gamebus's own type: fields this window never
+        // reads are still parsed (layer_split is a real field there now), and a field
+        // NO build knows lands in the catch-all rather than failing the row.
+        assert!(f.record.observations[0].layer_split.is_some());
+        assert!(f.record.observations[0]
+            .extra
+            .contains_key("a_field_from_a_newer_gamebus"));
         // The rule that stays gamebus's: needs is read, never recomputed.
         assert!(f.needs("protondb") && f.needs("awacy") && !f.needs("gamedb"));
         assert_eq!(l.took, ["steam:4809930"]);
@@ -1013,7 +995,7 @@ mod tests {
     fn a_finding_with_no_needs_is_offered_nothing() {
         let l = parse_listing(LIST).unwrap();
         let f = &l.findings[0];
-        assert!(TARGETS.iter().all(|(t, _, _)| !f.needs(t)));
+        assert!(TARGETS.iter().all(|t| !f.needs(t)));
     }
 
     /// A gamebus-setup older than 0.4.0 ignores `--json` and prints its list. That must
@@ -1044,20 +1026,24 @@ mod tests {
     }
 
     /// beisl supplies a vendor and no device, and the window used to print "unknown GPU"
-    /// over a finding that knew perfectly well it ran on an AMD card.
+    /// over a finding that knew perfectly well it ran on an AMD card. Built through the
+    /// wire rather than a struct literal: `gamebus_coupler::Observation` has no
+    /// `Default`, and JSON is how one ever actually reaches this window.
     #[test]
     fn vendor_stands_in_for_a_missing_device() {
-        let vendor = Observation {
-            gpu_vendor: Some("amd".into()),
-            ..Observation::default()
+        let obs = |extra: serde_json::Value| -> Observation {
+            let mut base = serde_json::json!({"source": "beisl", "observed": "2026-09-05"});
+            let (b, e) = (base.as_object_mut().unwrap(), extra.as_object().unwrap().clone());
+            b.extend(e);
+            serde_json::from_value(base).expect("observation")
         };
-        assert_eq!(vendor.gpu_label(), "amd GPU");
-        let device = Observation {
-            gpu: Some("Radeon RX 6750 XT".into()),
-            gpu_vendor: Some("amd".into()),
-            ..Observation::default()
-        };
-        assert_eq!(device.gpu_label(), "Radeon RX 6750 XT");
-        assert_eq!(Observation::default().gpu_label(), "unknown GPU");
+        assert_eq!(gpu_label(&obs(serde_json::json!({"gpu_vendor": "amd"}))), "amd GPU");
+        assert_eq!(
+            gpu_label(&obs(serde_json::json!({
+                "gpu": "Radeon RX 6750 XT", "gpu_vendor": "amd"
+            }))),
+            "Radeon RX 6750 XT"
+        );
+        assert_eq!(gpu_label(&obs(serde_json::json!({}))), "unknown GPU");
     }
 }
