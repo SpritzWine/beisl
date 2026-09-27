@@ -46,10 +46,15 @@ serde_json = "1"
 # holds no second copy of them. serde-only by design: linking it brings no IO, no
 # network and no SQL into a binary that submits nothing.
 #
-# TEMPORARY path, pointing at the gamebus working tree while the crate is still
-# uncommitted there (deliberate: beisl integrates first, so the regressions surface
-# before it lands in history). Becomes a rev-pinned git dependency once committed.
-gamebus-coupler = { path = "/media/Data/Projekte/gamebus-presenced/gamebus-coupler" }
+# Pinned by rev, like libcosmic below: a tag can be moved, a rev cannot, and the
+# lockfile pinning is what keeps this workspace out of a poisoned release. This rev is
+# gamebus-presenced v0.5.0. github rather than the gitea remote, which is a LAN-only
+# address that would make this workspace unbuildable for anyone else.
+#
+# The coupler's build.rs compiles gamedb's stores.toml in, so the build needs that
+# submodule; cargo checks out submodules for a git dependency, which a vendored copy or
+# a bare path checkout would not.
+gamebus-coupler = { git = "https://github.com/fschaupp/gamebus-presenced.git", rev = "132cb5980aca261754ed51ca7786e0e68a630934" }
 # The client key that identifies this window to gamebus. Signing only: the key is
 # generated from /dev/urandom rather than pulling a rand stack, and hex is a handful of
 # lines here rather than another crate. Pinned, and audited on both sides of the change.

@@ -1875,6 +1875,7 @@ dependencies = [
 [[package]]
 name = "gamebus-coupler"
 version = "0.1.0"
+source = "git+https://github.com/fschaupp/gamebus-presenced.git?rev=132cb5980aca261754ed51ca7786e0e68a630934#132cb5980aca261754ed51ca7786e0e68a630934"
 dependencies = [
  "serde",
  "serde_json",
