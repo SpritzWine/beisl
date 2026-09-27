@@ -135,6 +135,10 @@ enum Message {
     InstallBundle,
     /// Install page: move on to the checklist (skip, or continue after installing).
     ShowChecks,
+    /// Open the gamebus review window with nothing selected. The standing way in:
+    /// `beisl-compat` also carries the identity misses, which exist whether or not any
+    /// game ever hit a wall, so it must be reachable without one.
+    OpenCompatReview,
     Recheck,
     FixAll,
     /// The optional GPU dump-access row's OWN button — a standing privilege change, always
@@ -442,6 +446,13 @@ impl Application for AppModel {
                     // Fresh detection — the install just changed what's on PATH.
                     self.checks = Self::detect_all(&self.trace_dir);
                     self.gpu_candidates = preflight::gpu::detect_candidates();
+                }
+            }
+            Message::OpenCompatReview => {
+                // Detached, like the session window's own hop: the review outlives this
+                // window. No --key, so it opens on the list rather than one finding.
+                if let Some(tool) = preflight::find_tool("beisl-compat") {
+                    let _ = std::process::Command::new(tool).spawn();
                 }
             }
             Message::Recheck => {
@@ -763,6 +774,16 @@ impl AppModel {
                     btn = btn.on_press(Message::EnableDumpCapture);
                 }
                 row = row.push(btn);
+            } else if c.id == CheckId::GamebusPresence
+                && preflight::find_tool("beisl-compat").is_some()
+                && preflight::find_tool("gamebus-setup").is_some()
+            {
+                // Shown whatever the row's status: the review window drives
+                // gamebus-setup, so what matters is that both tools are here, not
+                // whether the daemon happens to be running right now.
+                row = row.push(
+                    widget::button::standard("Review").on_press(Message::OpenCompatReview),
+                );
             } else if c.id == CheckId::SteamVisibleBeisl && !is_ok && c.fix.is_some() {
                 // Same opt-in stance for the /usr/bin launcher shim (no fix on immutable
                 // systems — the why carries the full-path fallback, so no button either).

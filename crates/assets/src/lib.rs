@@ -9,6 +9,12 @@ pub mod icons {
     pub const APP: &str = include_str!("../data/icons/icon-glass-pour.svg");
     /// Monochrome variant for tray/menu/symbolic contexts.
     pub const SYMBOLIC: &str = include_str!("../data/icons/icon-symbolic.svg");
+
+    /// Fallback for the details-pane toggle. The named `pane-show-symbolic` is
+    /// preferred and is what COSMIC's file manager uses; libcosmic resolves it through
+    /// the `Cosmic` theme, which inherits Pop. This copy covers a system where those
+    /// icons are absent.
+    pub const PANE_RIGHT: &[u8] = include_bytes!("../data/icons/pane-right-symbolic.svg");
 }
 
 /// The opt-in GPU dump-access rule pair (installed via pkexec by the caller — never

@@ -454,6 +454,19 @@ impl App {
         w.send(misses::Job::List);
     }
 
+    /// The top of the list as it is actually shown - same sort, same dismissed filter -
+    /// so the header button opens what the eye is on rather than an arbitrary row.
+    fn first_visible_miss(&self) -> Option<String> {
+        let out = self.mcp.as_ref()?.out.lock().ok()?;
+        let mut rows: Vec<&gamebus_coupler::MissRow> = out
+            .misses
+            .iter()
+            .filter(|r| self.show_dismissed || r.miss.dismissed.is_none())
+            .collect();
+        tui_order(&mut rows);
+        rows.first().map(|r| r.key.clone())
+    }
+
     /// One miss by key, from whatever the worker last fetched.
     fn miss(&self, key: &str) -> Option<gamebus_coupler::MissRow> {
         let w = self.mcp.as_ref()?;
@@ -742,7 +755,12 @@ impl Application for App {
             }
             Message::ShowDismissed(v) => self.show_dismissed = v,
             Message::Details(key) => {
-                if let Some(key) = key.or_else(|| self.details.clone()) {
+                // From a row: that row. From the header: whatever the pane last showed,
+                // or the top of the list, so the button always opens something.
+                let key = key
+                    .or_else(|| self.details.clone())
+                    .or_else(|| self.first_visible_miss());
+                if let Some(key) = key {
                     self.title_draft = self
                         .miss(&key)
                         .and_then(|r| r.miss.effective_title().map(str::to_string))
@@ -861,23 +879,37 @@ impl Application for App {
         )
     }
 
-    /// The pane's own toggle, where COSMIC's file manager keeps it. Always present on
-    /// the misses tab, so the pane can be reopened without hunting for the row it was
-    /// last on.
-    fn header_start(&self) -> Vec<Element<'_, Message>> {
-        if self.tab != Tab::Misses || self.details.is_none() {
+    /// The pane's own toggle, on the RIGHT of the header: the drawer comes in from
+    /// that side, so the control that summons it belongs there rather than opposite it.
+    /// Present for the whole tab, not only once a row has been opened, because it is
+    /// how the pane is found in the first place.
+    fn header_end(&self) -> Vec<Element<'_, Message>> {
+        if self.tab != Tab::Misses {
             return Vec::new();
         }
+        // `pane-show-symbolic` is what COSMIC's own file manager uses for this, and it
+        // is the name that actually resolves: libcosmic ignores the desktop's icon
+        // theme and looks in `Cosmic`, which inherits Pop then hicolor. The earlier
+        // `sidebar-show-right-symbolic` is an Adwaita name and is in none of those, so
+        // it drew an empty button on every desktop, not just this KDE one.
+        //
+        // Falling back to the embedded copy keeps the button legible where the Pop
+        // icons are not installed, which is also where half of libcosmic's own icons
+        // would be missing.
+        let named = widget::icon::from_name("pane-show-symbolic");
+        let mut handle = match named.clone().path() {
+            Some(_) => named.into(),
+            None => widget::icon::from_svg_bytes(assets::icons::PANE_RIGHT),
+        };
+        handle.symbolic = true;
         let showing = self.core.window.show_context;
-        vec![widget::button::icon(widget::icon::from_name(
-            "sidebar-show-right-symbolic",
-        ))
-        .on_press(if showing {
-            Message::CloseDetails
-        } else {
-            Message::Details(None)
-        })
-        .into()]
+        vec![widget::button::icon(handle)
+            .on_press(if showing {
+                Message::CloseDetails
+            } else {
+                Message::Details(None)
+            })
+            .into()]
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {

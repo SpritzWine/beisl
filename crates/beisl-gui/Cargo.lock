@@ -504,6 +504,7 @@ name = "beisl-gui"
 version = "0.1.0"
 dependencies = [
  "artifact",
+ "assets",
  "compat",
  "ed25519-dalek",
  "enumflags2",

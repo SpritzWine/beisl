@@ -29,6 +29,10 @@ path = "src/compat/main.rs"
 
 [dependencies]
 preflight = { path = "../preflight" }
+# Embedded icons. beisl-setup reaches them through preflight; beisl-compat needs the
+# details-pane glyph directly, because a named icon is theme-dependent and Breeze has
+# no sidebar-show-right-symbolic.
+assets = { path = "../assets" }
 session = { path = "../session" }
 # The results view binds to the exact same artifact the CLI produces — one analysis code
 # path, two front-ends (the window does no analysis of its own; it renders `TraceArtifact`
