@@ -8,8 +8,8 @@ anything, and changing what beisl installs does not mean editing every recipe.
 
 | target | what a recipe uses it for |
 |---|---|
-| `make fetch` | download both workspaces' dependencies (network) |
-| `make vendor` | the same, for a build that must then be offline |
+| `make fetch` | download both workspaces' dependencies (network). **Arch only** |
+| `make vendor` | the same, for a build that must then be offline. **Everything else** |
 | `make build generate` | compile, and render the man pages and desktop entries |
 | `make install DESTDIR=... PREFIX=/usr` | stage everything, in FHS layout |
 | `make check-packaging` | validate what a software centre and a linter read |
@@ -20,8 +20,29 @@ per line. The rpm spec feeds that to `%files -f`, so the package's file list
 anyone touching the spec. That replaced fifteen hand-maintained paths, which
 is exactly the kind of list that silently rots.
 
-What stays per-distro is only what genuinely differs: dependency names, the
-metadata syntax, and whether the build may touch the network.
+What stays per-distro is only what genuinely differs: dependency names and the
+metadata syntax.
+
+## Vendor by default; Arch is the exception
+
+**Every recipe but Arch builds airgapped**, from `make vendor`. Not because
+each distro demands it, but so the path most people's package is built on is
+the one that is proven to work without a network, with the dependency tree
+pinned by content rather than by a revision someone could move.
+
+**Arch keeps `make fetch` and builds online.** The AUR fetches sources per
+user build, and vendoring would hand every one of them a 71 MB tarball to
+produce an 18 MB program (measured 2026-10-10: 657 crates, 949 MB unpacked).
+Arch's own convention is `cargo fetch`, and an Arch user who hits a break
+there is equipped to diagnose it and file something useful. Owner's call,
+deliberately: the exception goes where the audience can absorb it.
+
+The cost of two paths is that they can diverge, and they already did once -
+`cargo vendor` dropped gamebus-coupler's store list while `cargo fetch` was
+fine, so the bug lived only in the path nobody ran (see the blocker above).
+Making the airgapped path the default is what keeps that from recurring: it
+is now the common path, not the rare one. A new recipe uses `make vendor`
+unless there is a reason in writing not to.
 
 | Path | For |
 |---|---|

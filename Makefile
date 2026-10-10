@@ -5,9 +5,11 @@
 #   make build      # just compile both workspaces (release)
 #   make clean      # remove dist/ only (cargo targets kept — cheap; incremental
 #                   #   rebuilds still pick up source changes on the current branch)
-#   make fetch      # download both workspaces' dependencies (needs network)
+#   make fetch      # download both workspaces' dependencies (needs network).
+#                   #   The Arch recipe's path, and only that one
 #   make vendor     # vendor them for an OFFLINE build, into vendor/ and
-#                   #   crates/beisl-gui/vendor/
+#                   #   crates/beisl-gui/vendor/. Every other distro's path, so
+#                   #   the common one is the one proven to need no network
 #   make install    # stage a system install into $(DESTDIR)$(PREFIX); set
 #                   #   MANIFEST=<file> to also write the list of installed paths
 #   make check-packaging
