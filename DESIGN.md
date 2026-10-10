@@ -366,6 +366,59 @@ Investigated against a real Flatpak Lutris install. The findings:
   `flatpak-spawn --host`), and symbol resolution must look under `/run/host` for
   host libraries.
 
+#### Agreed direction (2026-10-10): a Flatpak that sets up the host, plus the extension
+
+For a later feature branch; nothing here is built. Research behind it is in the
+vault (`Tasks/Flatpak - host setup app plus runtime extension`).
+
+What was ruled out first: the Flatpak as the launch wrapper. A host shim calling
+`flatpak run` starts the game inside beisl's sandbox, and the only way out,
+`flatpak-spawn --host`, hands the game the session helper's environment instead
+of the caller's and makes it a child of that helper rather than of the launch
+option. That breaks the unchanged-environment rule and takes the game out of
+Steam's process tree. The AppImage's "shim execs the package" does not transfer.
+
+What was agreed instead is two pieces that work together:
+
+- **`org.spritzwine.Beisl`, the Flatpak app, is the informed installer and the
+  GUI.** It carries the setup page, the trace library, the compat window and the
+  MCP server. It does not wrap games. What it does for wrapping is explain what
+  has to exist on the real filesystem - the `beisl` wrapper itself in
+  `~/.local/bin`, and a host that passes the perf checks - and then put it there
+  and verify it, step by step, as the user confirms each one. Opt-in throughout:
+  the same stance as the AppImage's setup page, and the reason dropping a binary
+  onto the host is acceptable here when unpacking the AppImage was not. Here it
+  is the only way a sandboxed app can give a host launcher something to run, and
+  it happens in front of the user rather than behind an install command.
+- **`org.freedesktop.Platform.VulkanLayer.beisl`, the runtime extension, covers
+  launchers that are themselves Flatpaks** (Steam, Lutris, Heroic). Their launch
+  options run inside their own sandbox, where neither a host `~/.local/bin` nor
+  `flatpak run` exists, so beisl has to be mounted in (see the findings above).
+  Recording there is the degraded child-tree mode.
+- **Interoperable by construction.** Both write the same trace directory and the
+  same `session.json`, which already survives the sandbox boundary, so a trace
+  recorded by the extension inside Flatpak Steam opens in the Flatpak GUI, and so
+  does one recorded by the host wrapper. The app should also recognise the other
+  two: tell the user when a Flatpak launcher is installed and the extension would
+  serve it, and when a host `beisl` is already present from a distro package or
+  an AppImage and nothing needs installing.
+
+Constraints the branch will have to respect:
+
+- **The binary placed on the host must be the portable build.** One compiled
+  inside the Flatpak SDK links the runtime's glibc, which can be newer than the
+  host's. It needs the same older-glibc build the AppImage and tarball need.
+- **Writing to `~/.local/bin` needs a way in**: a narrow `--filesystem` grant, or
+  the file-chooser portal so the user picks the folder and no static permission
+  is needed. Host checks and fixes need `--talk-name=org.freedesktop.Flatpak`,
+  which Flathub grants only with an explanation. "Inspect and fix the host's perf
+  setup, on request" is a far better case than a wrapper that escapes at once.
+- **Traces must live where the host wrapper writes them**
+  (`--filesystem=xdg-data/beisl:create`), not under `~/.var/app/...`.
+- **Shared with the AppImage work**: the record of what setup wrote and the
+  page that names and removes it, and the rule that a missing piece never stops
+  a game.
+
 ### AppImage (2026-07-11) — low-hanging fruit for single-file distribution
 
 Unlike Flatpak, AppImage is a natural fit: no sandbox means the wrapper semantics
@@ -389,16 +442,24 @@ binaries into `~/.local/bin`. That would use the format as a self-extracting
 archive, which is what the tarball's `beisl install` already is, and would throw
 away the one thing an AppImage is: a single file that is the application.
 
-- **One file, one stable place.** Installing from the AppImage puts the file
-  itself at a fixed location (`~/.local/lib/beisl/Beisl.AppImage`) and writes four
-  small shim scripts, `~/.local/bin/{beisl,beisl-setup,beisl-compat,beisl-mcp}`,
-  that exec it with the tool's name. The desktop entries point at the shims.
-  Updating is replacing one file; uninstalling is removing it and the shims.
+- **One file, wherever the user keeps it.** The AppImage is not copied or moved.
+  Setting up from it writes four small shim scripts,
+  `~/.local/bin/{beisl,beisl-setup,beisl-compat,beisl-mcp}`, each carrying the
+  AppImage's ACTUAL path (the runtime's `$APPIMAGE`) and exec-ing it with the
+  tool's name. The desktop entries point at the shims. Owner's correction to an
+  earlier draft that parked the file at a fixed location: where the file lives is
+  the user's business, and the shims are told, not the other way round.
+- **Setup rechecks the path every time it runs from an AppImage.** If the shims
+  name a different path than the one it was just started from - the file was
+  moved, renamed, or replaced by a newer download elsewhere - the setup page says
+  so and re-points them. A path that is still correct is confirmed, not rewritten.
 - **`AppRun` dispatches** on the invoked name first (the shims and any symlink),
   then on a leading `setup`/`compat`/`mcp` word, and hands everything else to the
   wrapper. Started with no arguments, as from a double-click, it opens
   `beisl-setup`.
-- **A missing AppImage must never stop a game.** The `beisl` shim, like the
+- **A missing AppImage must never stop a game.** Between two runs of setup the
+  recorded path can go stale, so the shim has to cope on its own. The `beisl`
+  shim, like the
   existing `/usr/bin/beisl` Steam shim it sits underneath, says on stderr that
   its target is gone and then runs the wrapped command untraced. The GUI shims
   fail with the expected path. Shims do NOT delete themselves: a script that
