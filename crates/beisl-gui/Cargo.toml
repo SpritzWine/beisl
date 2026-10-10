@@ -2,8 +2,9 @@
 #
 # Standalone crate with its OWN workspace + lockfile, excluded from the main Beisl
 # workspace so the heavy libcosmic/winit/wgpu tree never touches the light CLI/lib build
-# (mirrors the SpritzWine installer's split). Same pinned libcosmic rev + feature set as
-# the installer, a known-good windowed-app baseline.
+# (mirrors the SpritzWine installer's split). The libcosmic pin and feature set track
+# the installer's as a known-good windowed-app baseline; the rev comment below says
+# where the two currently stand.
 [package]
 name = "beisl-gui"
 # Deliberately not a real version: as a separate workspace this manifest can't inherit
@@ -58,7 +59,9 @@ gamebus-coupler = { git = "https://github.com/fschaupp/gamebus-presenced.git", r
 # The client key that identifies this window to gamebus. Signing only: the key is
 # generated from /dev/urandom rather than pulling a rand stack, and hex is a handful of
 # lines here rather than another crate. Pinned, and audited on both sides of the change.
-ed25519-dalek = "2.2.0"
+# 3.0 is the RustCrypto generation move (curve25519-dalek 5, signature 3, sha2 0.11):
+# same SigningKey/Signer/Verifier surface, same wire format, no rand_core feature.
+ed25519-dalek = "3.0.0"
 plotters-backend = "0.3"
 plotters = { version = "0.3", default-features = false, features = ["all_series", "all_elements"] }
 # BitFlags<Auto>::empty() for the Frosted Glass allow-mask (Core::set_auto_blur) — libcosmic
@@ -68,15 +71,22 @@ enumflags2 = "0.7.12"
 
 [dependencies.libcosmic]
 git = "https://github.com/pop-os/libcosmic.git"
-# libcosmic master 2026-09-04: 52 commits past the previous pin (0eef5911,
-# 2026-07-17), still no new release tag since COSMIC 1.3 (Frosted Glass). The
-# whole range was read before moving: nothing renames or drops the
-# widget/text/settings APIs used here, Core::set_auto_blur and BitFlags<Auto>
-# are untouched, Text became SelectableText without an API break (8a03f063),
-# and the iced submodule only picked up wayland/dnd/scrolling fixes. Pin
-# mirrors the SpritzWine installer's again: the two had silently drifted 88
-# commits apart, and both were moved here in one pass (2026-09-05).
-rev = "d4d71fd53e5ed6bd3a430089114dffa2da3cd498"
+# libcosmic master 2026-10-09: 48 commits past the previous pin (d4d71fd5,
+# 2026-09-04), still no release tag since COSMIC 1.3 (Frosted Glass). HEAD is a
+# docs-only commit on top of the 10-07 fix cluster, so it is a quiet point to
+# take. The whole range was read before moving: the feature names,
+# Core::set_auto_blur and BitFlags<Auto> are untouched and enumflags2 stays at
+# 0.7.12; the widgets used here (text, settings::section/item, button, toggler,
+# icon) keep their signatures, but ListItem/container/toggler styling and the
+# text_input selection colours changed (60ad2cc4, d880804b, f6be7b5f, ff7c7533),
+# so the settings pages want a look on screen. The iced submodule moved 19
+# commits (pop-os winit to rev 9567503 for touch window moves, accesskit bump,
+# Wayland popup-modifier and layer-surface keyboard fixes); the
+# ext-background-effect handler is unchanged. cctk moved to cosmic-protocols
+# c0cff4d (session-lock protocol, MIT relicense). Moved in the 2026-10-10
+# dependency pass for beisl only: the SpritzWine installer still sits on
+# d4d71fd5 and has to be moved separately to restore the shared baseline.
+rev = "dbc62f2d899cdbfbe43d170689ddc0290db663f4"
 default-features = false
 # "wayland" compiles iced-winit's Wayland layer incl. the ext-background-effect
 # handler — without it Frosted Glass can't render on ANY compositor (found 2026-07-19:
