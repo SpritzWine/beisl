@@ -7,9 +7,14 @@
 #                   #   rebuilds still pick up source changes on the current branch)
 #   make fetch      # download both workspaces' dependencies (needs network).
 #                   #   The Arch recipe's path, and only that one
-#   make vendor     # vendor them for an OFFLINE build, into vendor/ and
-#                   #   crates/beisl-gui/vendor/. Every other distro's path, so
-#                   #   the common one is the one proven to need no network
+#   make vendor     # one tarball that makes the build OFFLINE: unpacked over
+#                   #   the source it adds both workspaces' vendor/ and cargo
+#                   #   config. Every other distro's path, so the common one is
+#                   #   the one proven to need no network
+#   make sdist      # the source tarball that goes with it (git archive of HEAD)
+#   make srpm SPEC=packaging/<distro>/beisl.spec
+#                   # sdist + vendor wrapped as a source rpm; what COPR and OBS
+#                   #   build from, with the network off
 #   make install    # stage a system install into $(DESTDIR)$(PREFIX); set
 #                   #   MANIFEST=<file> to also write the list of installed paths
 #   make check-packaging
@@ -57,7 +62,7 @@ PREFIX  ?= /usr/local
 MANIFEST ?=
 
 .PHONY: all build build-cli build-gui man generate package install fetch vendor \
-        check-packaging clean distclean
+        sdist srpm check-packaging clean distclean
 
 all: package
 
@@ -135,10 +140,23 @@ fetch:
 # from a sibling submodule, outside its own package, so a vendored tree has to
 # have it restored or the build panics. Nothing is downloaded by that step.
 vendor:
-	cargo vendor --locked vendor > vendor-config.toml
-	cargo vendor --locked --manifest-path crates/beisl-gui/Cargo.toml \
-	    crates/beisl-gui/vendor > crates/beisl-gui/vendor-config.toml
-	packaging/cache-coupler-data.sh crates/beisl-gui/vendor
+	packaging/vendor.sh $(DIST)/$(BUNDLE)-vendor.tar.zst
+
+# HEAD, not the working tree: a source tarball has to be something a tag can
+# reproduce. Prefixed the way rpm's %autosetup and most recipes expect.
+sdist:
+	mkdir -p $(DIST)
+	git archive --format=tar.gz --prefix=$(BUNDLE)/ -o $(DIST)/$(BUNDLE).tar.gz HEAD
+	@echo "source: $(DIST)/$(BUNDLE).tar.gz"
+
+# The fetch-everything-first half of an airgapped build, as one artifact. The
+# rpm build that consumes it never needs the network. SPEC picks the distro's
+# metadata; the sources are the same two tarballs for all of them.
+SPEC ?= packaging/fedora/beisl.spec
+srpm: sdist vendor
+	rpmbuild -bs $(SPEC) \
+	    --define "_sourcedir $(abspath $(DIST))" \
+	    --define "_srcrpmdir $(abspath $(DIST))"
 
 # What a software centre and a packaging linter will read. Worth failing the
 # build over: a component a centre rejects is found before release this way,

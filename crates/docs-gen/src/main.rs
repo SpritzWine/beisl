@@ -115,15 +115,24 @@ mod tests {
     fn the_packaging_recipes_name_the_version_being_built() {
         let v = env!("CARGO_PKG_VERSION");
         let pkgbuild = include_str!("../../../packaging/arch/PKGBUILD");
-        let spec = include_str!("../../../packaging/opensuse/beisl.spec");
         assert!(
             pkgbuild.contains(&format!("pkgver={v}")),
             "PKGBUILD pkgver is not {v}"
         );
-        assert!(
-            spec.contains(&format!("Version:        {v}")),
-            "spec Version is not {v}"
-        );
+        for (name, spec) in [
+            (
+                "opensuse",
+                include_str!("../../../packaging/opensuse/beisl.spec"),
+            ),
+            (
+                "fedora",
+                include_str!("../../../packaging/fedora/beisl.spec"),
+            ),
+        ] {
+            assert!(
+                spec.contains(&format!("Version:        {v}")),
+                "{name} spec Version is not {v}"
+            );
+        }
     }
-
 }

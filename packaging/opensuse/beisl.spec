@@ -1,12 +1,19 @@
 #
 # spec file for package beisl
 #
-# Unlike the Arch recipe, OBS builds offline, so the dependencies cannot be
-# fetched during the build. beisl's GUI workspace pulls ~48 rev-pinned git
-# dependencies (libcosmic), and `cargo vendor` handles those - but it must run
-# for BOTH workspaces, since crates/beisl-gui is excluded from the main one and
-# carries its own lockfile. The _service file beside this spec does that.
+# OBS builds offline, so the crates are vendored (Source1) rather than fetched.
+# Both sources come from upstream's `make srpm SPEC=packaging/opensuse/beisl.spec`
+# (or `make sdist vendor` for the two tarballs alone); OBS's own cargo_vendor
+# service is not used, because it would miss the GUI workspace's separate
+# lockfile and the store list cargo vendor drops from gamebus-coupler.
 #
+# All build logic is upstream's Makefile; this file is metadata. See
+# packaging/README.md.
+#
+
+# cargo strips the release binaries itself, so there is no debuginfo to extract.
+%global debug_package %{nil}
+
 Name:           beisl
 Version:        0.3.0
 Release:        0
@@ -15,16 +22,17 @@ License:        LGPL-2.1-or-later
 Group:          Development/Tools/Debuggers
 URL:            https://codeberg.org/SpritzWine/beisl
 Source0:        %{name}-%{version}.tar.gz
-Source1:        vendor.tar.zst
-Source2:        cargo_config
+Source1:        %{name}-%{version}-vendor.tar.zst
 
 BuildRequires:  cargo >= 1.80
 BuildRequires:  rust >= 1.80
 BuildRequires:  make
+BuildRequires:  zstd
 BuildRequires:  pkgconfig(xkbcommon)
-# The AppStream component is validated at build time; a component a software
-# centre would reject is a packaging bug, not something to find after release.
-BuildRequires:  appstream-glib
+# make check-packaging: a component a software centre would reject is a
+# packaging bug worth failing the build over.
+BuildRequires:  AppStream
+BuildRequires:  desktop-file-utils
 
 Requires:       libxkbcommon0
 # perf does the CPU sampling. Without it beisl still records frametimes and says
@@ -44,24 +52,24 @@ rather than changing it. It also notices when a game cannot run at all, and
 hands the evidence to you to review and file upstream yourself.
 
 %prep
-%autosetup -a1
-mkdir -p .cargo
-cp %{SOURCE2} .cargo/config.toml
-# The GUI is its own workspace and needs the same vendored source replacement.
-mkdir -p crates/beisl-gui/.cargo
-cp %{SOURCE2} crates/beisl-gui/.cargo/config.toml
+%autosetup
+# Unpacked over the source: vendor/ and .cargo/config.toml for both workspaces.
+tar --zstd -xf %{SOURCE1}
 
 %build
-make build generate CLI_TARGET=target GUI_TARGET=crates/beisl-gui/target
+export CARGO_NET_OFFLINE=true
+make build generate
 
 %install
+export CARGO_NET_OFFLINE=true
 # MANIFEST makes upstream's install list the package's file list, so the two
 # cannot drift: a file added to `make install` ships without touching this spec.
 make install DESTDIR=%{buildroot} PREFIX=%{_prefix} \
     MANIFEST=%{_builddir}/beisl-filelist
 
 %check
-cargo test --workspace --offline
+export CARGO_NET_OFFLINE=true
+cargo test --workspace --locked
 make check-packaging
 
 %files -f %{_builddir}/beisl-filelist
