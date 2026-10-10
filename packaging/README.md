@@ -9,7 +9,9 @@ anything, and changing what beisl installs does not mean editing every recipe.
 | target | what a recipe uses it for |
 |---|---|
 | `make fetch` | download both workspaces' dependencies (network). **Arch only** |
-| `make vendor` | the same, for a build that must then be offline. **Everything else** |
+| `make vendor` | one tarball that makes the build offline. **Everything else** |
+| `make sdist` | the source tarball that goes with it (HEAD) |
+| `make srpm SPEC=...` | both, wrapped as a source rpm for COPR or OBS |
 | `make build generate` | compile, and render the man pages and desktop entries |
 | `make install DESTDIR=... PREFIX=/usr` | stage everything, in FHS layout |
 | `make check-packaging` | validate what a software centre and a linter read |
@@ -44,11 +46,44 @@ Making the airgapped path the default is what keeps that from recurring: it
 is now the common path, not the rare one. A new recipe uses `make vendor`
 unless there is a reason in writing not to.
 
-| Path | For |
-|---|---|
-| `arch/PKGBUILD` | Arch Linux / AUR |
-| `opensuse/beisl.spec`, `opensuse/_service` | openSUSE, via OBS |
-| `*.desktop` | **generated** by `make generate`, not committed |
+| Path | For | Builds |
+|---|---|---|
+| `arch/PKGBUILD` | Arch Linux / AUR | online (`make fetch`) |
+| `fedora/beisl.spec`, `/.copr/Makefile` | Fedora, via COPR | airgapped |
+| `opensuse/beisl.spec` | openSUSE, via OBS | airgapped |
+| `nix/package.nix` | Nix / NixOS | airgapped, **untested** |
+| `vendor.sh`, `cache-coupler-data.sh` | what `make vendor` runs | |
+| `*.desktop` | **generated** by `make generate`, not committed | |
+
+## An airgapped build is two tarballs
+
+`make vendor` writes `dist/beisl-<version>-vendor.tar.zst`. Unpacked over the
+source tree it adds a `vendor/` directory and a `.cargo/config.toml` for
+**both** workspaces, plus the one file cargo vendor drops (below). A recipe
+therefore needs no vendoring knowledge of its own:
+
+    unpack beisl-<version>.tar.gz
+    unpack beisl-<version>-vendor.tar.zst over it
+    CARGO_NET_OFFLINE=true make build generate
+    make install DESTDIR=... PREFIX=/usr
+
+Verified with the network actually gone, not merely unused: the Fedora source
+rpm rebuilds inside `unshare -n`, a namespace with no interfaces.
+
+- **COPR** uses its "make srpm" method. `/.copr/Makefile` runs `make srpm`
+  where COPR allows network, and the rpm is then built where it does not.
+- **OBS**: run `make srpm SPEC=packaging/opensuse/beisl.spec` and upload the
+  spec and the two tarballs. OBS's `cargo_vendor` service is deliberately not
+  used; it would miss the GUI's separate lockfile and the dropped file.
+- **Nix** fetches the same two artifacts as fixed-output sources, so it needs
+  two hashes rather than one per git dependency. It expects the vendor tarball
+  to be attached to the release, which no release does yet.
+
+Fedora means COPR here, not Fedora proper, for the reason COSMIC itself lives
+in one: libcosmic's git dependencies cannot be satisfied from crates.io
+packages. A submission to Fedora proper would need `bundled(crate(...))`
+provides and the combined licence of everything vendored, which the spec does
+not claim.
 
 ## Two workspaces, and one real blocker
 
@@ -70,13 +105,9 @@ a git submodule that a vendored tree does not have. Arch is unaffected, since
 `cargo fetch` does a real clone with submodules.
 
 The file is not missing, only unvendored: cargo's git checkout still has it,
-because cargo clones git dependencies with their submodules. So the vendor
-step caches it back, and the build then finds it without reaching for the
-network:
-
-    make vendor
-
-`make vendor` does both steps. The vendored crate sits at `vendor/gamebus-coupler/`, so the relative path its
+because cargo clones git dependencies with their submodules. So `make vendor`
+caches it back into the tarball, and the build then finds it without reaching
+for the network. The vendored crate sits at `vendor/gamebus-coupler/`, so the relative path its
 `build.rs` already uses resolves to `vendor/gamedb/stores.toml`. Verified: the
 whole GUI workspace then compiles with `--offline`. No upstream change needed
 to package today, and the script removes itself from the picture once the
