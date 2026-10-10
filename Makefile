@@ -17,6 +17,7 @@
 #                   #   build from, with the network off
 #   make install    # stage a system install into $(DESTDIR)$(PREFIX); set
 #                   #   MANIFEST=<file> to also write the list of installed paths
+#   make appimage   # stage with `make install` and wrap it as one runnable file
 #   make check-packaging
 #                   # validate what a software centre and a packager will read
 #
@@ -65,7 +66,7 @@ PREFIX  ?= /usr/local
 MANIFEST ?=
 
 .PHONY: all build build-cli build-gui man generate package install fetch vendor \
-        sdist srpm check-packaging clean distclean
+        sdist srpm appimage check-packaging clean distclean
 
 all: package
 
@@ -161,6 +162,23 @@ srpm: sdist vendor
 	rpmbuild -bs $(SPEC) \
 	    --define "_sourcedir $(abspath $(DIST))" \
 	    --define "_srcrpmdir $(abspath $(DIST))"
+
+# A shim over `make install` like every other recipe: the layout is staged the
+# same way, and packaging/appimage/build.sh adds only the format's own pieces.
+# It refuses to wrap binaries that need a newer glibc than GLIBC_MAX, because
+# those start only on systems at least as new as the build machine.
+#
+# The staging directory is NOT called APPDIR and is not overridable from the
+# environment. APPDIR is what the AppImage runtime exports, and a shell opened
+# from a terminal that is itself an AppImage inherits it: `rm -rf $(APPDIR)`
+# then points at that terminal's mount. Found the hard way; the mount being
+# read-only was the only thing that made it harmless.
+override BEISL_APPDIR := $(abspath $(DIST))/Beisl.AppDir
+appimage:
+	rm -rf $(BEISL_APPDIR)
+	$(MAKE) install DESTDIR=$(BEISL_APPDIR) PREFIX=/usr
+	packaging/appimage/build.sh $(BEISL_APPDIR) \
+	    $(abspath $(DIST))/Beisl-$(VERSION)-$(ARCH).AppImage $(abspath $(DIST))/tools
 
 # What a software centre and a packaging linter will read. Worth failing the
 # build over: a component a centre rejects is found before release this way,

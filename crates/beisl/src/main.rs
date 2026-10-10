@@ -44,8 +44,14 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Some("--check" | "--preflight" | "doctor") => return check::run(),
-        Some("install") => return install::run(false),
-        Some("uninstall") => return install::run(true),
+        // Everything except these two hands the environment on to a game or a tool,
+        // and the AppImage runtime's variables are not theirs to see. Install and
+        // uninstall are the two that need to know where the image is.
+        Some("install") => {
+            let relax = args.iter().any(|a| a == "--relax-permission-check");
+            return install::run(install::Action::Install { relax });
+        }
+        Some("uninstall") => return install::run(install::Action::Uninstall),
         Some("symbols") => {
             let Some(dir) = args.get(1) else {
                 eprintln!("beisl: usage: beisl symbols <trace-run-dir>");
@@ -54,6 +60,15 @@ fn main() -> ExitCode {
             return symbols::run(dir);
         }
         _ => {}
+    }
+
+    // The game's environment is the game's: started from its own AppImage, beisl
+    // carries the runtime's APPIMAGE/APPDIR/ARGV0/OWD, and nothing it spawns should.
+    // Only when they are provably beisl's. The same variables are inherited from a
+    // terminal that is an AppImage, and then they are part of the environment the
+    // user launched the game in: removing them would be changing it.
+    if preflight::appimage::running().is_some() {
+        preflight::appimage::strip_runtime_env();
     }
 
     let cmd = match parse_command(&args) {

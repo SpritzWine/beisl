@@ -92,6 +92,16 @@ pub mod steam_shim {
     pub const SHIM: &str = include_str!("../data/shim/beisl-steam-shim.sh");
 }
 
+/// What `beisl` and its siblings on PATH are when beisl runs from an AppImage:
+/// a script that hands over to that file, wherever the user keeps it. A template;
+/// `preflight::appimage` fills in the path, the tool name and the strictness.
+pub mod appimage_shim {
+    pub const TEMPLATE: &str = include_str!("../data/shim/beisl-appimage-shim.sh");
+    /// First-line-after-shebang marker, so setup can tell its own shims from a
+    /// copied binary or a stranger's script before it overwrites or trusts one.
+    pub const MARKER: &str = "# beisl-appimage-shim v1";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,6 +116,21 @@ mod tests {
         // The multi-user guarantee: the shim resolves $HOME at run time and must
         // never bake in the installing user's path.
         assert!(!steam_shim::SHIM.contains("/home/"));
+    }
+
+    #[test]
+    fn the_appimage_shim_template_has_its_placeholders_and_marker() {
+        let t = appimage_shim::TEMPLATE;
+        assert!(t.starts_with("#!/bin/sh\n"));
+        assert_eq!(
+            t.lines()
+                .nth(1)
+                .map(|l| l.starts_with(appimage_shim::MARKER)),
+            Some(true)
+        );
+        for hole in ["appimage='@APPIMAGE@'", "tool='@TOOL@'", "strict=@STRICT@"] {
+            assert_eq!(t.matches(hole).count(), 1, "{hole}");
+        }
     }
 
     /// A software centre shows the newest `<release>` as the current version, so a

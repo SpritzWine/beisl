@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 /// this const instead, via its existing `preflight` path dependency.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod appimage;
 pub mod config;
 pub mod debuginfo;
 pub mod gpu;
@@ -1122,11 +1123,20 @@ fn ok_or_fix(present: bool) -> Status {
     }
 }
 
-/// Locate a sibling tool: `PATH`, then `~/.local/bin`. A window opened from the app menu
-/// need not carry a login shell's PATH, and that is exactly where `beisl install` and
-/// `gamebus-setup apply install --target user` both put their binaries.
+/// Locate a sibling tool: beside this executable, then `PATH`, then `~/.local/bin`.
+///
+/// Beside first, because a tool shipped together with the one asking is the right
+/// version of it by construction - and inside a mounted AppImage it is the only
+/// place the others exist until setup has written the launchers. A window opened
+/// from the app menu need not carry a login shell's PATH, and `~/.local/bin` is
+/// exactly where `beisl install` and `gamebus-setup apply install --target user`
+/// both put their binaries.
 pub fn find_tool(bin: &str) -> Option<PathBuf> {
-    which(bin).or_else(|| {
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.join(bin)))
+        .filter(|cand| cand.is_file());
+    beside.or_else(|| which(bin)).or_else(|| {
         let cand = PathBuf::from(std::env::var_os("HOME")?)
             .join(".local/bin")
             .join(bin);

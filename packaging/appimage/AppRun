@@ -1,0 +1,42 @@
+#!/bin/sh
+# Entry point of the beisl AppImage: one file, four tools.
+#
+# Which tool runs is decided, in order, by
+#   1. the launchers setup writes, which pass --beisl-tool=<name> first;
+#   2. the name the image was invoked under (a symlink called beisl-setup, say);
+#   3. nothing at all, as from a double-click: the setup window;
+#   4. otherwise the wrapper, `beisl`, with every argument untouched - which is
+#      what `Beisl.AppImage %command%` in a game's launch options needs.
+#
+# Sets no PATH and no LD_LIBRARY_PATH, on purpose: the wrapper's environment
+# becomes the game's, and it has to arrive there unchanged. The runtime's own
+# variables (APPIMAGE, APPDIR, ARGV0, OWD) are removed by beisl itself before it
+# starts anything; setup needs them first, to know where the image is.
+#
+# Where this script is, not what $APPDIR says: that variable is inherited, and
+# run from a terminal that is itself an AppImage it names the terminal's mount.
+here=$(dirname "$(readlink -f "$0")")
+bin=$here/usr/bin
+
+case "${1:-}" in
+    --beisl-tool=*)
+        tool=${1#--beisl-tool=}
+        shift
+        ;;
+    *)
+        tool=$(basename "${ARGV0:-}")
+        ;;
+esac
+
+case "$tool" in
+    beisl | beisl-setup | beisl-compat | beisl-mcp) ;;
+    *)
+        if [ "$#" -eq 0 ]; then
+            tool=beisl-setup
+        else
+            tool=beisl
+        fi
+        ;;
+esac
+
+exec "$bin/$tool" "$@"
