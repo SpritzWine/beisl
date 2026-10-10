@@ -465,6 +465,35 @@ away the one thing an AppImage is: a single file that is the application.
   fail with the expected path. Shims do NOT delete themselves: a script that
   removes itself in the middle of a game launch is a surprise, and it would leave
   the desktop entries and icons behind anyway.
+- **Setup believes it is in an AppImage only when it can show it.** `$APPIMAGE`
+  is an environment variable and environment is inherited: a natively installed
+  `beisl-setup` started from a terminal or IDE that is itself an AppImage would
+  see that other program's path and point the shims at it. So the claim counts
+  only if setup's own executable lives inside the mounted `$APPDIR` AND that
+  AppDir carries beisl's AppStream component with beisl's id. This is where the
+  "is it really beisl's image" question is answered, because here the image is
+  already mounted and reading it costs nothing.
+- **At launch the shim checks little, and only what is cheap.** That the recorded
+  path is a regular, executable file and starts like an AppImage (the ELF magic,
+  and `AI\x02` at offset 8). Anything else, it says so and runs the game
+  untraced. It does NOT look inside the image for the AppStream files: they sit
+  in a compressed filesystem, and reading them at launch means either running
+  the very file being questioned or needing `unsquashfs` on every game start. It
+  also does not refuse on ownership or permissions; a hard refusal there was
+  judged too strict (owner, 2026-10-10). The magic check is a sanity check
+  against a stale path now holding some other file, not a defence: a hostile
+  AppImage has the same first bytes.
+- **Permissions are setup's business, with an escape hatch.** When it writes or
+  re-points the shims, setup looks at where the file is kept: owned by the user,
+  not writable by group or others, not in a directory others can write to, not
+  on removable or network media. What it finds is shown on the page, with why
+  it matters - a file others can replace runs as you on the next game launch.
+  The user can move the file, or tell setup to write the shims anyway. Informed,
+  then obeyed. The consequence is accepted knowingly: a file swapped by someone
+  else after setup ran is not noticed until setup runs again.
+- **No identity pin.** Recording the file's inode or digest and refusing a
+  changed file was considered and not taken; it would stop tracing after every
+  in-place update until setup was opened.
 - **The setup page says so.** When `beisl-setup` runs from an AppImage it tells
   the user that it is, what installing will write and where, and offers a way to
   remove all of it again. Owner's condition for the shim design: nothing lands on
