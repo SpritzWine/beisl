@@ -78,9 +78,10 @@ rpm rebuilds inside `unshare -n`, a namespace with no interfaces.
   used; it would miss the GUI's separate lockfile and the dropped file.
 - **Nix** fetches the same two artifacts as fixed-output sources, so it needs
   two hashes rather than one per git dependency. Built in a `nixos/nix`
-  container with the sandbox on and the network off, tests included, from the
-  local tarballs; its header shows how. The two hashes wait for the first
-  release that carries this packaging and the vendor tarball. Unchecked on a
+  container with the sandbox on, tests included, from the published release.
+  A version bump resets the two hashes and they are filled in again once that
+  release is out; the header shows how to build from local tarballs until
+  then. Unchecked on a
   real NixOS desktop: opening a window, whether a system-wide `beisl` is
   visible inside NixOS's Steam environment, and whether libcosmic's own icons
   render without a COSMIC icon theme.

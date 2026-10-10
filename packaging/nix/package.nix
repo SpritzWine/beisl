@@ -8,23 +8,22 @@
 # two GUI binaries carry the rpath below after Nix's own fixup, and every
 # library name embedded in them resolves to a file on it (checked by name, not
 # by opening a window); `beisl` and `beisl-mcp` keep the plain glibc rpath.
-# NOT verified: the two hashes, and opening a window on a NixOS desktop.
+# On the same day the recipe was built once more exactly as written below,
+# from the published 0.4.0 release, so both hashes are proven by a fetch.
+# NOT verified: opening a window on a NixOS desktop.
 #
-# The hashes stay lib.fakeHash because the published sources cannot be built
-# as named today: no release carries the vendor tarball yet, and the newest
-# tag predates the Makefile targets this calls. The first build with a real
-# release prints them. Until then, build from a checkout with the local
-# artifacts (`make sdist vendor` first), which is what the run above did;
-# prev.version keeps the file names right across a version bump:
+#   nix-build -E 'with import <nixpkgs> { }; callPackage ./packaging/nix/package.nix { }'
+#
+# The two hashes belong to the release `version` names. A version bump
+# (packaging/bump-version.sh) resets them to lib.fakeHash, and they are filled
+# in again once that release is published; the first build prints them. In
+# between, or to build a working tree, use the local artifacts
+# (`make sdist vendor` first). prev.version keeps the file names right:
 #
 #   (callPackage ./packaging/nix/package.nix { }).overrideAttrs (prev: {
 #     src = ./dist + "/beisl-${prev.version}.tar.gz";
 #     vendor = ./dist + "/beisl-${prev.version}-vendor.tar.zst";
 #   })
-#
-# Once a release carries both, with the hashes filled in:
-#
-#   nix-build -E 'with import <nixpkgs> { }; callPackage ./packaging/nix/package.nix { }'
 #
 # Deliberately not rustPlatform.buildRustPackage. beisl is two cargo workspaces
 # with two lockfiles, and the GUI one pins libcosmic's git dependencies, which
@@ -67,15 +66,15 @@ stdenv.mkDerivation (finalAttrs: {
     owner = "SpritzWine";
     repo = "beisl";
     rev = "v${finalAttrs.version}";
-    hash = lib.fakeHash; # fill in on the first build
+    hash = "sha256-UudSH1MktBDId2hvLCiXsOhFRSjWGDaXUrqa5NC3bY0=";
   };
 
-  # Published beside the release by upstream's `make vendor`. No release
-  # carries it yet; until one does, build it locally with `make vendor` and
-  # point this at the file (overrideAttrs, see the top of the file).
+  # Published beside the release by upstream's `make vendor`. For a version
+  # that is not released yet, build it locally with `make vendor` and point
+  # this at the file (overrideAttrs, see the top of the file).
   vendor = fetchurl {
     url = "https://codeberg.org/SpritzWine/beisl/releases/download/v${finalAttrs.version}/beisl-${finalAttrs.version}-vendor.tar.zst";
-    hash = lib.fakeHash; # fill in on the first build
+    hash = "sha256-WtEp2Izx1AF52T7zhHlg8rjaNNzUmjjBfKzD3qZCeRo=";
   };
 
   nativeBuildInputs = [

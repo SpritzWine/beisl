@@ -19,7 +19,7 @@ optdepends=('perf: CPU sampling, without which only frametimes are recorded'
             'gamebus-presenced: resolves game names, and houses compat findings')
 makedepends=('cargo' 'git' 'appstream' 'desktop-file-utils')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('c63289d892a9c787bf7c6c00a2dc162040e8178570b40e3138c39660de8840a8')
 
 prepare() {
   cd "$pkgname"
