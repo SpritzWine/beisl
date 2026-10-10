@@ -1,3 +1,116 @@
+# beisl 0.4.0
+
+The Packaging release: beisl stops being only a tarball with its own
+installer. It is an AppStream component a software centre can list, it has a
+build a distro can call, and it ships as an AppImage that stays the app
+instead of unpacking itself. Meanwhile beisl-compat learns the second half of
+gamebus: the launches it could not name.
+
+## New
+
+- **An AppImage that stays the app.** One file, kept wherever you like.
+  Nothing is copied out of it: `beisl install`, run from the AppImage (or the
+  setup window, which is what a double-click opens), writes four small
+  launchers into `~/.local/bin` that hand over to the file at its actual
+  path, plus the menu entries, icons, man pages and metainfo. Steam's
+  `beisl %command%` and an MCP client's `beisl-mcp` then work as for any
+  other install. Move or replace the file, open it once, and the launchers
+  follow.
+- **Launchers that check before they execute.** A launcher is a place someone
+  could redirect, so it verifies its target first: still there, still an
+  AppImage, owned by you, and neither the file nor any directory above it
+  writable by anyone else. If not, it says which, and `beisl <game>` starts
+  the game untraced, because a missing profiler must never stop a game.
+  `beisl install` refuses such a location with the reasons;
+  `--relax-permission-check` keeps the file there anyway and writes that
+  choice into the launchers, where it can be read.
+- **The setup page says it runs from an AppImage.** Started from one,
+  beisl-setup names the file, lists what setting up writes and where, shows
+  what is wrong with where the file is kept, and removes all of it again
+  from the same page, leaving the AppImage alone. It rechecks on every start
+  and steps aside for the checklist when the setup still holds.
+- **Identity misses in beisl-compat.** The window gains a second tab beside
+  the findings: the launches gamebus could not name authoritatively, with
+  their store, codename and review state. Dismiss, restore, promote to umu
+  and take back need no typing; a details pane folds in from the side for
+  the corrections that do (a title, a store). It talks to gamebus's own MCP
+  server, and which stores a picker may offer or whether a pick clears an
+  override stays gamebus's answer, not a copy of its rule.
+- **A second party for gamebus's ledger.** beisl-compat identifies itself to
+  gamebus with its own Ed25519 key (created 0600 beside beisl's config,
+  never in a trace dir), remembers the ledger head, and asks on the next
+  connection whether that head is still in the chain. A reset ledger and an
+  ordinary edit say nothing; only a head that vanished from its own chain is
+  an alarm. The key is enrolled at the first edit, not on connect: someone
+  who only looks is not registered.
+- **A way in without a wall.** The gamebus row on the setup checklist grows
+  a *Review* button whenever both tools are installed, since identity misses
+  exist whether or not a game ever failed to run.
+- **One listing in a software centre.** beisl is now an AppStream component,
+  `org.spritzwine.Beisl`: a centre lists it once while the app menu keeps its
+  separate entries. Screenshots are still missing, so no store lists it yet.
+- **A build a packager can call.** `make install DESTDIR=... PREFIX=/usr`
+  stages the FHS layout and can write a manifest of every installed path, so
+  a package's file list cannot drift from upstream's. Recipes for Arch,
+  Fedora (COPR), openSUSE (OBS) and Nix live in `packaging/`; each is
+  metadata over the Makefile and holds no build logic of its own. They are
+  recipes: no distro package is published.
+- **Airgapped by default.** Everything but Arch builds with the network off
+  from two tarballs: the source, and `make vendor`'s, which carries both
+  cargo workspaces' dependencies. Arch fetches online, the written exception.
+  The Fedora source rpm was rebuilt in a namespace with no network
+  interfaces, and the Nix recipe in its sandbox, tests included.
+- **More on the release page.** Beside the bundle (`beisl-<v>-<arch>.tar.gz`)
+  a release now carries `Beisl-<v>-<arch>.AppImage`, the source as
+  `beisl-<v>.tar.gz` and the dependencies as `beisl-<v>-vendor.tar.zst`,
+  all in `SHA256SUMS`.
+
+## Fixed
+
+- **Releases start on older distros.** The release is now built on Debian 12
+  instead of a moving base: the binaries need glibc 2.35 at most and start
+  on Ubuntu 22.04 and Debian 12, where earlier releases did not.
+  `make appimage` refuses anything above the ceiling, so moving the build
+  image forward fails the release rather than quietly shrinking who can run
+  it.
+- **beisl-compat reads gamebus's answer, not its files.** The findings come
+  from `gamebus-setup compat --json` instead of gamebus's private stash
+  file, and the drain, the scan tally and the drafts are no longer read out
+  of human prose. A finding shows the GPU vendor beisl recorded where it
+  used to read "unknown GPU", and a draft lists the facts it still needs
+  before filing.
+- **A refusal shows its reason.** When gamebus refuses something, the window
+  shows why, not only the closing "Nothing was written."
+- **NixOS hosts.** Preflight finds Vulkan ICD manifests under
+  `/run/opengl-driver`, and no longer offers `setcap` on a perf binary in
+  the read-only store, where it cannot work; the sysctl is offered instead.
+- `make clean` no longer deletes the tracked recipes in `packaging/`.
+
+## Heads-up
+
+- **The recipes wait for this release.** The PKGBUILD checksum and the two
+  Nix hashes can only be filled in from published 0.4.0 tarballs, so they
+  are placeholders until then. Nothing has opened a window on a NixOS
+  desktop yet.
+- **The AppImage's untested corners.** A full Steam session through a
+  launcher, and a host that has only `fusermount3`, have not been run.
+  Signed releases checked by the launcher are planned, not built. The image
+  is x86_64 and bundles nothing: the windows need the host's libxkbcommon.
+- **Flatpak is designed, not built.** `DESIGN.md` says what it will be and
+  why it cannot be the game wrapper.
+
+## Compatibility
+
+- beisl-compat needs `gamebus-setup` from gamebus-presenced 0.4.0 or newer
+  for `compat --json`; an older one is reported as version skew, never as an
+  empty stash. The identity-misses tab is built against gamebus-presenced
+  0.5.0.
+- The trace format did not move: `artifact.json` stays schema v1 and the MCP
+  surface is unchanged. An existing tarball install keeps working and
+  updates the same way, `./beisl install` from the new bundle.
+
+---
+
 # beisl 0.3.0
 
 The Compat-Finding release: traces now know when a game hits a wall, the
