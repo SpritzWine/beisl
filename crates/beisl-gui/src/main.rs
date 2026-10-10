@@ -133,6 +133,12 @@ enum Page {
 enum Message {
     /// Install page: run `<payload>/beisl install` on the worker.
     InstallBundle,
+    /// AppImage page: keep the file where it is although others could replace it.
+    AppImageRelax(bool),
+    /// AppImage page: take back everything setup wrote (`beisl uninstall`).
+    AppImageRemove,
+    /// Back to the install/AppImage page from the checklist.
+    ShowInstall,
     /// Install page: move on to the checklist (skip, or continue after installing).
     ShowChecks,
     /// Open the gamebus review window with nothing selected. The standing way in:
@@ -196,6 +202,13 @@ struct AppModel {
     payload: Option<PathBuf>,
     /// `~/.local/bin/beisl` already existed at startup — wording flips to "Update".
     had_install: bool,
+    /// Set when this window runs from beisl's own AppImage. Recomputed whenever a
+    /// worker finishes, and on every start: that is the recheck that follows a
+    /// file the user moved or replaced.
+    appimage: Option<AppImageSetup>,
+    /// The user's "keep it here" on the AppImage page. Only sent along when there
+    /// is something to relax.
+    appimage_relax: bool,
     install_worker: Option<Arc<Mutex<Shared>>>,
     /// The install worker ran to completion (successfully or not) at least once.
     install_done: bool,
@@ -245,6 +258,44 @@ fn detect_bundle() -> Option<PathBuf> {
     match (dir.canonicalize(), bin_dir().canonicalize()) {
         (Ok(a), Ok(b)) if a == b => None,
         _ => Some(dir),
+    }
+}
+
+/// What setup knows when this window runs from beisl's AppImage: which file, what
+/// is wrong with where it is kept, and what the launcher in `~/.local/bin`
+/// currently says. All three come from `preflight::appimage`, so the page and
+/// `beisl install` cannot disagree.
+struct AppImageSetup {
+    image: preflight::appimage::Running,
+    issues: Vec<preflight::appimage::Issue>,
+    launcher: preflight::appimage::Shim,
+}
+
+impl AppImageSetup {
+    fn detect() -> Option<Self> {
+        let image = preflight::appimage::running()?;
+        Some(Self {
+            issues: preflight::appimage::inspect(&image.appimage),
+            launcher: preflight::appimage::read_shim(&bin_dir().join("beisl")),
+            image,
+        })
+    }
+
+    /// Something about the location that a strict launcher refuses at game start.
+    fn blocked(&self) -> bool {
+        self.issues.iter().any(|i| i.blocks_strict_shim())
+    }
+
+    /// Whether the page has something to tell the user before the checklist:
+    /// anything other than "set up, pointing here, and it will run".
+    fn needs_attention(&self) -> bool {
+        use preflight::appimage::Shim;
+        match &self.launcher {
+            Shim::Points { appimage, strict } => {
+                *appimage != self.image.appimage || (*strict && self.blocked())
+            }
+            Shim::Absent | Shim::Other => true,
+        }
     }
 }
 
@@ -392,16 +443,23 @@ impl Application for AppModel {
         // (see `Message::SetFrostedBackground`) — otherwise a saved "off" would frost again
         // on every restart until the user re-touched the toggle.
         core.set_auto_blur(auto_blur_mask(config.frosted_background));
+        let appimage = AppImageSetup::detect();
         let app = AppModel {
             core,
             distro: detect_distro(),
             system: detect_system_kind(),
-            page: if flags.payload.is_some() {
-                Page::Install
-            } else {
-                Page::Checks
+            // From an AppImage the page is shown when there is something to say:
+            // not set up, pointing somewhere else, or about to be refused at launch.
+            // A setup that is still correct goes straight to the checklist.
+            page: match &appimage {
+                Some(a) if a.needs_attention() => Page::Install,
+                Some(_) => Page::Checks,
+                None if flags.payload.is_some() => Page::Install,
+                None => Page::Checks,
             },
             had_install: bin_dir().join("beisl").is_file(),
+            appimage,
+            appimage_relax: false,
             payload: flags.payload,
             install_worker: None,
             install_done: false,
@@ -431,11 +489,36 @@ impl Application for AppModel {
                         self.log.clear();
                         self.error = None;
                         self.install_done = false;
+                        let mut cmd = vec![p.join("beisl").display().to_string(), "install".into()];
+                        if self.appimage_relax
+                            && self.appimage.as_ref().is_some_and(|a| a.blocked())
+                        {
+                            cmd.push("--relax-permission-check".into());
+                        }
+                        self.install_worker = Some(spawn_fixer(vec![cmd]));
+                    }
+                }
+            }
+            Message::AppImageRelax(v) => self.appimage_relax = v,
+            Message::AppImageRemove => {
+                if !self.running() {
+                    if let Some(p) = &self.payload {
+                        self.log.clear();
+                        self.error = None;
+                        self.install_done = false;
                         self.install_worker = Some(spawn_fixer(vec![vec![
                             p.join("beisl").display().to_string(),
-                            "install".into(),
+                            "uninstall".into(),
                         ]]));
                     }
+                }
+            }
+            Message::ShowInstall => {
+                if !self.running() {
+                    self.page = Page::Install;
+                    self.log.clear();
+                    self.error = None;
+                    self.install_done = false;
                 }
             }
             Message::ShowChecks => {
@@ -626,6 +709,8 @@ impl Application for AppModel {
                         self.install_worker = None;
                         self.install_done = true;
                         self.error = error;
+                        self.appimage = AppImageSetup::detect();
+                        self.had_install = bin_dir().join("beisl").is_file();
                     }
                 }
                 if let Some((w, becomes)) = self.dump_worker.clone() {
@@ -712,6 +797,24 @@ impl AppModel {
                 self.trace_dir.display()
             )));
 
+        // Running from an AppImage is said on this page too, with the way back to
+        // where it is set up and removed: nothing beisl wrote should be more than
+        // one click from being named and taken back.
+        if let Some(a) = &self.appimage {
+            content = content.push(
+                widget::Row::new()
+                    .spacing(12)
+                    .push(widget::text::caption(format!(
+                        "Running from an AppImage: {}",
+                        a.image.appimage.display()
+                    )))
+                    .push(widget::Space::new().width(Length::Fill))
+                    .push(
+                        widget::button::standard("AppImage setup").on_press(Message::ShowInstall),
+                    ),
+            );
+        }
+
         // ostree systems layer fixes with rpm-ostree — they apply after a reboot.
         if self.system == SystemKind::OstreeAtomic {
             content = content.push(widget::text::caption(ostree_install_note()));
@@ -781,9 +884,8 @@ impl AppModel {
                 // Shown whatever the row's status: the review window drives
                 // gamebus-setup, so what matters is that both tools are here, not
                 // whether the daemon happens to be running right now.
-                row = row.push(
-                    widget::button::standard("Review").on_press(Message::OpenCompatReview),
-                );
+                row = row
+                    .push(widget::button::standard("Review").on_press(Message::OpenCompatReview));
             } else if c.id == CheckId::SteamVisibleBeisl && !is_ok && c.fix.is_some() {
                 // Same opt-in stance for the /usr/bin launcher shim (no fix on immutable
                 // systems — the why carries the full-path fallback, so no button either).
@@ -854,7 +956,140 @@ impl AppModel {
     /// The install page — the SpritzWine installer wizard collapsed to one page: offer,
     /// streamed `beisl install` log, then hand over to the checklist. Only reachable when
     /// launched from an extracted dist tree (see `detect_bundle`).
+    /// The install page's AppImage form. The owner's condition for writing anything
+    /// to the system from an AppImage: this page says that it is one, names what
+    /// setting up writes and where, shows what it thinks of where the file is kept,
+    /// and takes all of it back again from the same place.
+    fn appimage_page<'a>(&'a self, a: &'a AppImageSetup) -> Element<'a, Message> {
+        use preflight::appimage::Shim;
+        let here = a.image.appimage.display().to_string();
+        let mut col = widget::Column::new()
+            .spacing(14)
+            .push(widget::text::title1("Beisl runs from an AppImage"))
+            .push(widget::text::body(format!(
+                "This window was started from {here}. Nothing is copied out of it: the \
+                 file stays where you keep it, and it is the application."
+            )));
+
+        let state = match &a.launcher {
+            Shim::Absent => "Not set up yet.".to_string(),
+            Shim::Other => "~/.local/bin/beisl is a copied install, not a launcher for this \
+                            file. Setting up replaces it."
+                .to_string(),
+            Shim::Points { appimage, .. } if *appimage != a.image.appimage => format!(
+                "The launchers point at {}, which {}. Setting up points them at this file.",
+                appimage.display(),
+                if appimage.is_file() {
+                    "is not the file this window was started from"
+                } else {
+                    "no longer exists"
+                }
+            ),
+            Shim::Points { strict: false, .. } => {
+                "Set up, with the permission check relaxed at your request.".to_string()
+            }
+            Shim::Points { .. } if a.blocked() => {
+                "Set up, but the launchers will refuse this file as it is kept now (see below) \
+                 and start games untraced."
+                    .to_string()
+            }
+            Shim::Points { .. } => "Set up. The launchers point at this file.".to_string(),
+        };
+        col = col.push(widget::text::body(state));
+
+        col = col.push(
+            widget::settings::section()
+                .title("What setting up writes")
+                .add(widget::text::body(
+                    "Four small launchers in ~/.local/bin (beisl, beisl-setup, beisl-compat, \
+                     beisl-mcp) that hand over to this file, so `beisl %command%` works in a \
+                     game's launch options. App menu entries, icons and man pages.",
+                ))
+                .add(widget::text::caption(
+                    "If you move or replace the AppImage, open it once and the launchers are \
+                     pointed at it again. If it is missing when a game starts, the game \
+                     starts anyway, untraced. Remove takes all of this back and leaves the \
+                     AppImage itself alone.",
+                )),
+        );
+
+        if !a.issues.is_empty() {
+            let mut kept = widget::settings::section().title("Where the file is kept");
+            for issue in &a.issues {
+                kept = kept.add(widget::text::body(issue.explain()));
+            }
+            if a.blocked() {
+                kept = kept
+                    .add(widget::text::caption(
+                        "A file others can replace would run as you the next time a game \
+                         starts, so the launchers refuse it. Move the AppImage somewhere only \
+                         you can write and open it again, or keep it here and say so.",
+                    ))
+                    .add(
+                        widget::toggler(self.appimage_relax)
+                            .label("Keep it here and relax the check".to_string())
+                            .on_toggle(Message::AppImageRelax),
+                    );
+            }
+            col = col.push(kept);
+        }
+
+        if self.running() || !self.log.is_empty() {
+            let mut logcol = widget::Column::new().spacing(2);
+            for line in &self.log {
+                logcol = logcol.push(widget::text::monotext(line.clone()));
+            }
+            col = col.push(logcol);
+        }
+        if let Some(e) = &self.error {
+            col = col.push(widget::text::body(format!("Something went wrong: {e}")));
+        }
+
+        let ours = matches!(a.launcher, Shim::Points { .. });
+        let verb = match &a.launcher {
+            Shim::Points { appimage, .. } if *appimage == a.image.appimage => "Set up again",
+            Shim::Points { .. } => "Point the launchers here",
+            _ => "Set up",
+        };
+        let idle = !self.running();
+        let mut remove = widget::button::destructive("Remove");
+        let mut back = widget::button::standard(if a.needs_attention() {
+            "Skip"
+        } else {
+            "Check prerequisites"
+        });
+        let mut setup = widget::button::suggested(verb);
+        if idle {
+            remove = remove.on_press(Message::AppImageRemove);
+            back = back.on_press(Message::ShowChecks);
+            if !a.blocked() || self.appimage_relax {
+                setup = setup.on_press(Message::InstallBundle);
+            }
+        }
+        let mut buttons = widget::Row::new().spacing(8);
+        if ours {
+            buttons = buttons.push(remove);
+        }
+        buttons = buttons
+            .push(widget::Space::new().width(Length::Fill))
+            .push(back)
+            .push(setup);
+
+        widget::Column::new()
+            .spacing(14)
+            .push(
+                widget::scrollable(col)
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            )
+            .push(buttons)
+            .into()
+    }
+
     fn install_page(&self) -> Element<'_, Message> {
+        if let Some(a) = &self.appimage {
+            return self.appimage_page(a);
+        }
         let verb = if self.had_install {
             "Update"
         } else {
@@ -1234,4 +1469,51 @@ fn main() -> cosmic::iced::Result {
     };
     let settings = Settings::default().size(cosmic::iced::Size::new(640.0, 640.0));
     cosmic::app::run::<AppModel>(settings, flags)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use preflight::appimage::{Issue, Running, Shim};
+
+    fn setup(launcher: Shim, issues: Vec<Issue>) -> AppImageSetup {
+        AppImageSetup {
+            image: Running {
+                appimage: "/home/u/Apps/Beisl.AppImage".into(),
+                appdir: "/tmp/.mount_x".into(),
+            },
+            issues,
+            launcher,
+        }
+    }
+
+    fn points(path: &str, strict: bool) -> Shim {
+        Shim::Points {
+            appimage: path.into(),
+            strict,
+        }
+    }
+
+    /// The recheck on every start: the page comes up exactly when there is
+    /// something to say, and stays out of the way when the setup still holds.
+    #[test]
+    fn the_appimage_page_opens_only_when_setup_needs_a_word() {
+        let here = "/home/u/Apps/Beisl.AppImage";
+        let writable = || vec![Issue::WritableByOthers];
+
+        assert!(setup(Shim::Absent, vec![]).needs_attention());
+        // A copied tarball install sits where the launcher would go.
+        assert!(setup(Shim::Other, vec![]).needs_attention());
+        // Moved, renamed, or a newer download somewhere else.
+        assert!(setup(points("/home/u/Downloads/Beisl.AppImage", true), vec![]).needs_attention());
+
+        assert!(!setup(points(here, true), vec![]).needs_attention());
+        // A strict launcher would refuse this file at the next game start.
+        assert!(setup(points(here, true), writable()).needs_attention());
+        // The user already said to keep it there: nothing new to tell them.
+        assert!(!setup(points(here, false), writable()).needs_attention());
+        // Advisory only; the launcher does not refuse over it.
+        let usb = vec![Issue::ForeignMedia("a removable disk".into())];
+        assert!(!setup(points(here, true), usb).needs_attention());
+    }
 }

@@ -145,7 +145,11 @@ fn str_of(v: &serde_json::Value, key: &str) -> Option<String> {
 fn strs_of(v: &serde_json::Value, key: &str) -> Vec<String> {
     v.get(key)
         .and_then(|x| x.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -225,7 +229,10 @@ fn parse_scan(out: &str) -> Result<Scan, String> {
     Ok(Scan {
         recorded: strs_of(&v, "recorded"),
         skipped: strs_of(&v, "skipped"),
-        truncated: v.get("truncated").and_then(|t| t.as_bool()).unwrap_or(false),
+        truncated: v
+            .get("truncated")
+            .and_then(|t| t.as_bool())
+            .unwrap_or(false),
     })
 }
 
@@ -509,7 +516,9 @@ impl App {
         let provenance = if m.title_override.is_some() {
             "set by you".to_string()
         } else {
-            m.title_source.clone().unwrap_or_else(|| "unresolved".into())
+            m.title_source
+                .clone()
+                .unwrap_or_else(|| "unresolved".into())
         };
         facts = facts.add(fact("Title from", provenance));
 
@@ -525,9 +534,9 @@ impl App {
                     .on_submit(|_| Message::SaveTitle),
             )
             .push(
-                widget::Row::new().spacing(8).push(
-                    widget::button::suggested("Save title").on_press(Message::SaveTitle),
-                ),
+                widget::Row::new()
+                    .spacing(8)
+                    .push(widget::button::suggested("Save title").on_press(Message::SaveTitle)),
             );
 
         // The ids and their order are gamebus's (by how often the upstream database
@@ -663,7 +672,8 @@ impl App {
                         })
                     }
                     Ok(None) => {
-                        self.note = Some(format!("gamebus-setup had nothing to draft for {target}."))
+                        self.note =
+                            Some(format!("gamebus-setup had nothing to draft for {target}."))
                     }
                     Err(e) => self.note = Some(json_failure(&e, &err, ok)),
                 }
@@ -865,11 +875,7 @@ impl Application for App {
 
     fn context_drawer(&self) -> Option<cosmic::app::context_drawer::ContextDrawer<'_, Message>> {
         let row = self.details.as_ref().and_then(|k| self.miss(k))?;
-        let title = row
-            .miss
-            .effective_title()
-            .unwrap_or(&row.key)
-            .to_string();
+        let title = row.miss.effective_title().unwrap_or(&row.key).to_string();
         Some(
             cosmic::app::context_drawer::context_drawer(
                 self.details_pane(&row),
@@ -931,9 +937,10 @@ impl Application for App {
                             .push(tab_button("Identity misses", Tab::Misses, self.tab)),
                     )
                     .push(
-                        widget::scrollable(widget::container(content).padding(
-                            cosmic::iced::Padding::from([0, 14, 0, 0]),
-                        ))
+                        widget::scrollable(
+                            widget::container(content)
+                                .padding(cosmic::iced::Padding::from([0, 14, 0, 0])),
+                        )
                         .width(Length::Fill)
                         .height(Length::Fill),
                     ),
@@ -1070,11 +1077,7 @@ impl App {
                     )
                 })
                 .unwrap_or_default();
-            let pending: Vec<&str> = TARGETS
-                .iter()
-                .copied()
-                .filter(|t| f.needs(t))
-                .collect();
+            let pending: Vec<&str> = TARGETS.iter().copied().filter(|t| f.needs(t)).collect();
             let mut item = widget::Column::new()
                 .spacing(4)
                 .push(head)
@@ -1118,7 +1121,9 @@ impl App {
         }
 
         let Some(w) = &self.mcp else {
-            return col.push(widget::text::caption("Connecting to gamebus...")).into();
+            return col
+                .push(widget::text::caption("Connecting to gamebus..."))
+                .into();
         };
         let out = w.out.lock().unwrap();
 
@@ -1186,8 +1191,7 @@ impl App {
                     .on_press(Message::Details(Some(row.key.clone()))),
             );
             actions = actions.push(
-                widget::button::standard(label)
-                    .on_press(Message::MissVerb(row.key.clone(), verb)),
+                widget::button::standard(label).on_press(Message::MissVerb(row.key.clone(), verb)),
             );
             // Promotion is a umu-database act, so it is offered only where it means
             // something: a launcher launch that never went through umu has nothing to
@@ -1199,8 +1203,7 @@ impl App {
                     ("Promote to umu", "promote")
                 };
                 actions = actions.push(
-                    widget::button::text(label)
-                        .on_press(Message::MissVerb(row.key.clone(), verb)),
+                    widget::button::text(label).on_press(Message::MissVerb(row.key.clone(), verb)),
                 );
             }
             let item = widget::Column::new()
@@ -1238,7 +1241,10 @@ impl App {
 
         let wall = widget::Column::new()
             .spacing(6)
-            .push(widget::text::body(format!("Wall: {}", f.record.wall.as_str())))
+            .push(widget::text::body(format!(
+                "Wall: {}",
+                f.record.wall.as_str()
+            )))
             .push(widget::text::caption(explanation(f.record.wall.as_str())));
         col = col.push(widget::settings::section().title("What happened").add(wall));
 
@@ -1472,7 +1478,10 @@ mod tests {
 
     #[test]
     fn scan_and_report_shapes() {
-        let s = parse_scan(r#"{"recorded":["steam:7"],"skipped":["a wall with no key"],"truncated":true}"#).unwrap();
+        let s = parse_scan(
+            r#"{"recorded":["steam:7"],"skipped":["a wall with no key"],"truncated":true}"#,
+        )
+        .unwrap();
         assert_eq!(s.recorded, ["steam:7"]);
         assert_eq!(s.skipped, ["a wall with no key"]);
         assert!(s.truncated);
@@ -1521,7 +1530,10 @@ mod tests {
             order,
             [
                 // newest undismissed first; ties by title, then by key
-                "k-a", "k-z", "k-b", "k-old",
+                "k-a",
+                "k-z",
+                "k-b",
+                "k-old",
                 // dismissed parks at the bottom however new it is
                 "k-dismissed",
             ]
@@ -1537,7 +1549,10 @@ mod tests {
             "Nothing was written.".to_string(),
         ];
         let shown = why(&two_line);
-        assert!(shown.contains("missing field"), "the cause was dropped: {shown}");
+        assert!(
+            shown.contains("missing field"),
+            "the cause was dropped: {shown}"
+        );
         assert!(shown.contains("Nothing was written."));
 
         // A cause-plus-cure refusal, the shape the MCP work adds to the CLI.
@@ -1564,11 +1579,17 @@ mod tests {
     fn vendor_stands_in_for_a_missing_device() {
         let obs = |extra: serde_json::Value| -> Observation {
             let mut base = serde_json::json!({"source": "beisl", "observed": "2026-09-05"});
-            let (b, e) = (base.as_object_mut().unwrap(), extra.as_object().unwrap().clone());
+            let (b, e) = (
+                base.as_object_mut().unwrap(),
+                extra.as_object().unwrap().clone(),
+            );
             b.extend(e);
             serde_json::from_value(base).expect("observation")
         };
-        assert_eq!(gpu_label(&obs(serde_json::json!({"gpu_vendor": "amd"}))), "amd GPU");
+        assert_eq!(
+            gpu_label(&obs(serde_json::json!({"gpu_vendor": "amd"}))),
+            "amd GPU"
+        );
         assert_eq!(
             gpu_label(&obs(serde_json::json!({
                 "gpu": "Radeon RX 6750 XT", "gpu_vendor": "amd"

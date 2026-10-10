@@ -54,8 +54,9 @@ impl Identity {
     /// rather than chmod-ing after: a key that is briefly world-readable is a key that
     /// was world-readable.
     pub fn load_or_create() -> Result<Self> {
-        let dir = config_dir()
-            .ok_or_else(|| std::io::Error::new(ErrorKind::NotFound, "no HOME for the config dir"))?;
+        let dir = config_dir().ok_or_else(|| {
+            std::io::Error::new(ErrorKind::NotFound, "no HOME for the config dir")
+        })?;
         Self::load_or_create_in(&dir)
     }
 
@@ -220,12 +221,30 @@ mod tests {
 
     #[test]
     fn the_ledger_check_separates_reset_from_movement() {
-        let a = Seen { id: "L1".into(), head: "h1".into() };
-        let a2 = Seen { id: "L1".into(), head: "h2".into() };
-        let b = Seen { id: "L2".into(), head: "h9".into() };
-        let here = Some(Contains { present: true, verified: true });
-        let gone = Some(Contains { present: false, verified: true });
-        let broken = Some(Contains { present: true, verified: false });
+        let a = Seen {
+            id: "L1".into(),
+            head: "h1".into(),
+        };
+        let a2 = Seen {
+            id: "L1".into(),
+            head: "h2".into(),
+        };
+        let b = Seen {
+            id: "L2".into(),
+            head: "h9".into(),
+        };
+        let here = Some(Contains {
+            present: true,
+            verified: true,
+        });
+        let gone = Some(Contains {
+            present: false,
+            verified: true,
+        });
+        let broken = Some(Contains {
+            present: true,
+            verified: false,
+        });
 
         assert_eq!(check(Some(&a), None, None), Check::NoLedger);
         assert_eq!(check(None, Some(&a), None), Check::Anchored);
@@ -243,7 +262,9 @@ mod tests {
         assert_eq!(check(Some(&a), Some(&a2), broken), Check::Unverified);
         assert_eq!(
             check(Some(&a), Some(&a2), gone),
-            Check::Rewritten { remembered: "h1".into() }
+            Check::Rewritten {
+                remembered: "h1".into()
+            }
         );
     }
 
@@ -274,7 +295,10 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let key_path = dir.join(KEY_FILE);
         let mode = std::fs::metadata(&key_path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "the client key must not be group/world readable");
+        assert_eq!(
+            mode, 0o600,
+            "the client key must not be group/world readable"
+        );
         let again = Identity::load_or_create_in(&dir).unwrap();
         assert_eq!(again.public_hex(), id.public_hex());
         let _ = std::fs::remove_dir_all(&dir);

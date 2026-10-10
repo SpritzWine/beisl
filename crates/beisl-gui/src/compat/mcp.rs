@@ -208,8 +208,16 @@ impl Client {
         )?;
         let l = v.get("ledger").cloned().unwrap_or(Value::Null);
         Ok(Seen {
-            id: l.get("id").and_then(|s| s.as_str()).unwrap_or_default().to_string(),
-            head: l.get("head").and_then(|s| s.as_str()).unwrap_or_default().to_string(),
+            id: l
+                .get("id")
+                .and_then(|s| s.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            head: l
+                .get("head")
+                .and_then(|s| s.as_str())
+                .unwrap_or_default()
+                .to_string(),
         })
     }
 
@@ -286,7 +294,9 @@ impl Client {
                     return Err(Failure::Transport(format!("{method} timed out")))
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    return Err(Failure::Transport(format!("the server exited during {method}")))
+                    return Err(Failure::Transport(format!(
+                        "the server exited during {method}"
+                    )))
                 }
             };
             let Ok(v) = serde_json::from_str::<Value>(&raw) else {
@@ -349,7 +359,10 @@ mod tests {
 
         let tools = c.tools().expect("tools/list");
         for want in ["list_misses", "get_miss", "list_findings", "get_finding"] {
-            assert!(tools.contains(&want.to_string()), "missing {want} in {tools:?}");
+            assert!(
+                tools.contains(&want.to_string()),
+                "missing {want} in {tools:?}"
+            );
         }
         // Read-only spawn: the edit tier must not be offered.
         assert!(
@@ -357,7 +370,9 @@ mod tests {
             "edit tools offered without --allow-edits: {tools:?}"
         );
 
-        let v = c.call("list_findings", serde_json::json!({})).expect("list_findings");
+        let v = c
+            .call("list_findings", serde_json::json!({}))
+            .expect("list_findings");
         assert!(v.get("inbox_pending").is_some(), "no inbox_pending: {v}");
         let rows: Vec<gamebus_coupler::FindingRow> =
             serde_json::from_value(v["findings"].clone()).expect("rows deserialize");
@@ -369,7 +384,10 @@ mod tests {
         }
 
         // A refusal must arrive as a typed reason with a cure, never as a transport fault.
-        match c.call("get_finding", serde_json::json!({"key": "steam:does-not-exist"})) {
+        match c.call(
+            "get_finding",
+            serde_json::json!({"key": "steam:does-not-exist"}),
+        ) {
             Err(Failure::Refused(e)) => assert_eq!(e.reason, ErrorReason::NotFound),
             other => panic!("expected a typed refusal, got {other:?}"),
         }
@@ -427,7 +445,10 @@ mod tests {
             Err(Failure::Refused(e)) => {
                 assert_eq!(e.reason, ErrorReason::AuthUninitialized);
                 let cure = Failure::Refused(e).cure();
-                assert!(cure.contains("auth init"), "the cure must name the command: {cure}");
+                assert!(
+                    cure.contains("auth init"),
+                    "the cure must name the command: {cure}"
+                );
             }
             other => panic!("expected auth-uninitialized, got {other:?}"),
         }
@@ -461,14 +482,22 @@ mod tests {
         // Remembered and unmoved.
         assert_eq!(c.ledger_check(Some(&first)), identity::Check::Unchanged);
         // A different ledger re-anchors quietly instead of alarming.
-        let other = Seen { id: "not-this-ledger".into(), head: first.head.clone() };
+        let other = Seen {
+            id: "not-this-ledger".into(),
+            head: first.head.clone(),
+        };
         assert_eq!(c.ledger_check(Some(&other)), identity::Check::Anchored);
         // A head this chain never had is the alarm, and it is reached by really asking
         // the server, not by assuming what it would say.
-        let forged = Seen { id: first.id.clone(), head: "00".repeat(32) };
+        let forged = Seen {
+            id: first.id.clone(),
+            head: "00".repeat(32),
+        };
         assert_eq!(
             c.ledger_check(Some(&forged)),
-            identity::Check::Rewritten { remembered: "00".repeat(32) }
+            identity::Check::Rewritten {
+                remembered: "00".repeat(32)
+            }
         );
     }
 }
