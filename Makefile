@@ -58,7 +58,10 @@ PREFIX  ?= /usr/local
 
 # Set to a path and `make install` also writes every installed file there, one
 # per line, relative to DESTDIR. An rpm spec feeds it to `%files -f`, which is
-# what stops a package's file list drifting from what upstream installs.
+# what stops a package's file list drifting from what upstream installs. Man
+# pages are listed with a trailing `*`: rpm compresses them after %install, so
+# the file that exists by the time the list is read is beisl.1.gz (found by an
+# actual rpmbuild; nothing short of one shows it).
 MANIFEST ?=
 
 .PHONY: all build build-cli build-gui man generate package install fetch vendor \
@@ -124,6 +127,7 @@ install: build generate
 	    find "$(DESTDIR)$(PREFIX)" -type f \
 	        | sed -e "s|^$(DESTDIR)||" \
 	        | grep -v '/share/licenses/' \
+	        | sed -e 's|\(/share/man/man[0-9]/.*\)$$|\1*|' \
 	        | sort > "$(MANIFEST)"; \
 	    echo "manifest: $(MANIFEST) ($$(wc -l < "$(MANIFEST)") paths)"; \
 	fi
