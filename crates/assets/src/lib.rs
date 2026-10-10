@@ -17,6 +17,65 @@ pub mod icons {
     pub const PANE_RIGHT: &[u8] = include_bytes!("../data/icons/pane-right-symbolic.svg");
 }
 
+/// AppStream metadata: what a software centre reads to list beisl as an application.
+/// Embedded like the rest, so `beisl install` stays one self-contained binary.
+pub mod metainfo {
+    /// The component id, equal to the desktop entry's basename by requirement.
+    pub const ID: &str = "org.spritzwine.Beisl";
+    pub const XML: &str = include_str!("../data/metainfo/org.spritzwine.Beisl.metainfo.xml");
+}
+
+/// The desktop entries, with `{exec}` left for the caller to fill.
+///
+/// One source for two very different installs: `beisl install` writes them with an
+/// absolute path out of an extracted bundle, while a distro package writes them with
+/// a bare command name because the package manager put the binary on PATH. Keeping
+/// the bodies here is what stops those two drifting apart.
+pub mod desktop {
+    pub const SETUP_FILE: &str = "org.spritzwine.Beisl.desktop";
+    pub const SESSION_FILE: &str = "org.spritzwine.BeislSession.desktop";
+    pub const COMPAT_FILE: &str = "org.spritzwine.BeislCompat.desktop";
+
+    pub const SETUP: &str = "[Desktop Entry]\n\
+                             Type=Application\n\
+                             Name=Beisl Setup\n\
+                             Comment=Check prerequisites for perf tracing\n\
+                             Exec={exec}\n\
+                             Icon=org.spritzwine.Beisl\n\
+                             Terminal=false\n\
+                             Categories=Utility;System;\n";
+
+    /// Menu-hidden: windows land on it by app_id, nobody launches it by hand.
+    pub const SESSION: &str = "[Desktop Entry]\n\
+                               Type=Application\n\
+                               Name=Beisl Session\n\
+                               Exec={exec} --session %f\n\
+                               Icon=org.spritzwine.BeislSession\n\
+                               Terminal=false\n\
+                               NoDisplay=true\n\
+                               Categories=Utility;System;\n";
+
+    /// Visible like the setup app, but deliberately NOT a second AppStream
+    /// component: beisl is one listing in a software centre with several entries
+    /// behind it, so `X-AppStream-Ignore` stops a distro's metadata generator
+    /// synthesising a component from this file.
+    pub const COMPAT: &str = "[Desktop Entry]\n\
+                              Type=Application\n\
+                              Name=Beisl Compat Findings\n\
+                              Comment=Review the compat walls beisl found and file them upstream\n\
+                              Exec={exec}\n\
+                              Icon=org.spritzwine.Beisl\n\
+                              Terminal=false\n\
+                              Categories=Utility;System;\n\
+                              X-AppStream-Ignore=true\n";
+
+    /// Fill `{exec}`. A placeholder rather than `format!` so the bodies stay plain
+    /// data that a packaging tool can render without linking the installer.
+    pub fn render(template: &str, exec: &str) -> String {
+        template.replace("{exec}", exec)
+    }
+}
+
 /// The opt-in GPU dump-access rule pair (installed via pkexec by the caller — never
 /// from library code; see preflight's consent stance).
 pub mod gpu_dump {
@@ -47,5 +106,25 @@ mod tests {
         // The multi-user guarantee: the shim resolves $HOME at run time and must
         // never bake in the installing user's path.
         assert!(!steam_shim::SHIM.contains("/home/"));
+    }
+
+    /// A software centre shows the newest `<release>` as the current version, so a
+    /// release that forgot to add one advertises the previous one forever. The
+    /// release notes live in RELEASENOTES.md; this only pins that the newest entry
+    /// here is the version actually being built.
+    #[test]
+    fn the_metainfo_announces_the_version_being_built() {
+        let want = format!("version=\"{}\"", env!("CARGO_PKG_VERSION"));
+        let first = metainfo::XML
+            .split("<release ")
+            .nth(1)
+            .expect("at least one release entry");
+        assert!(
+            first.starts_with(&want),
+            "newest <release> is not {}: {}",
+            env!("CARGO_PKG_VERSION"),
+            first.lines().next().unwrap_or_default()
+        );
+        assert!(metainfo::XML.contains(&format!("<id>{}</id>", metainfo::ID)));
     }
 }

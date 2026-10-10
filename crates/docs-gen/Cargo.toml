@@ -7,4 +7,6 @@ edition.workspace = true
 # pages at build/package time. The runtime binaries never link any of this —
 # their --help embeds the same files via include_str!.
 [dependencies]
+# The desktop-entry bodies, shared with the installer so the two cannot drift.
+assets = { path = "../assets" }
 mandown = "1.1" # markdown -> roff; tree is just pulldown-cmark + deunicode

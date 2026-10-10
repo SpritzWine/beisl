@@ -23,6 +23,10 @@ const LEGACY_DESKTOP_FILE: &str = "org.spritzwine.beisl-setup.desktop";
 /// app_id has no desktop file gets a generic gear and the raw id in the taskbar).
 const SESSION_DESKTOP_FILE: &str = "org.spritzwine.BeislSession.desktop";
 /// The compat-finding window's entry; basename = its APP_ID, for the same pairing.
+/// Visible in the app menu like the setup app, but deliberately NOT a second
+/// AppStream component: beisl is one listing in a software centre with several
+/// entries behind it, so this one carries `X-AppStream-Ignore` to stop a distro's
+/// metadata generator synthesising a component from the desktop file.
 const COMPAT_DESKTOP_FILE: &str = "org.spritzwine.BeislCompat.desktop";
 
 // Das Glasl — embedded via the assets crate, so `beisl install` works from a bare
@@ -70,6 +74,12 @@ fn applications_dir() -> PathBuf {
     data_home().join("applications")
 }
 
+/// `~/.local/share/metainfo` - where a software centre looks for the AppStream
+/// component that makes beisl a listed application rather than a loose binary.
+fn metainfo_dir() -> PathBuf {
+    data_home().join("metainfo")
+}
+
 /// `~/.local/share/man/man1` — on the default MANPATH, so `man beisl` works
 /// after an unprivileged install.
 fn man1_dir() -> PathBuf {
@@ -94,6 +104,9 @@ fn do_install() -> Result<String, String> {
         let setup_dst = bindir.join("beisl-setup");
         install_file(&setup_src, &setup_dst)?;
         write_desktop(&setup_dst)?;
+        // Only alongside the app it launches: a component whose desktop entry is
+        // absent would have a software centre list something it cannot start.
+        write_metainfo()?;
         extra.push_str("\n  + beisl-setup, and \"Beisl Setup\" added to your app menu");
     }
     // The compat-finding review window rides along the same way when the bundle has it.
@@ -166,6 +179,7 @@ fn do_uninstall() -> Result<String, String> {
         icons.join(format!("scalable/apps/{ICON_NAME}.svg")),
         icons.join(format!("scalable/apps/{SESSION_ICON_NAME}.svg")),
         icons.join(format!("symbolic/apps/{ICON_NAME}-symbolic.svg")),
+        metainfo_dir().join(format!("{}.metainfo.xml", assets::metainfo::ID)),
     ];
     targets.extend(MAN_PAGES.iter().map(|p| man1_dir().join(p)));
     for p in targets {
@@ -221,62 +235,42 @@ fn same_file(a: &Path, b: &Path) -> bool {
 fn write_desktop(exec: &Path) -> Result<(), String> {
     let dir = applications_dir();
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
-    let contents = format!(
-        "[Desktop Entry]\n\
-         Type=Application\n\
-         Name=Beisl Setup\n\
-         Comment=Check prerequisites for perf tracing\n\
-         Exec={}\n\
-         Icon={icon}\n\
-         Terminal=false\n\
-         Categories=Utility;System;\n",
-        exec.display(),
-        icon = ICON_NAME,
-    );
-    fs::write(dir.join(DESKTOP_FILE), contents).map_err(|e| format!("write desktop entry: {e}"))?;
+    let exec = exec.display().to_string();
+    fs::write(
+        dir.join(DESKTOP_FILE),
+        assets::desktop::render(assets::desktop::SETUP, &exec),
+    )
+    .map_err(|e| format!("write desktop entry: {e}"))?;
     let _ = fs::remove_file(dir.join(LEGACY_DESKTOP_FILE)); // pre-rename installs
-                                                            // The session window's app_id gets its own (menu-hidden) entry: same artwork,
-                                                            // no Exec anyone should launch by hand — windows land on it via app_id matching.
-    let session = format!(
-        "[Desktop Entry]\n\
-         Type=Application\n\
-         Name=Beisl Session\n\
-         Exec={} --session %f\n\
-         Icon={}\n\
-         Terminal=false\n\
-         NoDisplay=true\n\
-         Categories=Utility;System;\n",
-        exec.display(),
-        SESSION_ICON_NAME,
-    );
-    fs::write(dir.join(SESSION_DESKTOP_FILE), session)
-        .map_err(|e| format!("write session desktop entry: {e}"))?;
-    write_icons()?;
-    Ok(())
+    fs::write(
+        dir.join(SESSION_DESKTOP_FILE),
+        assets::desktop::render(assets::desktop::SESSION, &exec),
+    )
+    .map_err(|e| format!("write session desktop entry: {e}"))?;
+    write_icons()
+}
+
+fn write_compat_desktop(exec: &Path) -> Result<(), String> {
+    let dir = applications_dir();
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    fs::write(
+        dir.join(COMPAT_DESKTOP_FILE),
+        assets::desktop::render(assets::desktop::COMPAT, &exec.display().to_string()),
+    )
+    .map_err(|e| format!("write desktop entry: {e}"))
+}
+
+/// The AppStream component, beside the desktop entry it launches.
+fn write_metainfo() -> Result<(), String> {
+    let dir = metainfo_dir();
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let path = dir.join(format!("{}.metainfo.xml", assets::metainfo::ID));
+    fs::write(&path, assets::metainfo::XML).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
 /// Put das Glasl where the icon theme looks for it. Same artwork under both names
 /// (the setup entry's and the session app_id's); the symbolic variant rides along
 /// for shells that prefer it (tray/menu contexts).
-/// The compat window's own menu entry: same artwork as the setup app, its own app_id.
-fn write_compat_desktop(exec: &Path) -> Result<(), String> {
-    let dir = applications_dir();
-    fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
-    let contents = format!(
-        "[Desktop Entry]\n\
-         Type=Application\n\
-         Name=Beisl Compat Findings\n\
-         Comment=Review the compat walls beisl found and file them upstream\n\
-         Exec={}\n\
-         Icon={ICON_NAME}\n\
-         Terminal=false\n\
-         Categories=Utility;System;\n",
-        exec.display(),
-    );
-    fs::write(dir.join(COMPAT_DESKTOP_FILE), contents)
-        .map_err(|e| format!("write desktop entry: {e}"))
-}
-
 fn write_icons() -> Result<(), String> {
     let icons = home().join(".local/share/icons/hicolor");
     let scalable = icons.join("scalable/apps");

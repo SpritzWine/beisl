@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Keep in step with crates/beisl/src/install.rs: the component id must equal the
+     desktop entry's basename, or software centres list an app they cannot launch. -->
+<component type="desktop-application">
+  <id>org.spritzwine.Beisl</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>LGPL-2.1-or-later</project_license>
+  <name>Beisl</name>
+  <summary>Find out what made a game stutter</summary>
+
+  <developer id="org.spritzwine">
+    <name>SpritzWine</name>
+  </developer>
+
+  <description>
+    <p>
+      Beisl records what a game was actually doing when it stuttered. It wraps a
+      launch, captures frametimes alongside CPU samples, and attributes each slow
+      frame to a layer: the game itself, Wine, DXVK or vkd3d, the graphics driver,
+      or the kernel. The answer is a split you can read, not a flame graph you have
+      to interpret.
+    </p>
+    <p>
+      It is wine-agnostic. The same wrapper works under Steam with Proton, under
+      Lutris or Heroic, or on a bare wine prefix, and it reads the environment
+      rather than changing it.
+    </p>
+    <p>Beisl also notices when a game cannot run at all:</p>
+    <ul>
+      <li>a vendor kernel anti-cheat no Wine can load</li>
+      <li>an unimplemented Wine function the game called</li>
+      <li>the volume-GUID path bug</li>
+    </ul>
+    <p>
+      When that happens it says so while the game is still open, and hands the
+      evidence to gamebus, where you can review it and file a report upstream
+      yourself. Nothing is ever submitted for you.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">org.spritzwine.Beisl.desktop</launchable>
+
+  <provides>
+    <binary>beisl</binary>
+    <binary>beisl-setup</binary>
+    <binary>beisl-compat</binary>
+    <binary>beisl-mcp</binary>
+  </provides>
+
+  <categories>
+    <category>Utility</category>
+    <category>System</category>
+  </categories>
+
+  <keywords>
+    <keyword>performance</keyword>
+    <keyword>frametime</keyword>
+    <keyword>stutter</keyword>
+    <keyword>profiling</keyword>
+    <keyword>wine</keyword>
+    <keyword>proton</keyword>
+  </keywords>
+
+  <url type="homepage">https://codeberg.org/SpritzWine/beisl</url>
+  <url type="bugtracker">https://codeberg.org/SpritzWine/beisl/issues</url>
+  <url type="vcs-browser">https://codeberg.org/SpritzWine/beisl</url>
+
+  <!-- A developer tool that reads local logs and submits nothing on its own. -->
+  <content_rating type="oars-1.1" />
+
+  <releases>
+    <release version="0.3.0" date="2026-09-05">
+      <description>
+        <p>
+          Traces now know when a game hits a wall, the session window says so while
+          it happens, and a new window hands every wall to gamebus for reporting.
+        </p>
+      </description>
+    </release>
+    <release version="0.2.0" date="2026-07-24">
+      <description>
+        <p>
+          The trace library grew an honest account of itself, and the setup app
+          joined COSMIC 1.3.
+        </p>
+      </description>
+    </release>
+    <release version="0.1.0" date="2026-07-13">
+      <description>
+        <p>First release: the wrapper, symbol resolution, the GUI and the MCP server.</p>
+      </description>
+    </release>
+  </releases>
+</component>

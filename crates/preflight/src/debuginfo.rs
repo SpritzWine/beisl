@@ -556,14 +556,34 @@ mod tests {
         }
     }
 
+    /// Some ELF on this system that carries a build-id. Not a fixed path: a hermetic
+    /// build sandbox (Nix) has no /usr at all, and these tests failed there for a
+    /// reason that had nothing to do with what they test. `true` from PATH where
+    /// there is one, else this test binary itself.
+    fn elf_with_build_id() -> Option<PathBuf> {
+        let on_path = std::env::var_os("PATH").and_then(|p| {
+            std::env::split_paths(&p)
+                .map(|d| d.join("true"))
+                .find(|c| c.is_file())
+        });
+        on_path
+            .into_iter()
+            .chain(std::env::current_exe().ok())
+            .find(|p| build_id(p).is_some())
+    }
+
     #[test]
     fn unsymbolized_families_from_reports_missing_debug_and_skips_unjudgeable() {
         let tmp = TempDir::new("unsymbolized");
-        // A real ELF we can get a build-id from — copy a small system binary so we don't
-        // have to hand-roll a second synthetic ELF.
+        // A real ELF we can get a build-id from - copy one that already exists so we
+        // don't have to hand-roll a second synthetic ELF.
         let lib_path = tmp.path().join("libvulkan_intel.so");
-        std::fs::copy("/usr/bin/true", &lib_path).expect("/usr/bin/true must exist to copy");
-        let id = build_id(&lib_path).expect("/usr/bin/true should carry a build-id");
+        let Some(elf) = elf_with_build_id() else {
+            eprintln!("SKIPPED: no ELF with a build-id to copy");
+            return;
+        };
+        std::fs::copy(&elf, &lib_path).expect("copy the ELF");
+        let id = build_id(&lib_path).expect("checked by elf_with_build_id");
 
         let debug_root = tmp.path().join("debug-root");
 
@@ -687,7 +707,11 @@ mod tests {
     fn unsymbolized_families_from_dedupes_and_sorts() {
         let tmp = TempDir::new("unsymbolized-dedup");
         let lib_path = tmp.path().join("libvulkan_radeon.so");
-        std::fs::copy("/usr/bin/true", &lib_path).expect("/usr/bin/true must exist to copy");
+        let Some(elf) = elf_with_build_id() else {
+            eprintln!("SKIPPED: no ELF with a build-id to copy");
+            return;
+        };
+        std::fs::copy(&elf, &lib_path).expect("copy the ELF");
         let debug_root = tmp.path().join("debug-root"); // never populated
 
         let manifests = vec![

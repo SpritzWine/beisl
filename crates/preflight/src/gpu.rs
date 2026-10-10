@@ -25,6 +25,8 @@ const ICD_DIRS: &[&str] = &[
     "/usr/share/vulkan/icd.d",
     "/usr/local/share/vulkan/icd.d",
     "/etc/vulkan/icd.d",
+    // NixOS has no /usr/share: its loader is built to look here instead.
+    "/run/opengl-driver/share/vulkan/icd.d",
 ];
 
 /// Driver-family filename stems that are SOFTWARE, not another physical GPU: `lvp`
