@@ -29,15 +29,36 @@ path = "src/compat/main.rs"
 
 [dependencies]
 preflight = { path = "../preflight" }
+# Embedded icons. beisl-setup reaches them through preflight; beisl-compat needs the
+# details-pane glyph directly, because a named icon is theme-dependent and Breeze has
+# no sidebar-show-right-symbolic.
+assets = { path = "../assets" }
 session = { path = "../session" }
 # The results view binds to the exact same artifact the CLI produces — one analysis code
 # path, two front-ends (the window does no analysis of its own; it renders `TraceArtifact`
 # and runs `TraceArtifact::build` for the "Analyze" action). Pulls in symbol-resolver +
 # serde_json, both light; the heavy tree here is still only libcosmic.
 artifact = { path = "../artifact" }
-# beisl-compat: the wrapper's wording for each wall, and the stash file as loose JSON.
+# beisl-compat: the wrapper's wording for each wall.
 compat = { path = "../compat" }
 serde_json = "1"
+# The records, judgements and verbs gamebus-setup's front-ends share, so this window
+# holds no second copy of them. serde-only by design: linking it brings no IO, no
+# network and no SQL into a binary that submits nothing.
+#
+# Pinned by rev, like libcosmic below: a tag can be moved, a rev cannot, and the
+# lockfile pinning is what keeps this workspace out of a poisoned release. This rev is
+# gamebus-presenced v0.5.0. github rather than the gitea remote, which is a LAN-only
+# address that would make this workspace unbuildable for anyone else.
+#
+# The coupler's build.rs compiles gamedb's stores.toml in, so the build needs that
+# submodule; cargo checks out submodules for a git dependency, which a vendored copy or
+# a bare path checkout would not.
+gamebus-coupler = { git = "https://github.com/fschaupp/gamebus-presenced.git", rev = "132cb5980aca261754ed51ca7786e0e68a630934" }
+# The client key that identifies this window to gamebus. Signing only: the key is
+# generated from /dev/urandom rather than pulling a rand stack, and hex is a handful of
+# lines here rather than another crate. Pinned, and audited on both sides of the change.
+ed25519-dalek = "2.2.0"
 plotters-backend = "0.3"
 plotters = { version = "0.3", default-features = false, features = ["all_series", "all_elements"] }
 # BitFlags<Auto>::empty() for the Frosted Glass allow-mask (Core::set_auto_blur) — libcosmic

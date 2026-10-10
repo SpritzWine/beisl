@@ -16,7 +16,6 @@
 //! Same worker-and-tick pattern as beisl-setup: each gamebus-setup call runs on a thread
 //! and the UI polls its captured output, keeping clear of the version-volatile async API.
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -25,89 +24,117 @@ use cosmic::app::{ApplicationExt, Core, Settings, Task};
 use cosmic::iced::{Length, Subscription};
 use cosmic::widget;
 use cosmic::{Application, Element};
+use gamebus_coupler::{pickable_stores, CompatFinding, MissVerb, Observation, TARGETS};
+
+mod identity;
+mod mcp;
+mod misses;
 
 /// Lowercase, like `beisl setup`: the family's windows name themselves the same way.
 const BASE_TITLE: &str = "beisl compat findings";
 
-/// Upstream targets as gamebus-setup names them, with what a person calls them and
-/// whether gamebus-setup can draft for them (`--export`). gamedb has no draft: its
-/// pages are written by `gamebus-setup gamedb`, so here it can only be marked done.
-/// Which of them a finding still wants is not decided here - `needs` says.
-const TARGETS: &[(&str, &str, bool)] = &[
-    ("protondb", "ProtonDB", true),
-    ("awacy", "AreWeAntiCheatYet", true),
-    ("gamedb", "gamebus-gamedb", false),
-];
-
-#[derive(Debug, Clone, Default)]
-struct Observation {
-    source: String,
-    observed: String,
-    wine: Option<String>,
-    gpu: Option<String>,
-    gpu_vendor: Option<String>,
-    signature: Option<String>,
-    log: Option<String>,
-    trace_dir: Option<String>,
-}
-
-impl Observation {
-    /// beisl reports a vendor tag and never a device name, so the vendor stands in
-    /// rather than letting a beisl-only finding read "unknown GPU".
-    fn gpu_label(&self) -> String {
-        match (&self.gpu, &self.gpu_vendor) {
-            (Some(g), _) => g.clone(),
-            (None, Some(v)) => format!("{v} GPU"),
-            (None, None) => "unknown GPU".to_string(),
-        }
+/// What a person calls each target, and whether gamebus-setup can draft for it
+/// (`--export`). gamedb has no draft: its pages are written by `gamebus-setup gamedb`,
+/// so here it can only be marked done.
+///
+/// The target NAMES are `gamebus_coupler::TARGETS` and are not repeated here - a list
+/// of three strings had drifted into three copies. Only the wording is beisl's. The
+/// draftable flag is still a guess about gamebus's CLI and belongs with them
+/// eventually; raised with that side 2026-09-27, deliberately not in their first cut.
+fn target_label(target: &str) -> (&'static str, bool) {
+    match target {
+        "protondb" => ("ProtonDB", true),
+        "awacy" => ("AreWeAntiCheatYet", true),
+        "gamedb" => ("gamebus-gamedb", false),
+        _ => ("", false),
     }
 }
 
-/// One finding as `--json` reports it. Field names follow gamebus's `CompatFinding`,
-/// plus the two it computes onto each record: `key` and `needs`. Anything else in the
-/// record is left alone.
-#[derive(Debug, Clone, Default)]
+/// beisl reports a vendor tag and never a device name, so the vendor stands in rather
+/// than letting a beisl-only finding read "unknown GPU".
+/// The selected tab reads as the suggested action, the others as plain buttons: the
+/// same way beisl-setup marks where you are.
+fn tab_button(label: &str, tab: Tab, current: Tab) -> Element<'static, Message> {
+    let text = label.to_string();
+    if tab == current {
+        widget::button::suggested(text).into()
+    } else {
+        widget::button::standard(text)
+            .on_press(Message::Tab(tab))
+            .into()
+    }
+}
+
+/// The setup TUI's own ordering, so the two front-ends list one stash the same way:
+/// dismissed parked at the bottom, then newest first, then by title, then by key.
+///
+/// Deliberately `title` and not `effective_title`: this mirrors gamebus-setup's
+/// `spawn_misses` exactly, and a sort that disagreed with the TUI would be worse than
+/// one that sorts an overridden title under the daemon's original.
+fn tui_order(rows: &mut [&gamebus_coupler::MissRow]) {
+    rows.sort_by(|a, b| {
+        a.miss
+            .dismissed
+            .is_some()
+            .cmp(&b.miss.dismissed.is_some())
+            .then_with(|| b.miss.last_seen.cmp(&a.miss.last_seen))
+            .then_with(|| a.miss.title.cmp(&b.miss.title))
+            .then_with(|| a.key.cmp(&b.key))
+    });
+}
+
+/// The store ids a picker may offer, in the data set's order. gamebus compiles these
+/// from gamebus-gamedb's `stores.toml`, and which ids are offerable is a flag in that
+/// data - so this is one call, never a list kept in step by hand.
+fn stores() -> Vec<&'static str> {
+    pickable_stores().collect()
+}
+
+fn gpu_label(o: &Observation) -> String {
+    match (&o.gpu, &o.gpu_vendor) {
+        (Some(g), _) => g.clone(),
+        (None, Some(v)) => format!("{v} GPU"),
+        (None, None) => "unknown GPU".to_string(),
+    }
+}
+
+/// The wrapper's wording for a wall, where the two vocabularies meet. gamebus names
+/// the wall; `compat` is beisl's own crate and says what the log line meant.
+fn explanation(wall: &str) -> &'static str {
+    match wall {
+        "kernel-anti-cheat" => compat::explain("kernel-driver"),
+        "wine-stub" => compat::explain("wine-stub"),
+        "volume-guid-path" => compat::explain("volume-guid"),
+        "missing-runtime" => {
+            "The game needs an anti-cheat runtime (EAC or BattlEye for Proton) that is \
+             not installed here."
+        }
+        _ => compat::explain(""),
+    }
+}
+
+/// One row of `compat --json`: gamebus's own record, plus the two fields the CLI
+/// computes onto it. The record is `gamebus_coupler::CompatFinding` itself rather
+/// than a copy of its fields, so a field this build does not know still round-trips
+/// and no shape can drift between the two windows.
+#[derive(Debug, Clone)]
 struct Finding {
     key: String,
-    title: Option<String>,
-    wall: String,
-    steam_appid: Option<String>,
-    first_seen: String,
-    last_seen: String,
-    observations: Vec<Observation>,
-    reported: BTreeMap<String, String>,
-    dismissed: Option<String>,
-    /// Targets that still want this finding, as gamebus decides it. Not recomputed
-    /// here: the AreWeAntiCheatYet rule (a Wine stub is Wine's bug, not theirs) is
-    /// gamebus's to own, and two copies of it would drift.
+    /// Targets that still want this finding. Read from the envelope, NOT recomputed
+    /// with the coupler's `pending_targets`: the authority is the gamebus binary that
+    /// will do the marking, not the crate version linked here, and those two can drift
+    /// once this is a rev-pinned dependency.
     needs: Vec<String>,
+    record: CompatFinding,
 }
 
 impl Finding {
     fn display_title(&self) -> &str {
-        self.title.as_deref().unwrap_or(&self.key)
-    }
-
-    fn latest(&self) -> Option<&Observation> {
-        self.observations.last()
+        self.record.title.as_deref().unwrap_or(&self.key)
     }
 
     fn needs(&self, target: &str) -> bool {
         self.needs.iter().any(|t| t == target)
-    }
-
-    /// The wrapper's wording for this wall, where the two vocabularies meet.
-    fn explanation(&self) -> &'static str {
-        match self.wall.as_str() {
-            "kernel-anti-cheat" => compat::explain("kernel-driver"),
-            "wine-stub" => compat::explain("wine-stub"),
-            "volume-guid-path" => compat::explain("volume-guid"),
-            "missing-runtime" => {
-                "The game needs an anti-cheat runtime (EAC or BattlEye for Proton) that is \
-                 not installed here."
-            }
-            _ => compat::explain(""),
-        }
     }
 }
 
@@ -133,51 +160,32 @@ struct Listing {
 
 fn parse_listing(out: &str) -> Result<Listing, String> {
     let v: serde_json::Value = serde_json::from_str(out).map_err(|e| e.to_string())?;
-    let mut findings: Vec<Finding> = v
+    let rows = v
         .get("findings")
         .and_then(|f| f.as_array())
-        .ok_or_else(|| "no findings array".to_string())?
+        .ok_or_else(|| "no findings array".to_string())?;
+    // Each row is a CompatFinding with `key` and `needs` added on top, so the record
+    // deserializes with gamebus's own serde attributes and the two extras are read
+    // beside it. A row that will not deserialize is an error, never a silent skip.
+    let mut findings: Vec<Finding> = rows
         .iter()
-        .map(|v| Finding {
-            key: str_of(v, "key").unwrap_or_default(),
-            title: str_of(v, "title"),
-            wall: str_of(v, "wall").unwrap_or_default(),
-            steam_appid: str_of(v, "steam_appid"),
-            first_seen: str_of(v, "first_seen").unwrap_or_default(),
-            last_seen: str_of(v, "last_seen").unwrap_or_default(),
-            observations: v
-                .get("observations")
-                .and_then(|o| o.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .map(|o| Observation {
-                            source: str_of(o, "source").unwrap_or_default(),
-                            observed: str_of(o, "observed").unwrap_or_default(),
-                            wine: str_of(o, "wine"),
-                            gpu: str_of(o, "gpu"),
-                            gpu_vendor: str_of(o, "gpu_vendor"),
-                            signature: str_of(o, "signature"),
-                            log: str_of(o, "log"),
-                            trace_dir: str_of(o, "trace_dir"),
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-            reported: v
-                .get("reported")
-                .and_then(|r| r.as_object())
-                .map(|r| {
-                    r.iter()
-                        .filter_map(|(t, d)| d.as_str().map(|d| (t.clone(), d.to_string())))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            dismissed: str_of(v, "dismissed"),
-            needs: strs_of(v, "needs"),
+        .map(|v| {
+            let record: CompatFinding = serde_json::from_value(v.clone())
+                .map_err(|e| format!("a finding did not parse: {e}"))?;
+            Ok(Finding {
+                key: str_of(v, "key").unwrap_or_default(),
+                needs: strs_of(v, "needs"),
+                record,
+            })
         })
-        .collect();
+        .collect::<Result<_, String>>()?;
     // gamebus sorts by key; a review list wants the freshest wall on top.
-    findings.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then(a.key.cmp(&b.key)));
+    findings.sort_by(|a, b| {
+        b.record
+            .last_seen
+            .cmp(&a.record.last_seen)
+            .then(a.key.cmp(&b.key))
+    });
 
     let inbox = v.get("inbox").cloned().unwrap_or_default();
     Ok(Listing {
@@ -243,6 +251,25 @@ fn parse_report(out: &str) -> Result<Option<Report>, String> {
     }))
 }
 
+/// Everything gamebus-setup said on stderr, not just the last line.
+///
+/// Its refusals are written as cause then reassurance ("Refused the payload: ..." /
+/// "Nothing was written."), and the auth refusals add a cure line. Taking only the last
+/// line showed the reassurance and dropped the reason, which is the half a person needs.
+/// Capped so a pathological run cannot fill the window.
+fn why(err: &[String]) -> String {
+    let lines: Vec<&str> = err
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return "no output".into();
+    }
+    let keep = lines.len().saturating_sub(6);
+    lines[keep..].join("\n")
+}
+
 /// What to show when a call did not answer in JSON. A gamebus-setup older than 0.4.0
 /// ignores the flag and prints its human list instead, so a parse failure is how this
 /// window finds out the two halves are out of step.
@@ -254,10 +281,7 @@ fn json_failure(parse_error: &str, err: &[String], ok: bool) -> String {
              it and reopen."
         )
     } else {
-        format!(
-            "gamebus-setup failed: {}",
-            err.last().cloned().unwrap_or_else(|| "no output".into())
-        )
+        format!("gamebus-setup failed: {}", why(err))
     }
 }
 
@@ -336,8 +360,27 @@ struct Draft {
 // Application
 // ---------------------------------------------------------------------------------------
 
+/// Which half of gamebus's review this window is showing. gamedb joins when its read
+/// tool lands; the compat tab stays on the CLI, which is the only path that drains the
+/// inbox (gamebus's MCP reads deliberately never write).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Compat,
+    Misses,
+}
+
 #[derive(Debug, Clone)]
 enum Message {
+    Tab(Tab),
+    MissVerb(String, &'static str),
+    ShowDismissed(bool),
+    /// Open the details pane on one miss, or on whatever is selected (the header
+    /// button, which is why the key is optional).
+    Details(Option<String>),
+    CloseDetails,
+    TitleDraft(String),
+    SaveTitle,
+    StorePicked(usize),
     Tick,
     Reload,
     Scan,
@@ -351,6 +394,20 @@ enum Message {
 
 struct App {
     core: Core,
+    tab: Tab,
+    /// Started on the first visit to the misses tab, not at open: it spawns a
+    /// gamebus-setup child, and a user who never leaves the compat tab should not pay
+    /// for one.
+    mcp: Option<misses::Worker>,
+    /// Dismissed misses are parked, not deleted, and most of the stash here is parked.
+    /// Hidden by default so the list shows what still wants a decision.
+    show_dismissed: bool,
+    /// The miss the details pane is showing. The pane is a context drawer, so COSMIC
+    /// owns whether it is visible; this owns what is in it.
+    details: Option<String>,
+    /// The title field's contents while it is being edited. Separate from the record so
+    /// a half-typed correction is never mistaken for a saved one.
+    title_draft: String,
     gamebus_setup: Option<PathBuf>,
     mcp_found: bool,
     presenced: preflight::Check,
@@ -387,6 +444,116 @@ impl App {
             self.selected = Some(key);
             self.pending_key = None;
         }
+    }
+
+    fn start_misses(&mut self) {
+        let Some(bin) = self.gamebus_setup.clone() else {
+            return;
+        };
+        let w = self.mcp.get_or_insert_with(|| misses::Worker::start(bin));
+        w.send(misses::Job::List);
+    }
+
+    /// The top of the list as it is actually shown - same sort, same dismissed filter -
+    /// so the header button opens what the eye is on rather than an arbitrary row.
+    fn first_visible_miss(&self) -> Option<String> {
+        let out = self.mcp.as_ref()?.out.lock().ok()?;
+        let mut rows: Vec<&gamebus_coupler::MissRow> = out
+            .misses
+            .iter()
+            .filter(|r| self.show_dismissed || r.miss.dismissed.is_none())
+            .collect();
+        tui_order(&mut rows);
+        rows.first().map(|r| r.key.clone())
+    }
+
+    /// One miss by key, from whatever the worker last fetched.
+    fn miss(&self, key: &str) -> Option<gamebus_coupler::MissRow> {
+        let w = self.mcp.as_ref()?;
+        let out = w.out.lock().ok()?;
+        out.misses.iter().find(|r| r.key == key).cloned()
+    }
+
+    /// The details pane: the facts gamebus holds about one miss, and the corrections
+    /// that need a field rather than a button. It folds in from the side instead of
+    /// widening every row, which is what COSMIC's own file manager does with file
+    /// details.
+    fn details_pane(&self, row: &gamebus_coupler::MissRow) -> Element<'_, Message> {
+        let m = &row.miss;
+        let fact = |k: &str, v: String| {
+            widget::Row::new()
+                .spacing(12)
+                .push(widget::text::caption(k.to_string()))
+                .push(widget::Space::new().width(Length::Fill))
+                .push(widget::text::body(v))
+        };
+
+        let mut facts = widget::settings::section().title("What gamebus knows");
+        facts = facts
+            .add(fact("Key", row.key.clone()))
+            .add(fact("Store", m.effective_store().to_string()))
+            .add(fact(
+                "Codename",
+                m.effective_codename().unwrap_or("-").to_string(),
+            ))
+            .add(fact("First seen", m.first_seen.clone()))
+            .add(fact("Last seen", m.last_seen.clone()));
+        if let Some(exe) = &m.executable {
+            facts = facts.add(fact("Executable", exe.clone()));
+        }
+        if let Some(l) = &m.launcher {
+            facts = facts.add(fact("Launcher", l.clone()));
+        }
+        // Where the name came from matters: a title the user set is not a resolution,
+        // and the pane should not present it as one.
+        let provenance = if m.title_override.is_some() {
+            "set by you".to_string()
+        } else {
+            m.title_source.clone().unwrap_or_else(|| "unresolved".into())
+        };
+        facts = facts.add(fact("Title from", provenance));
+
+        let title = widget::Column::new()
+            .spacing(8)
+            .push(widget::text::caption(
+                "A correction, not a resolution: it overrides what the daemon worked \
+                 out and survives its later writes.",
+            ))
+            .push(
+                widget::text_input("Game title", &self.title_draft)
+                    .on_input(Message::TitleDraft)
+                    .on_submit(|_| Message::SaveTitle),
+            )
+            .push(
+                widget::Row::new().spacing(8).push(
+                    widget::button::suggested("Save title").on_press(Message::SaveTitle),
+                ),
+            );
+
+        // The ids and their order are gamebus's (by how often the upstream database
+        // uses each), not a list retyped here.
+        let all = stores();
+        let picked = all.iter().position(|s| *s == m.effective_store());
+        let guess = if m.store_override.is_some() {
+            format!(
+                "Overridden. The daemon guessed \"{}\"; picking that again clears the \
+                 override.",
+                m.store
+            )
+        } else {
+            "The daemon's own guess. Picking another records a correction.".to_string()
+        };
+        let store = widget::Column::new()
+            .spacing(8)
+            .push(widget::text::caption(guess))
+            .push(widget::dropdown(all, picked, Message::StorePicked));
+
+        widget::Column::new()
+            .spacing(16)
+            .push(facts)
+            .push(widget::settings::section().title("Title").add(title))
+            .push(widget::settings::section().title("Store").add(store))
+            .into()
     }
 
     fn selected(&self) -> Option<&Finding> {
@@ -450,10 +617,7 @@ impl App {
             }
             Job::Scan => {
                 if !ok {
-                    self.note = Some(format!(
-                        "Scan failed: {}",
-                        err.last().cloned().unwrap_or_default()
-                    ));
+                    self.note = Some(format!("Scan failed: {}", why(&err)));
                     return;
                 }
                 match parse_scan(&out) {
@@ -485,10 +649,7 @@ impl App {
             }
             Job::Draft { target, .. } => {
                 if !ok {
-                    self.note = Some(format!(
-                        "Draft failed: {}",
-                        err.last().cloned().unwrap_or_default()
-                    ));
+                    self.note = Some(format!("Draft failed: {}", why(&err)));
                     return;
                 }
                 match parse_report(&out) {
@@ -512,10 +673,7 @@ impl App {
                     self.reload();
                     self.note = Some(format!("Marked as reported to {target}."));
                 } else {
-                    self.note = Some(format!(
-                        "Could not mark: {}",
-                        err.last().cloned().unwrap_or_default()
-                    ));
+                    self.note = Some(format!("Could not mark: {}", why(&err)));
                 }
             }
         }
@@ -542,6 +700,11 @@ impl Application for App {
         core.set_header_title(BASE_TITLE.to_string());
         let mut app = App {
             core,
+            tab: Tab::Compat,
+            mcp: None,
+            show_dismissed: false,
+            details: None,
+            title_draft: String::new(),
             gamebus_setup: preflight::find_tool("gamebus-setup"),
             mcp_found: preflight::find_tool("beisl-mcp").is_some(),
             presenced: preflight::gamebus_presence_check(),
@@ -581,6 +744,71 @@ impl Application for App {
                 if let Some((job, out, err, ok)) = done {
                     self.job = None;
                     self.finish(job, out, err, ok);
+                }
+            }
+            Message::Tab(tab) => {
+                self.tab = tab;
+                self.note = None;
+                if tab == Tab::Misses {
+                    self.start_misses();
+                }
+            }
+            Message::ShowDismissed(v) => self.show_dismissed = v,
+            Message::Details(key) => {
+                // From a row: that row. From the header: whatever the pane last showed,
+                // or the top of the list, so the button always opens something.
+                let key = key
+                    .or_else(|| self.details.clone())
+                    .or_else(|| self.first_visible_miss());
+                if let Some(key) = key {
+                    self.title_draft = self
+                        .miss(&key)
+                        .and_then(|r| r.miss.effective_title().map(str::to_string))
+                        .unwrap_or_default();
+                    self.details = Some(key);
+                    self.core.window.show_context = true;
+                }
+            }
+            Message::CloseDetails => {
+                self.core.window.show_context = false;
+                self.details = None;
+            }
+            Message::TitleDraft(t) => self.title_draft = t,
+            Message::StorePicked(i) => {
+                let all = stores();
+                if let (Some(w), Some(key), Some(store)) =
+                    (&self.mcp, self.details.clone(), all.get(i))
+                {
+                    // The clearing rule is gamebus's: sending the daemon's own guess
+                    // drops the override. beisl just sends what was picked.
+                    w.send(misses::Job::Apply {
+                        key,
+                        verb: MissVerb::SetStore {
+                            store: (*store).to_string(),
+                        },
+                    });
+                }
+            }
+            Message::SaveTitle => {
+                let draft = self.title_draft.trim().to_string();
+                if let (Some(w), Some(key), false) =
+                    (&self.mcp, self.details.clone(), draft.is_empty())
+                {
+                    w.send(misses::Job::Apply {
+                        key,
+                        verb: MissVerb::SetTitle { title: draft },
+                    });
+                }
+            }
+            Message::MissVerb(key, verb) => {
+                if let Some(w) = &self.mcp {
+                    let verb = match verb {
+                        "dismiss" => MissVerb::Dismiss,
+                        "undismiss" => MissVerb::Undismiss,
+                        "promote" => MissVerb::Promote,
+                        _ => MissVerb::Demote,
+                    };
+                    w.send(misses::Job::Apply { key, verb });
                 }
             }
             Message::Reload => {
@@ -635,6 +863,55 @@ impl Application for App {
         Task::none()
     }
 
+    fn context_drawer(&self) -> Option<cosmic::app::context_drawer::ContextDrawer<'_, Message>> {
+        let row = self.details.as_ref().and_then(|k| self.miss(k))?;
+        let title = row
+            .miss
+            .effective_title()
+            .unwrap_or(&row.key)
+            .to_string();
+        Some(
+            cosmic::app::context_drawer::context_drawer(
+                self.details_pane(&row),
+                Message::CloseDetails,
+            )
+            .title(title),
+        )
+    }
+
+    /// The pane's own toggle, on the RIGHT of the header: the drawer comes in from
+    /// that side, so the control that summons it belongs there rather than opposite it.
+    /// Present for the whole tab, not only once a row has been opened, because it is
+    /// how the pane is found in the first place.
+    fn header_end(&self) -> Vec<Element<'_, Message>> {
+        if self.tab != Tab::Misses {
+            return Vec::new();
+        }
+        // `pane-show-symbolic` is what COSMIC's own file manager uses for this, and it
+        // is the name that actually resolves: libcosmic ignores the desktop's icon
+        // theme and looks in `Cosmic`, which inherits Pop then hicolor. The earlier
+        // `sidebar-show-right-symbolic` is an Adwaita name and is in none of those, so
+        // it drew an empty button on every desktop, not just this KDE one.
+        //
+        // Falling back to the embedded copy keeps the button legible where the Pop
+        // icons are not installed, which is also where half of libcosmic's own icons
+        // would be missing.
+        let named = widget::icon::from_name("pane-show-symbolic");
+        let mut handle = match named.clone().path() {
+            Some(_) => named.into(),
+            None => widget::icon::from_svg_bytes(assets::icons::PANE_RIGHT),
+        };
+        handle.symbolic = true;
+        let showing = self.core.window.show_context;
+        vec![widget::button::icon(handle)
+            .on_press(if showing {
+                Message::CloseDetails
+            } else {
+                Message::Details(None)
+            })
+            .into()]
+    }
+
     fn subscription(&self) -> Subscription<Self::Message> {
         cosmic::iced::time::every(Duration::from_millis(120)).map(|_| Message::Tick)
     }
@@ -642,6 +919,30 @@ impl Application for App {
     fn view(&self) -> Element<'_, Self::Message> {
         // Same frame as the setup app's traces page: the content scrolls, and navigation
         // sits in a footer under it, where the rest of the beisl windows keep it.
+        if self.tab == Tab::Misses {
+            let content = self.misses_page();
+            return widget::container(
+                widget::Column::new()
+                    .spacing(14)
+                    .push(
+                        widget::Row::new()
+                            .spacing(8)
+                            .push(tab_button("Compat findings", Tab::Compat, self.tab))
+                            .push(tab_button("Identity misses", Tab::Misses, self.tab)),
+                    )
+                    .push(
+                        widget::scrollable(widget::container(content).padding(
+                            cosmic::iced::Padding::from([0, 14, 0, 0]),
+                        ))
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                    ),
+            )
+            .padding(28)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+        }
         let (content, footer) = match self.selected() {
             Some(f) => (
                 self.detail(f),
@@ -654,7 +955,11 @@ impl Application for App {
             ),
             None => (self.list(), None),
         };
-        let mut col = widget::Column::new().spacing(14).push(
+        let tabs = widget::Row::new()
+            .spacing(8)
+            .push(tab_button("Compat findings", Tab::Compat, self.tab))
+            .push(tab_button("Identity misses", Tab::Misses, self.tab));
+        let mut col = widget::Column::new().spacing(14).push(tabs).push(
             widget::scrollable(
                 widget::container(content).padding(cosmic::iced::Padding::from([0, 14, 0, 0])),
             )
@@ -749,32 +1054,36 @@ impl App {
                 .spacing(12)
                 .push(widget::text::body(f.display_title().to_string()))
                 .push(widget::Space::new().width(Length::Fill));
-            if f.dismissed.is_some() {
+            if f.record.dismissed.is_some() {
                 head = head.push(widget::text::caption("dismissed"));
             }
             head = head
                 .push(widget::button::standard("Open").on_press(Message::Select(f.key.clone())));
             let latest = f
+                .record
                 .latest()
                 .map(|o| {
                     format!(
                         "  |  latest: {} on {}",
                         o.wine.as_deref().unwrap_or("unknown wine"),
-                        o.gpu_label()
+                        gpu_label(o)
                     )
                 })
                 .unwrap_or_default();
             let pending: Vec<&str> = TARGETS
                 .iter()
-                .filter(|(t, _, _)| f.needs(t))
-                .map(|(t, _, _)| *t)
+                .copied()
+                .filter(|t| f.needs(t))
                 .collect();
             let mut item = widget::Column::new()
                 .spacing(4)
                 .push(head)
                 .push(widget::text::caption(format!(
                     "{}  |  wall: {}  |  seen {} .. {}{latest}",
-                    f.key, f.wall, f.first_seen, f.last_seen
+                    f.key,
+                    f.record.wall.as_str(),
+                    f.record.first_seen,
+                    f.record.last_seen
                 )));
             if !pending.is_empty() {
                 item = item.push(widget::text::caption(format!(
@@ -787,6 +1096,130 @@ impl App {
         col.push(section).into()
     }
 
+    /// gamebus's identity misses: launches it could not name authoritatively. The
+    /// review verbs that need no typing are here; correcting a title or a store needs a
+    /// text field and comes with the rest of the tab.
+    fn misses_page(&self) -> Element<'_, Message> {
+        let mut col = widget::Column::new()
+            .spacing(14)
+            .push(widget::text::title1("Identity misses"))
+            .push(widget::text::caption(
+                "Games gamebus saw launch without an authoritative identity. Dismissing \
+                 parks one; promoting opts a umu launch into the umu-database pipeline. \
+                 Nothing here is submitted anywhere.",
+            ));
+
+        if self.gamebus_setup.is_none() {
+            return col
+                .push(widget::text::body(
+                    "This tab drives gamebus-setup, which is not installed.",
+                ))
+                .into();
+        }
+
+        let Some(w) = &self.mcp else {
+            return col.push(widget::text::caption("Connecting to gamebus...")).into();
+        };
+        let out = w.out.lock().unwrap();
+
+        // The one alarm worth raising, and only when it means something.
+        if let Some(note) = out.ledger.as_ref().and_then(misses::ledger_note) {
+            col = col.push(widget::text::body(note));
+        }
+        if out.busy {
+            col = col.push(widget::text::caption("Talking to gamebus-setup..."));
+        }
+        if let Some(e) = &out.error {
+            col = col.push(widget::text::body(e.clone()));
+        }
+
+        // gamebus's MCP server returns misses in key order, which is a stable wire
+        // order rather than a reading order. This is the setup TUI's own sort, so the
+        // two front-ends list the same stash the same way.
+        let mut rows: Vec<&gamebus_coupler::MissRow> = out.misses.iter().collect();
+        tui_order(&mut rows);
+        let parked = rows.iter().filter(|r| r.miss.dismissed.is_some()).count();
+        if !self.show_dismissed {
+            rows.retain(|r| r.miss.dismissed.is_none());
+        }
+        if parked > 0 {
+            col = col.push(
+                widget::toggler(self.show_dismissed)
+                    .label(format!("Show {parked} dismissed"))
+                    .on_toggle(Message::ShowDismissed),
+            );
+        }
+
+        let mut section = widget::settings::section().title("Misses");
+        if rows.is_empty() && !out.busy && out.error.is_none() {
+            section = section.add(widget::text::caption(if parked > 0 {
+                "Every miss here has been dismissed. Switch them on above to review one."
+            } else {
+                "Nothing recorded. gamebus notes a miss when a game launches with no \
+                 identity it can trust."
+            }));
+        }
+        for row in rows {
+            let m = &row.miss;
+            let dismissed = m.dismissed.is_some();
+            let promoted = m.umu_promoted.is_some();
+            let mut head = widget::Row::new()
+                .spacing(12)
+                .push(widget::text::body(
+                    m.effective_title().unwrap_or(&row.key).to_string(),
+                ))
+                .push(widget::Space::new().width(Length::Fill));
+            if dismissed {
+                head = head.push(widget::text::caption("dismissed"));
+            }
+            if row.umu_candidate {
+                head = head.push(widget::text::caption("umu candidate"));
+            }
+            let mut actions = widget::Row::new().spacing(8);
+            let (label, verb) = if dismissed {
+                ("Restore", "undismiss")
+            } else {
+                ("Dismiss", "dismiss")
+            };
+            actions = actions.push(
+                widget::button::standard("Details")
+                    .on_press(Message::Details(Some(row.key.clone()))),
+            );
+            actions = actions.push(
+                widget::button::standard(label)
+                    .on_press(Message::MissVerb(row.key.clone(), verb)),
+            );
+            // Promotion is a umu-database act, so it is offered only where it means
+            // something: a launcher launch that never went through umu has nothing to
+            // promote, and gamebus would refuse it.
+            if row.is_umu_miss {
+                let (label, verb) = if promoted {
+                    ("Take back", "demote")
+                } else {
+                    ("Promote to umu", "promote")
+                };
+                actions = actions.push(
+                    widget::button::text(label)
+                        .on_press(Message::MissVerb(row.key.clone(), verb)),
+                );
+            }
+            let item = widget::Column::new()
+                .spacing(4)
+                .push(head)
+                .push(widget::text::caption(format!(
+                    "{}  |  store: {}  |  codename: {}  |  seen {} .. {}",
+                    row.key,
+                    m.effective_store(),
+                    m.effective_codename().unwrap_or("-"),
+                    m.first_seen,
+                    m.last_seen
+                )))
+                .push(actions);
+            section = section.add(item);
+        }
+        col.push(section).into()
+    }
+
     fn detail<'a>(&'a self, f: &'a Finding) -> Element<'a, Message> {
         let mut col = widget::Column::new()
             .spacing(14)
@@ -794,22 +1227,23 @@ impl App {
             .push(widget::text::caption(format!(
                 "{}{}  |  seen {} .. {}",
                 f.key,
-                f.steam_appid
+                f.record
+                    .steam_appid
                     .as_deref()
                     .map(|a| format!("  |  Steam appid {a}"))
                     .unwrap_or_default(),
-                f.first_seen,
-                f.last_seen
+                f.record.first_seen,
+                f.record.last_seen
             )));
 
         let wall = widget::Column::new()
             .spacing(6)
-            .push(widget::text::body(format!("Wall: {}", f.wall)))
-            .push(widget::text::caption(f.explanation()));
+            .push(widget::text::body(format!("Wall: {}", f.record.wall.as_str())))
+            .push(widget::text::caption(explanation(f.record.wall.as_str())));
         col = col.push(widget::settings::section().title("What happened").add(wall));
 
         let mut obs = widget::settings::section().title("Evidence, newest first");
-        for o in f.observations.iter().rev() {
+        for o in f.record.observations.iter().rev() {
             let mut item = widget::Column::new()
                 .spacing(4)
                 .push(widget::text::body(format!(
@@ -817,7 +1251,7 @@ impl App {
                     o.observed,
                     o.source,
                     o.wine.as_deref().unwrap_or("unknown wine"),
-                    o.gpu_label()
+                    gpu_label(o)
                 )));
             if let Some(sig) = &o.signature {
                 item = item.push(widget::text::caption(format!("signature: {sig}")));
@@ -835,23 +1269,24 @@ impl App {
         // Report: one row per target. Drafting prints text to review; filing is the
         // user's, in the browser; marking done is what gamebus-setup remembers.
         let mut report = widget::settings::section().title("Report it");
-        for (target, label, draftable) in TARGETS {
+        for target in TARGETS.iter().copied() {
+            let (label, draftable) = target_label(target);
             let mut row = widget::Row::new()
                 .spacing(12)
                 .push(widget::text::body(label.to_string()))
                 .push(widget::Space::new().width(Length::Fill));
-            if let Some(when) = f.reported.get(*target) {
+            if let Some(when) = f.record.reported.get(target) {
                 row = row.push(widget::text::caption(format!("reported {when}")));
             } else if !f.needs(target) {
-                row = row.push(widget::text::caption(if f.dismissed.is_some() {
+                row = row.push(widget::text::caption(if f.record.dismissed.is_some() {
                     "dismissed"
-                } else if *target == "awacy" {
+                } else if target == "awacy" {
                     "not theirs: they track anti-cheat behaviour"
                 } else {
                     "nothing to submit"
                 }));
             } else {
-                if *draftable {
+                if draftable {
                     let mut b = widget::button::standard("Draft");
                     if !self.busy() {
                         b = b.on_press(Message::Draft(target.to_string()));
@@ -875,11 +1310,10 @@ impl App {
             col = col.push(widget::text::body(note.clone()));
         }
         if let Some(d) = &self.draft {
-            let label = TARGETS
-                .iter()
-                .find(|(t, _, _)| *t == d.target)
-                .map(|(_, l, _)| *l)
-                .unwrap_or(d.target.as_str());
+            let label = match target_label(&d.target) {
+                ("", _) => d.target.as_str(),
+                (l, _) => l,
+            };
             let mut actions = widget::Row::new()
                 .spacing(12)
                 .push(widget::button::standard("Copy text").on_press(Message::CopyDraft));
@@ -962,6 +1396,7 @@ mod tests {
           "observations": [
             {
               "attributed_pct": 74.68,
+              "a_field_from_a_newer_gamebus": 1,
               "gpu_vendor": "amd",
               "layer_split": {"game": 74.16},
               "log": "beisl:run-1788635431",
@@ -1001,8 +1436,18 @@ mod tests {
         assert_eq!(l.findings[0].key, "steam:1");
         let f = &l.findings[1];
         assert_eq!(f.display_title(), "WARDOGS Playtest");
-        assert_eq!(f.steam_appid.as_deref(), Some("4809930"));
-        assert_eq!(f.reported.get("gamedb").map(String::as_str), Some("2026-09-06"));
+        assert_eq!(f.record.steam_appid.as_deref(), Some("4809930"));
+        assert_eq!(
+            f.record.reported.get("gamedb").map(String::as_str),
+            Some("2026-09-06")
+        );
+        // The record round-trips through gamebus's own type: fields this window never
+        // reads are still parsed (layer_split is a real field there now), and a field
+        // NO build knows lands in the catch-all rather than failing the row.
+        assert!(f.record.observations[0].layer_split.is_some());
+        assert!(f.record.observations[0]
+            .extra
+            .contains_key("a_field_from_a_newer_gamebus"));
         // The rule that stays gamebus's: needs is read, never recomputed.
         assert!(f.needs("protondb") && f.needs("awacy") && !f.needs("gamedb"));
         assert_eq!(l.took, ["steam:4809930"]);
@@ -1013,7 +1458,7 @@ mod tests {
     fn a_finding_with_no_needs_is_offered_nothing() {
         let l = parse_listing(LIST).unwrap();
         let f = &l.findings[0];
-        assert!(TARGETS.iter().all(|(t, _, _)| !f.needs(t)));
+        assert!(TARGETS.iter().all(|t| !f.needs(t)));
     }
 
     /// A gamebus-setup older than 0.4.0 ignores `--json` and prints its list. That must
@@ -1043,21 +1488,93 @@ mod tests {
         assert!(parse_report(r#"{"reports":[]}"#).unwrap().is_none());
     }
 
+    /// Every tiebreaker in gamebus-setup's `spawn_misses`, in order. Drift here means
+    /// the two windows list one stash differently, which is what this was fixing.
+    #[test]
+    fn misses_list_in_the_setup_tuis_order() {
+        let row = |key: &str, title: Option<&str>, last: &str, dismissed: bool| {
+            let mut v = serde_json::json!({
+                "key": key, "is_umu_miss": true, "umu_candidate": false,
+                "store": "steam", "umu_id": "umu-0",
+                "first_seen": "2026-01-01", "last_seen": last,
+            });
+            let m = v.as_object_mut().unwrap();
+            if let Some(t) = title {
+                m.insert("title".into(), serde_json::json!(t));
+            }
+            if dismissed {
+                m.insert("dismissed".into(), serde_json::json!("2026-02-02"));
+            }
+            serde_json::from_value::<gamebus_coupler::MissRow>(v).expect("row")
+        };
+        let all = vec![
+            row("k-old", Some("Zed"), "2026-01-02", false),
+            row("k-dismissed", Some("Aaa"), "2026-09-09", true),
+            row("k-b", Some("Beta"), "2026-05-05", false),
+            row("k-a", Some("Alpha"), "2026-05-05", false),
+            row("k-z", Some("Alpha"), "2026-05-05", false),
+        ];
+        let mut rows: Vec<&gamebus_coupler::MissRow> = all.iter().collect();
+        tui_order(&mut rows);
+        let order: Vec<&str> = rows.iter().map(|r| r.key.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                // newest undismissed first; ties by title, then by key
+                "k-a", "k-z", "k-b", "k-old",
+                // dismissed parks at the bottom however new it is
+                "k-dismissed",
+            ]
+        );
+    }
+
+    /// gamebus writes a refusal as cause then reassurance, and the auth refusals add a
+    /// cure. Showing only the last line lost the reason, which is the half worth reading.
+    #[test]
+    fn a_refusal_keeps_its_reason_not_just_its_reassurance() {
+        let two_line = [
+            "Refused the payload: delivery 1: missing field `wall`".to_string(),
+            "Nothing was written.".to_string(),
+        ];
+        let shown = why(&two_line);
+        assert!(shown.contains("missing field"), "the cause was dropped: {shown}");
+        assert!(shown.contains("Nothing was written."));
+
+        // A cause-plus-cure refusal, the shape the MCP work adds to the CLI.
+        let with_cure = [
+            "Refused: the ledger could not be verified.".to_string(),
+            "Re-initialise the passphrase: gamebus-setup auth init.".to_string(),
+        ];
+        assert!(why(&with_cure).contains("auth init"));
+        assert!(why(&with_cure).contains("could not be verified"));
+
+        assert_eq!(why(&[]), "no output");
+        assert_eq!(why(&["  ".to_string(), "real".to_string()]), "real");
+        // Capped, newest kept.
+        let many: Vec<String> = (0..20).map(|i| i.to_string()).collect();
+        assert_eq!(why(&many).lines().count(), 6);
+        assert!(why(&many).ends_with("19"));
+    }
+
     /// beisl supplies a vendor and no device, and the window used to print "unknown GPU"
-    /// over a finding that knew perfectly well it ran on an AMD card.
+    /// over a finding that knew perfectly well it ran on an AMD card. Built through the
+    /// wire rather than a struct literal: `gamebus_coupler::Observation` has no
+    /// `Default`, and JSON is how one ever actually reaches this window.
     #[test]
     fn vendor_stands_in_for_a_missing_device() {
-        let vendor = Observation {
-            gpu_vendor: Some("amd".into()),
-            ..Observation::default()
+        let obs = |extra: serde_json::Value| -> Observation {
+            let mut base = serde_json::json!({"source": "beisl", "observed": "2026-09-05"});
+            let (b, e) = (base.as_object_mut().unwrap(), extra.as_object().unwrap().clone());
+            b.extend(e);
+            serde_json::from_value(base).expect("observation")
         };
-        assert_eq!(vendor.gpu_label(), "amd GPU");
-        let device = Observation {
-            gpu: Some("Radeon RX 6750 XT".into()),
-            gpu_vendor: Some("amd".into()),
-            ..Observation::default()
-        };
-        assert_eq!(device.gpu_label(), "Radeon RX 6750 XT");
-        assert_eq!(Observation::default().gpu_label(), "unknown GPU");
+        assert_eq!(gpu_label(&obs(serde_json::json!({"gpu_vendor": "amd"}))), "amd GPU");
+        assert_eq!(
+            gpu_label(&obs(serde_json::json!({
+                "gpu": "Radeon RX 6750 XT", "gpu_vendor": "amd"
+            }))),
+            "Radeon RX 6750 XT"
+        );
+        assert_eq!(gpu_label(&obs(serde_json::json!({}))), "unknown GPU");
     }
 }
