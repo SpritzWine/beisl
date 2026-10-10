@@ -70,6 +70,12 @@ fn applications_dir() -> PathBuf {
     data_home().join("applications")
 }
 
+/// `~/.local/share/metainfo` - where a software centre looks for the AppStream
+/// component that makes beisl a listed application rather than a loose binary.
+fn metainfo_dir() -> PathBuf {
+    data_home().join("metainfo")
+}
+
 /// `~/.local/share/man/man1` — on the default MANPATH, so `man beisl` works
 /// after an unprivileged install.
 fn man1_dir() -> PathBuf {
@@ -94,6 +100,9 @@ fn do_install() -> Result<String, String> {
         let setup_dst = bindir.join("beisl-setup");
         install_file(&setup_src, &setup_dst)?;
         write_desktop(&setup_dst)?;
+        // Only alongside the app it launches: a component whose desktop entry is
+        // absent would have a software centre list something it cannot start.
+        write_metainfo()?;
         extra.push_str("\n  + beisl-setup, and \"Beisl Setup\" added to your app menu");
     }
     // The compat-finding review window rides along the same way when the bundle has it.
@@ -166,6 +175,7 @@ fn do_uninstall() -> Result<String, String> {
         icons.join(format!("scalable/apps/{ICON_NAME}.svg")),
         icons.join(format!("scalable/apps/{SESSION_ICON_NAME}.svg")),
         icons.join(format!("symbolic/apps/{ICON_NAME}-symbolic.svg")),
+        metainfo_dir().join(format!("{}.metainfo.xml", assets::metainfo::ID)),
     ];
     targets.extend(MAN_PAGES.iter().map(|p| man1_dir().join(p)));
     for p in targets {
@@ -275,6 +285,14 @@ fn write_compat_desktop(exec: &Path) -> Result<(), String> {
     );
     fs::write(dir.join(COMPAT_DESKTOP_FILE), contents)
         .map_err(|e| format!("write desktop entry: {e}"))
+}
+
+/// The AppStream component, beside the desktop entry it launches.
+fn write_metainfo() -> Result<(), String> {
+    let dir = metainfo_dir();
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let path = dir.join(format!("{}.metainfo.xml", assets::metainfo::ID));
+    fs::write(&path, assets::metainfo::XML).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
 fn write_icons() -> Result<(), String> {

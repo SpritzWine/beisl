@@ -17,6 +17,14 @@ pub mod icons {
     pub const PANE_RIGHT: &[u8] = include_bytes!("../data/icons/pane-right-symbolic.svg");
 }
 
+/// AppStream metadata: what a software centre reads to list beisl as an application.
+/// Embedded like the rest, so `beisl install` stays one self-contained binary.
+pub mod metainfo {
+    /// The component id, equal to the desktop entry's basename by requirement.
+    pub const ID: &str = "org.spritzwine.Beisl";
+    pub const XML: &str = include_str!("../data/metainfo/org.spritzwine.Beisl.metainfo.xml");
+}
+
 /// The opt-in GPU dump-access rule pair (installed via pkexec by the caller — never
 /// from library code; see preflight's consent stance).
 pub mod gpu_dump {
@@ -47,5 +55,25 @@ mod tests {
         // The multi-user guarantee: the shim resolves $HOME at run time and must
         // never bake in the installing user's path.
         assert!(!steam_shim::SHIM.contains("/home/"));
+    }
+
+    /// A software centre shows the newest `<release>` as the current version, so a
+    /// release that forgot to add one advertises the previous one forever. The
+    /// release notes live in RELEASENOTES.md; this only pins that the newest entry
+    /// here is the version actually being built.
+    #[test]
+    fn the_metainfo_announces_the_version_being_built() {
+        let want = format!("version=\"{}\"", env!("CARGO_PKG_VERSION"));
+        let first = metainfo::XML
+            .split("<release ")
+            .nth(1)
+            .expect("at least one release entry");
+        assert!(
+            first.starts_with(&want),
+            "newest <release> is not {}: {}",
+            env!("CARGO_PKG_VERSION"),
+            first.lines().next().unwrap_or_default()
+        );
+        assert!(metainfo::XML.contains(&format!("<id>{}</id>", metainfo::ID)));
     }
 }
