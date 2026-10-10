@@ -27,10 +27,21 @@ which is how openSUSE ships COSMIC itself.
 reads `../gamedb/stores.toml`, a file outside its own package directory, so
 `cargo vendor` extracts the crate without it and the build panics asking for
 a git submodule that a vendored tree does not have. Arch is unaffected, since
-`cargo fetch` does a real clone with submodules. Reported upstream
-(2026-10-10); until it is fixed, the openSUSE recipe needs the coupler's
-`gamedb/stores.toml` restored into the vendor tree by hand, or the GUI left
-out of the package.
+`cargo fetch` does a real clone with submodules.
+
+The file is not missing, only unvendored: cargo's git checkout still has it,
+because cargo clones git dependencies with their submodules. So the vendor
+step caches it back, and the build then finds it without reaching for the
+network:
+
+    cargo vendor --locked vendor
+    opensuse/cache-coupler-data.sh vendor
+
+The vendored crate sits at `vendor/gamebus-coupler/`, so the relative path its
+`build.rs` already uses resolves to `vendor/gamedb/stores.toml`. Verified: the
+whole GUI workspace then compiles with `--offline`. No upstream change needed
+to package today, and the script removes itself from the picture once the
+coupler carries its own copy (reported upstream 2026-10-10).
 
 The CLI half (`beisl`, `beisl-mcp`) does not link the coupler and has no such
 problem, so splitting the package is the fallback if the fix takes a while.
