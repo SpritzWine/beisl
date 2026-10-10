@@ -62,6 +62,15 @@ perf supports it).
 **install / uninstall** — per-user install into ~/.local/bin, desktop entry,
 icons, and man pages; uninstall names anything root-owned it cannot remove.
 
+Run from the AppImage, install copies nothing out of it. The file stays where
+you keep it and ~/.local/bin gets four small launchers that hand over to it at
+that path; run install again after moving or replacing the file and they
+follow. A launcher checks the file before running it - still there, still an
+AppImage, and not replaceable by another user - and if not, says why and
+starts the game untraced. Install refuses a file kept where others can write,
+with the reasons; `beisl install --relax-permission-check` keeps it there
+anyway and tells the launchers so. Uninstall leaves the AppImage alone.
+
 # ENVIRONMENT
 
 **BEISL_FORCE_RECORD_MODE** — `full`, `degraded`, or `none`: override the

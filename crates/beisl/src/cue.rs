@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn cues_are_audibly_distinct_and_players_speak_raw_pcm() {
-        // Distinct tones per DESIGN.md: the three cues must not render identically.
+        // Distinct tones (DESIGN.md, "Surfaces"): the three cues must not render identically.
         let ready = render(notes(&Cue::Ready));
         let stop = render(notes(&Cue::RecordStop));
         assert_ne!(ready, stop);

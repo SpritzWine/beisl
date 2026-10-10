@@ -4,8 +4,8 @@ Game perf-tracing tool (Rust, early v0): wraps a game launch (`beisl %command%` 
 sets up the environment (MangoHud frametime CSV side-channel, optional GPU pin), records
 `perf` + logs into a per-run trace dir under `~/.local/share/beisl/traces/run-*/`
 (`session.json`, `beisl.log`, `perf.log`, `perf.data`, MangoHud CSV), and publishes live
-state for a session window. Wine-agnostic by design. `DESIGN.md` has the architecture,
-case studies, and roadmap. Symbol resolution (Exports tier), artifact export, the trace
+state for a session window. Wine-agnostic by design. `DESIGN.md` is the current design:
+architecture, the rules it does not bend, case studies, and what is still open. Symbol resolution (Exports tier), artifact export, the trace
 library, and the MCP server are built; the Full/DWARF symbol tier is still open.
 
 ## Mandatory rules (all projects)
@@ -44,6 +44,9 @@ Main workspace (`Cargo.toml`, crates.io deps only, mostly std):
 - `crates/preflight` - UI-agnostic setup checks (perf/llvm/paranoid/mangohud/GPU) +
   persisted config. Detection only; privileged fixes are *described* (`Fix` +
   `fix_command()`) and executed by the caller via pkexec, never from inside the crate.
+  `appimage.rs`: knowing beisl runs from its own AppImage (never from the inherited
+  `$APPIMAGE` alone), judging where the file is kept, and rendering/reading the
+  launchers that point at it.
 - `crates/session` - small serde JSON state file (`session.json`) bridging the CLI
   writer and the GUI session window reader.
 - `crates/symbol-resolver` - perf.data addresses → wine symbols, tiered fidelity.
@@ -87,6 +90,11 @@ packaging/bump-version.sh <version> "<sentence>"
                                  # lockfiles, metainfo, PKGBUILD, both specs, package.nix
 (cd crates/beisl-gui && cargo check)   # GUI: separate workspace; heavy git deps,
                                        # slow first build - skip unless GUI changed
+make install DESTDIR=... PREFIX=/usr   # staged system install; what every distro
+                                 # recipe in packaging/ builds through (see its README)
+make appimage                    # the same staging, wrapped as one file. Refuses a
+                                 # non-portable glibc; packaging/appimage/
+                                 # build-in-container.sh makes the one that ships
 make                             # release-build BOTH workspaces + package the bundle
                                  # tarball (beisl + beisl-mcp + beisl-setup + beisl-compat
                                  # + README/LICENSE)

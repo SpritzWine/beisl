@@ -3,6 +3,7 @@
 # Trigger: pushing a tag `v*` whose version matches Cargo.toml. Builds both
 # workspaces once and attaches to a Codeberg release for the tag:
 #   beisl-<v>-<arch>.tar.gz       the bundle `beisl install` runs from
+#   Beisl-<v>-<arch>.AppImage     the same binaries as one runnable file
 #   beisl-<v>.tar.gz              the source, as distro recipes expect it
 #   beisl-<v>-vendor.tar.zst      every dependency, for a build with no network
 #   SHA256SUMS
@@ -47,14 +48,29 @@ jobs:
     # lib on top: libcosmic's "wayland" feature (Frosted Glass, 0.2.0) compiles
     # smithay-client-toolkit, whose build script pkg-config-requires xkbcommon —
     # installed in the build step below. Everything else still dlopens at runtime.
+    #
+    # Pinned to Debian 12 (bookworm), deliberately not the moving `rust:1`. A binary
+    # starts only where glibc is at least as new as the one it was built against,
+    # so THIS image decides which distros a release runs on: built here it needs
+    # glibc 2.35 and starts on Ubuntu 22.04 and Debian 12; built on a current base
+    # it needs 2.39 or newer and does not. `make appimage` enforces it (GLIBC_MAX
+    # in packaging/appimage/build.sh), so moving this image forward fails the
+    # release instead of quietly shrinking who can run it.
     container:
-      image: docker.io/library/rust:1
+      image: docker.io/library/rust:1-bookworm
     env:
       # /cache is bind-mounted into every job container by the runner (see
       # ci/runner/data/config.template.yml). The Makefile takes CLI_TARGET/GUI_TARGET.
+      #
+      # The target dirs carry the base in their name because cargo does not track
+      # which glibc an artifact was built against: build scripts and proc macros
+      # compiled on a newer base are simply reused, and then fail to start here.
       CARGO_HOME: /cache/cargo
-      CLI_TARGET: /cache/target-cli
-      GUI_TARGET: /cache/target-gui
+      CLI_TARGET: /cache/target-cli-bookworm
+      GUI_TARGET: /cache/target-gui-bookworm
+      # The pinned appimagetool and runtime, fetched once and checked against
+      # packaging/appimage/tools.sha256 on every use.
+      TOOL_CACHE: /cache/appimage-tools
     steps:
       # No actions at all in this job: the runner executes actions (and their nested
       # steps) inside the job container, and bare rust:1 has no node — which rules out
@@ -110,17 +126,23 @@ jobs:
           make
           make check-packaging
 
+      - name: AppImage
+        # Wraps the binaries the step above built; `make install` finds them
+        # current and compiles nothing. Fails if they need a glibc newer than the
+        # ceiling, which is the guard on the container image above.
+        run: make appimage
+
       - name: Source and vendor tarballs
         # What a distro builds from with no network (packaging/README.md): the
         # source at this tag, and every dependency of both cargo workspaces.
         run: make sdist vendor
 
       - name: Collect release assets
-        # dist/ also holds the unpacked bundle tree, so stage only what is
-        # published, plus checksums.
+        # dist/ also holds the unpacked bundle tree, the AppDir and the tool
+        # cache, so stage only what is published, plus checksums.
         run: |
           mkdir -p dist/release
-          mv dist/beisl-*.tar.gz dist/beisl-*-vendor.tar.zst dist/release/
+          mv dist/beisl-*.tar.gz dist/beisl-*-vendor.tar.zst dist/Beisl-*.AppImage dist/release/
           cd dist/release && sha256sum * > SHA256SUMS && cat SHA256SUMS
 
       - name: Publish release

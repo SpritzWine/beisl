@@ -118,11 +118,8 @@ fn run(
                 c.authenticate(&id).map_err(word)?;
                 *authed = true;
             }
-            c.call(
-                "apply_miss",
-                serde_json::json!({"key": key, "verb": verb}),
-            )
-            .map_err(word)?;
+            c.call("apply_miss", serde_json::json!({"key": key, "verb": verb}))
+                .map_err(word)?;
             let v = c.call("list_misses", serde_json::json!({})).map_err(word)?;
             if let Ok(rows) = serde_json::from_value::<Vec<MissRow>>(v["misses"].clone()) {
                 let mut o = out.lock().unwrap();

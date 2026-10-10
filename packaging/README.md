@@ -52,6 +52,7 @@ unless there is a reason in writing not to.
 | `fedora/beisl.spec`, `/.copr/Makefile` | Fedora, via COPR | airgapped |
 | `opensuse/beisl.spec` | openSUSE, via OBS | airgapped |
 | `nix/package.nix` | Nix / NixOS | airgapped; built in the Nix sandbox, not yet run on a NixOS desktop |
+| `appimage/` | one runnable file, any distro | airgapped, in a container |
 | `vendor.sh`, `cache-coupler-data.sh` | what `make vendor` runs | |
 | `*.desktop` | **generated** by `make generate`, not committed | |
 
@@ -89,6 +90,33 @@ in one: libcosmic's git dependencies cannot be satisfied from crates.io
 packages. A submission to Fedora proper would need `bundled(crate(...))`
 provides and the combined licence of everything vendored, which the spec does
 not claim.
+
+## The AppImage
+
+`make appimage` stages with `make install` like every other recipe and adds
+only what the format wants: `AppRun`, and a desktop entry and icon at the top
+level. Nothing is bundled. `appimage/build.sh` fetches the two things it needs,
+appimagetool and the runtime, pinned by checksum in `appimage/tools.sha256`.
+
+**Where it runs is decided by where it was built**, not by the format: a binary
+needs a glibc at least as new as the one it was linked against. So `build.sh`
+refuses binaries that need more than glibc 2.36 (`ALLOW_NEW_GLIBC=1` makes a
+local test image), and the image that ships comes from
+
+    packaging/appimage/build-in-container.sh
+
+which builds in Debian 12 from the two tarballs with the network off. Measured:
+the result needs glibc 2.35 at most and starts on Ubuntu 22.04 and Debian 12,
+where a binary built on Fedora 44 (glibc 2.43) refuses to. The same is true of
+the release tarball: built on a current distro, it runs only there. The GUI
+additionally needs the host's libxkbcommon, which every desktop has.
+
+What the AppImage does once it is on a user's machine - launchers instead of
+copied binaries, what they check, what setup shows - is in `DESIGN.md`,
+the "AppImage" section. One trap for anyone working on it: `APPDIR` and
+`APPIMAGE` are inherited by every shell opened from a terminal that is itself
+an AppImage. Do not name a variable after them, and do not believe them
+without checking (`preflight::appimage::running` does).
 
 ## Two workspaces, and one real blocker
 

@@ -42,6 +42,14 @@ directly; it only appears while the theme has no saved preference yet. When
 to the Appearance page — the link never writes anything, and changing or
 reverting the theme flag always happens in Settings.
 
+When started from the AppImage, the window says so. Its first page names the
+file, lists what setting up writes (four launchers in ~/.local/bin, menu
+entries, icons, man pages - nothing is copied out of the AppImage), shows what
+is wrong with where the file is kept and lets you keep it there anyway, and
+removes all of it again. It rechecks on every start and comes up only when
+there is something to say: not set up yet, launchers pointing at another path,
+or a file the launchers would refuse. The checklist links back to it.
+
 When started from an extracted dist tree, an install/update page comes first;
 the Traces page lists every past run — open one for its results, reveal its
 folder, analyze a raw trace, or delete it.

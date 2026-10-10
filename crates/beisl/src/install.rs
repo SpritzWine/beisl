@@ -37,11 +37,23 @@ const ICON_SYMBOLIC: &str = assets::icons::SYMBOLIC;
 const ICON_NAME: &str = "org.spritzwine.Beisl";
 const SESSION_ICON_NAME: &str = "org.spritzwine.BeislSession";
 
-pub fn run(uninstall: bool) -> ExitCode {
-    let res = if uninstall {
-        do_uninstall()
-    } else {
-        do_install()
+pub enum Action {
+    /// `relax`: keep an AppImage where it is although others could replace it,
+    /// and tell the shims not to refuse it for that. Only meaningful from an
+    /// AppImage, and only has an effect when there is something to relax.
+    Install {
+        relax: bool,
+    },
+    Uninstall,
+}
+
+pub fn run(action: Action) -> ExitCode {
+    let res = match action {
+        Action::Uninstall => do_uninstall(),
+        Action::Install { relax } => match preflight::appimage::running() {
+            Some(image) => install_from_appimage(&image, relax),
+            None => do_install(),
+        },
     };
     match res {
         Ok(msg) => {
@@ -126,32 +138,11 @@ fn do_install() -> Result<String, String> {
     }
     // Man pages ride along in the bundle's man/ (rendered from docs/*.1.md — the
     // same files the binaries embed for --help). Per-user manpath, no root.
-    let man_src = here.join("man");
-    if man_src.is_dir() {
-        let man_dst = man1_dir();
-        fs::create_dir_all(&man_dst).map_err(|e| format!("mkdir {}: {e}", man_dst.display()))?;
-        let mut copied = 0;
-        for page in MAN_PAGES {
-            let src = man_src.join(page);
-            if src.is_file() {
-                fs::copy(&src, man_dst.join(page))
-                    .map_err(|e| format!("copy man page {page}: {e}"))?;
-                copied += 1;
-            }
-        }
-        if copied > 0 {
-            extra.push_str("\n  + man pages (try `man beisl`)");
-        }
+    if copy_man_pages(&here.join("man"))? {
+        extra.push_str("\n  + man pages (try `man beisl`)");
     }
 
-    let path_note = if on_path(&bindir) {
-        String::new()
-    } else {
-        format!(
-            "\n\nnote: {} is not on your PATH yet — add it (most desktops pick it up after a re-login).",
-            bindir.display()
-        )
-    };
+    let path_note = path_note(&bindir);
 
     Ok(format!(
         "Installed beisl -> {beisl}{extra}\n\n\
@@ -162,6 +153,127 @@ fn do_install() -> Result<String, String> {
         beisl = beisl_dst.display(),
         indent = "    ",
     ))
+}
+
+fn path_note(bindir: &Path) -> String {
+    if on_path(bindir) {
+        String::new()
+    } else {
+        format!(
+            "\n\nnote: {} is not on your PATH yet — add it (most desktops pick it up after a re-login).",
+            bindir.display()
+        )
+    }
+}
+
+/// Copy whichever man pages `src` has into the per-user manpath. `true` if any did.
+fn copy_man_pages(src: &Path) -> Result<bool, String> {
+    if !src.is_dir() {
+        return Ok(false);
+    }
+    let dst = man1_dir();
+    fs::create_dir_all(&dst).map_err(|e| format!("mkdir {}: {e}", dst.display()))?;
+    let mut copied = false;
+    for page in MAN_PAGES {
+        let from = src.join(page);
+        if from.is_file() {
+            fs::copy(&from, dst.join(page)).map_err(|e| format!("copy man page {page}: {e}"))?;
+            copied = true;
+        }
+    }
+    Ok(copied)
+}
+
+/// Set up from an AppImage: nothing is copied out of it. The file stays where the
+/// user keeps it and is the application; what lands in `~/.local/bin` are scripts
+/// that hand over to it at its actual path (DESIGN.md, "AppImage"). Running this again re-points them, which is how a moved or
+/// replaced file is followed.
+fn install_from_appimage(
+    image: &preflight::appimage::Running,
+    relax: bool,
+) -> Result<String, String> {
+    use preflight::appimage;
+
+    let issues = appimage::inspect(&image.appimage);
+    let blocking: Vec<&appimage::Issue> =
+        issues.iter().filter(|i| i.blocks_strict_shim()).collect();
+    if !blocking.is_empty() && !relax {
+        let list: Vec<String> = blocking
+            .iter()
+            .map(|i| format!("  - {}", i.explain()))
+            .collect();
+        return Err(format!(
+            "not setting up from {}:\n{}\n\
+             A file others can replace would run as you the next time a game starts.\n\
+             Move the AppImage somewhere only you can write and run it again, or keep it\n\
+             there and say so: beisl install --relax-permission-check",
+            image.appimage.display(),
+            list.join("\n"),
+        ));
+    }
+    // Relaxing only ever loosens what needs loosening: with nothing wrong, the
+    // shims stay strict whatever was asked.
+    let strict = blocking.is_empty();
+
+    let bindir = bin_dir();
+    fs::create_dir_all(&bindir).map_err(|e| format!("mkdir {}: {e}", bindir.display()))?;
+    let mut written = Vec::new();
+    for tool in appimage::TOOLS {
+        if !image.appdir.join("usr/bin").join(tool).is_file() {
+            continue;
+        }
+        let dst = bindir.join(tool);
+        write_shim(&dst, &appimage::shim_script(tool, &image.appimage, strict))?;
+        written.push(tool);
+    }
+    if written.contains(&"beisl-setup") {
+        write_desktop(&bindir.join("beisl-setup"))?;
+        write_metainfo()?;
+    }
+    if written.contains(&"beisl-compat") {
+        write_compat_desktop(&bindir.join("beisl-compat"))?;
+    }
+    let man = copy_man_pages(&image.appdir.join("usr/share/man/man1"))?;
+
+    let mut notes = String::new();
+    if !strict {
+        notes.push_str(
+            "\n\nThe permission check is relaxed, as asked: the launchers will run this file \
+             although others could replace it.",
+        );
+    }
+    for issue in issues.iter().filter(|i| !i.blocks_strict_shim()) {
+        notes.push_str(&format!("\n\nnote: {}", issue.explain()));
+    }
+    Ok(format!(
+        "Set up beisl to run from {image}\n\
+         {indent}launchers in {bin}: {tools}\n\
+         {indent}app menu entries, icons{man}\n\n\
+         The AppImage was not copied: it stays where you keep it. If you move or replace it,\n\
+         open it once and setup points the launchers at it again. `beisl uninstall` removes\n\
+         everything listed here and leaves the AppImage alone.\n\n\
+         To trace a game, add this to its launch options (Steam: Properties -> Launch Options):\n\
+         {indent}beisl %command%{notes}{path_note}",
+        image = image.appimage.display(),
+        bin = bindir.display(),
+        tools = written.join(", "),
+        man = if man { ", man pages" } else { "" },
+        indent = "    ",
+        path_note = path_note(&bindir),
+    ))
+}
+
+/// Write a launcher script (0755) by staging and renaming, like `install_file`:
+/// the destination may be a binary that is running right now.
+fn write_shim(dst: &Path, script: &str) -> Result<(), String> {
+    let tmp = dst.with_extension("tmp-install");
+    let staged = fs::write(&tmp, script)
+        .and_then(|_| fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)))
+        .and_then(|_| fs::rename(&tmp, dst));
+    staged.map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("write {}: {e}", dst.display())
+    })
 }
 
 fn do_uninstall() -> Result<String, String> {

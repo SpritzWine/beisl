@@ -1,0 +1,16 @@
+# The build base for a PORTABLE beisl: Debian 12, glibc 2.36.
+#
+# A binary runs on systems whose glibc is at least as new as the newest symbol
+# it uses, so what decides where the AppImage (and the release tarball) starts
+# is this image, not the format. Built here, beisl's binaries need glibc 2.35 at
+# most (measured 2026-10-10) and start on Ubuntu 22.04 and Debian 12; built on a
+# current Fedora they need 2.43 and start nowhere older.
+#
+# The only thing added to the official Rust image is what beisl links or the
+# build scripts call. Network is needed to build THIS image and never again:
+# the beisl build that runs in it gets its sources from two tarballs.
+FROM docker.io/library/rust:1-bookworm
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        libxkbcommon-dev zstd desktop-file-utils appstream \
+ && rm -rf /var/lib/apt/lists/*
