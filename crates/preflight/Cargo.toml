@@ -8,9 +8,9 @@ license.workspace = true
 repository.workspace = true
 
 # Detection is which()/sysfs; fixes are *described* here and executed by the caller (GUI)
-# via pkexec — no process is elevated from inside this crate. serde+toml back the one
+# via pkexec - no process is elevated from inside this crate. serde+toml back the one
 # small persisted config file (the GPU dump-access policy).
 [dependencies]
 assets = { path = "../assets" }
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+toml = "1"
