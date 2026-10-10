@@ -169,8 +169,10 @@ check-packaging: generate
 	appstreamcli validate --no-net crates/assets/data/metainfo/org.spritzwine.Beisl.metainfo.xml
 	desktop-file-validate packaging/*.desktop
 
+# packaging/ holds the tracked recipes; only its rendered desktop entries are
+# build output. Removing the directory itself deleted every recipe.
 clean:
-	rm -rf $(DIST) man packaging
+	rm -rf $(DIST) man packaging/*.desktop
 
 # From-scratch: also drop both cargo target dirs so nothing stale survives a
 # branch switch. Slower — the beisl-gui git-dep tree recompiles from zero.

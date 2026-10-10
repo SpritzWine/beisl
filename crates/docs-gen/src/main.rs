@@ -119,6 +119,12 @@ mod tests {
             pkgbuild.contains(&format!("pkgver={v}")),
             "PKGBUILD pkgver is not {v}"
         );
+        // Its version drives both the source rev and the vendor URL.
+        let nix = include_str!("../../../packaging/nix/package.nix");
+        assert!(
+            nix.contains(&format!("version = \"{v}\";")),
+            "package.nix version is not {v}"
+        );
         for (name, spec) in [
             (
                 "opensuse",

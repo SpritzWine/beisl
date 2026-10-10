@@ -1097,12 +1097,21 @@ fn dump_remove_script() -> String {
 /// (Debian) or a missing perf, fall back to lowering the sysctl.
 pub fn perf_record_fix() -> Fix {
     match perf_path() {
-        Some(p) if is_elf(&p) => Fix::SetcapPerfmon,
+        Some(p) if is_elf(&p) && !in_read_only_store(&p) => Fix::SetcapPerfmon,
         _ => Fix::Sysctl {
             key: "kernel.perf_event_paranoid",
             value: "-1",
         },
     }
+}
+
+/// On NixOS `perf` resolves into /nix/store, which is mounted read-only: a file
+/// capability cannot be set there, so offering setcap would offer a fix that
+/// cannot work. The sysctl is the remedy that can.
+fn in_read_only_store(perf: &Path) -> bool {
+    perf.canonicalize()
+        .unwrap_or_else(|_| perf.to_path_buf())
+        .starts_with("/nix/store")
 }
 
 fn ok_or_fix(present: bool) -> Status {

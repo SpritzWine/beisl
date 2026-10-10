@@ -51,7 +51,7 @@ unless there is a reason in writing not to.
 | `arch/PKGBUILD` | Arch Linux / AUR | online (`make fetch`) |
 | `fedora/beisl.spec`, `/.copr/Makefile` | Fedora, via COPR | airgapped |
 | `opensuse/beisl.spec` | openSUSE, via OBS | airgapped |
-| `nix/package.nix` | Nix / NixOS | airgapped, **untested** |
+| `nix/package.nix` | Nix / NixOS | airgapped; built in the Nix sandbox, not yet run on a NixOS desktop |
 | `vendor.sh`, `cache-coupler-data.sh` | what `make vendor` runs | |
 | `*.desktop` | **generated** by `make generate`, not committed | |
 
@@ -76,8 +76,13 @@ rpm rebuilds inside `unshare -n`, a namespace with no interfaces.
   spec and the two tarballs. OBS's `cargo_vendor` service is deliberately not
   used; it would miss the GUI's separate lockfile and the dropped file.
 - **Nix** fetches the same two artifacts as fixed-output sources, so it needs
-  two hashes rather than one per git dependency. It expects the vendor tarball
-  to be attached to the release, which no release does yet.
+  two hashes rather than one per git dependency. Built in a `nixos/nix`
+  container with the sandbox on and the network off, tests included, from the
+  local tarballs; its header shows how. The two hashes wait for the first
+  release that carries this packaging and the vendor tarball. Unchecked on a
+  real NixOS desktop: opening a window, whether a system-wide `beisl` is
+  visible inside NixOS's Steam environment, and whether libcosmic's own icons
+  render without a COSMIC icon theme.
 
 Fedora means COPR here, not Fedora proper, for the reason COSMIC itself lives
 in one: libcosmic's git dependencies cannot be satisfied from crates.io
