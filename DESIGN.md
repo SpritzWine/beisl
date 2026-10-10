@@ -382,6 +382,55 @@ dist work:
   `beisl install` should learn to copy the AppImage itself + a symlink instead of
   the raw binary.
 
+#### Agreed design (2026-10-10): the AppImage stays the app, shims point at it
+
+Decided against the obvious alternative of having the AppImage unpack its
+binaries into `~/.local/bin`. That would use the format as a self-extracting
+archive, which is what the tarball's `beisl install` already is, and would throw
+away the one thing an AppImage is: a single file that is the application.
+
+- **One file, one stable place.** Installing from the AppImage puts the file
+  itself at a fixed location (`~/.local/lib/beisl/Beisl.AppImage`) and writes four
+  small shim scripts, `~/.local/bin/{beisl,beisl-setup,beisl-compat,beisl-mcp}`,
+  that exec it with the tool's name. The desktop entries point at the shims.
+  Updating is replacing one file; uninstalling is removing it and the shims.
+- **`AppRun` dispatches** on the invoked name first (the shims and any symlink),
+  then on a leading `setup`/`compat`/`mcp` word, and hands everything else to the
+  wrapper. Started with no arguments, as from a double-click, it opens
+  `beisl-setup`.
+- **A missing AppImage must never stop a game.** The `beisl` shim, like the
+  existing `/usr/bin/beisl` Steam shim it sits underneath, says on stderr that
+  its target is gone and then runs the wrapped command untraced. The GUI shims
+  fail with the expected path. Shims do NOT delete themselves: a script that
+  removes itself in the middle of a game launch is a surprise, and it would leave
+  the desktop entries and icons behind anyway.
+- **The setup page says so.** When `beisl-setup` runs from an AppImage it tells
+  the user that it is, what installing will write and where, and offers a way to
+  remove all of it again. Owner's condition for the shim design: nothing lands on
+  the system that the application has not named, and everything it names can be
+  taken back from the same page.
+- **The game's environment stays the game's.** The AppImage runtime exports
+  `APPDIR`, `APPIMAGE`, `ARGV0` and `OWD`; the wrapper removes them before it
+  spawns anything, and `AppRun` sets neither `PATH` nor `LD_LIBRARY_PATH`.
+- **Nothing is bundled**, `appimagetool` is used directly, and `make appimage` is
+  a shim over `make install DESTDIR=AppDir PREFIX=/usr` like every other recipe.
+- **Portability is the build's doing, not the format's.** The binaries must be
+  built against an older glibc (a Debian 12 class image, glibc 2.36); a build on
+  the development machine needs 2.43. The tarball needs the same build to be
+  portable, so the AppImage adds a double-clickable file and catalogue reach on
+  top of it, not a technical gain.
+
+Known code gaps it will need: `preflight::find_tool` looks on `PATH` and in
+`~/.local/bin` but not beside the running executable, so a GUI inside the mount
+would not find its sibling tools without the shims; and `beisl install` looks for
+man pages next to the binary, which is not where an AppDir keeps them.
+
+To be tested on hardware before it is called done: whether the runtime works
+with only `fusermount3` present (the classic one needs libfuse2, which current
+Fedora and Ubuntu do not install), a full Steam launch through the shim with the
+mount living as long as the game, and what happens to the mount when the game is
+killed.
+
 ## Case study: the Saints Row GPU hang (2026-07-05)
 
 What a wrong-layer diagnosis costs, measured on our own kitchen table. Saints Row
