@@ -69,6 +69,13 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.4.0" date="2026-10-10">
+      <description>
+        <p>
+          beisl can now be listed by a software centre, built by a distro without network access, and run as a single AppImage that stays the app.
+        </p>
+      </description>
+    </release>
     <release version="0.3.0" date="2026-09-05">
       <description>
         <p>

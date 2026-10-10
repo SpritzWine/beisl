@@ -15,7 +15,7 @@
 %global debug_package %{nil}
 
 Name:           beisl
-Version:        0.3.0
+Version:        0.4.0
 Release:        1%{?dist}
 Summary:        Find out what made a game stutter
 License:        LGPL-2.1-or-later
@@ -79,5 +79,8 @@ make check-packaging
 %doc README.md
 
 %changelog
+* Sat Oct 10 2026 fschaupp <spritzwine.absently488@passinbox.com> - 0.4.0-1
+- Update to 0.4.0
+
 * Sat Oct 10 2026 fschaupp <spritzwine.absently488@passinbox.com> - 0.3.0-1
 - Initial package, built from upstream's make install

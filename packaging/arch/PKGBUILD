@@ -5,7 +5,7 @@
 # dependencies. Those are fetched in prepare(), which is why this is not a
 # `--offline` build; everything is pinned by the two committed lockfiles.
 pkgname=beisl
-pkgver=0.3.0
+pkgver=0.4.0
 pkgrel=1
 pkgdesc="Find out what made a game stutter: frametimes attributed to game, Wine, driver or kernel"
 arch=('x86_64')

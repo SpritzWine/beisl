@@ -15,7 +15,7 @@
 %global debug_package %{nil}
 
 Name:           beisl
-Version:        0.3.0
+Version:        0.4.0
 Release:        0
 Summary:        Find out what made a game stutter
 License:        LGPL-2.1-or-later

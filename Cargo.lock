@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "artifact"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "compat",
  "serde",
@@ -15,11 +15,11 @@ dependencies = [
 
 [[package]]
 name = "assets"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "beisl"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "artifact",
  "assets",
@@ -32,7 +32,7 @@ dependencies = [
 
 [[package]]
 name = "beisl-mcp"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "compat",
  "preflight",
@@ -48,7 +48,7 @@ checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 
 [[package]]
 name = "compat"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "deunicode"
@@ -58,7 +58,7 @@ checksum = "abd57806937c9cc163efc8ea3910e00a62e2aeb0b8119f1793a978088f8f6b04"
 
 [[package]]
 name = "docs-gen"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "assets",
  "mandown",
@@ -125,7 +125,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "preflight"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "assets",
  "serde",
@@ -223,7 +223,7 @@ dependencies = [
 
 [[package]]
 name = "session"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -231,7 +231,7 @@ dependencies = [
 
 [[package]]
 name = "symbol-resolver"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "syn"
