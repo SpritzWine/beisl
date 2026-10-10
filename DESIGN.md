@@ -473,27 +473,31 @@ away the one thing an AppImage is: a single file that is the application.
   AppDir carries beisl's AppStream component with beisl's id. This is where the
   "is it really beisl's image" question is answered, because here the image is
   already mounted and reading it costs nothing.
-- **At launch the shim checks little, and only what is cheap.** That the recorded
-  path is a regular, executable file and starts like an AppImage (the ELF magic,
-  and `AI\x02` at offset 8). Anything else, it says so and runs the game
-  untraced. It does NOT look inside the image for the AppStream files: they sit
-  in a compressed filesystem, and reading them at launch means either running
-  the very file being questioned or needing `unsquashfs` on every game start. It
-  also does not refuse on ownership or permissions; a hard refusal there was
-  judged too strict (owner, 2026-10-10). The magic check is a sanity check
-  against a stale path now holding some other file, not a defence: a hostile
-  AppImage has the same first bytes.
-- **Permissions are setup's business, with an escape hatch.** When it writes or
-  re-points the shims, setup looks at where the file is kept: owned by the user,
-  not writable by group or others, not in a directory others can write to, not
-  on removable or network media. What it finds is shown on the page, with why
-  it matters - a file others can replace runs as you on the next game launch.
-  The user can move the file, or tell setup to write the shims anyway. Informed,
-  then obeyed. The consequence is accepted knowingly: a file swapped by someone
-  else after setup ran is not noticed until setup runs again.
-- **No identity pin.** Recording the file's inode or digest and refusing a
-  changed file was considered and not taken; it would stop tracing after every
-  in-place update until setup was opened.
+- **At launch the shim checks its target before running it.** That the recorded
+  path is a regular, executable file that starts like an AppImage (the ELF
+  magic, and `AI\x02` at offset 8), and that nobody else could have replaced it:
+  owned by the invoking user, not writable by group or others, and not in a
+  directory others can write to. If any of that fails it says which, and runs
+  the game untraced. The magic check exists so the file cannot simply be swapped
+  for a script of the same name; it is not proof of origin, since any AppImage
+  starts with the same bytes. The shim does NOT look inside the image for the
+  AppStream files: they sit in a compressed filesystem, and reading them at
+  launch means either running the file in question or needing `unsquashfs` on
+  every game start. That check is setup's, above.
+- **Setup can loosen the permission check, on request.** It examines the same
+  things when it writes or re-points the shims, plus whether the file is on
+  removable or network media, shows what it found and why it matters - a file
+  others can replace runs as you on the next game launch - and lets the user
+  either move the file or keep it where it is and relax the check. The relaxed
+  setting is written into the generated shim itself, so it is visible in the
+  file rather than tucked into a config. Informed, then obeyed.
+- **Signed releases come later.** The agreed next step is a signature checked by
+  the shim with `ssh-keygen`, under the rule that later AppImages must be signed
+  by the key of the one first set up from, so updates pass without rerunning
+  setup. Deliberately not in the first version: the checks above were judged
+  enough for a first user base (owner, 2026-10-10). The plan is in the vault,
+  `Tasks/AppImage - signed releases checked by the shim`. A pin on the file's
+  inode or digest was rejected outright, because every update would break it.
 - **The setup page says so.** When `beisl-setup` runs from an AppImage it tells
   the user that it is, what installing will write and where, and offers a way to
   remove all of it again. Owner's condition for the shim design: nothing lands on
