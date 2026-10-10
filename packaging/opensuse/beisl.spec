@@ -24,8 +24,8 @@ URL:            https://codeberg.org/SpritzWine/beisl
 Source0:        %{name}-%{version}.tar.gz
 Source1:        %{name}-%{version}-vendor.tar.zst
 
-BuildRequires:  cargo >= 1.80
-BuildRequires:  rust >= 1.80
+BuildRequires:  cargo >= 1.93
+BuildRequires:  rust >= 1.93
 BuildRequires:  make
 BuildRequires:  zstd
 BuildRequires:  pkgconfig(xkbcommon)

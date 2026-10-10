@@ -84,6 +84,12 @@ gamebus: the launches it could not name.
 - **NixOS hosts.** Preflight finds Vulkan ICD manifests under
   `/run/opengl-driver`, and no longer offers `setcap` on a perf binary in
   the read-only store, where it cannot work; the sysctl is offered instead.
+- **Dependencies are current.** Both workspaces are updated and the COSMIC
+  toolkit pin moves to its master of 2026-10-09. `cargo audit` no longer
+  reports a vulnerability: the two `quick-xml` advisories it had are gone
+  (the crate is only used while building, so no earlier release carried the
+  code). Five warnings remain, all pinned inside the toolkit's own
+  dependencies.
 - `make clean` no longer deletes the tracked recipes in `packaging/`.
 
 ## Heads-up
