@@ -82,6 +82,9 @@ cargo clippy --workspace
 cargo fmt
 cargo check -p beisl             # or -p preflight, -p session, ...
 make man                         # docs/*.1.md -> man/*.1 (cargo run -p docs-gen)
+packaging/bump-version.sh <version> "<sentence>"
+                                 # the ONLY way to change the version: Cargo.toml, both
+                                 # lockfiles, metainfo, PKGBUILD, both specs, package.nix
 (cd crates/beisl-gui && cargo check)   # GUI: separate workspace; heavy git deps,
                                        # slow first build - skip unless GUI changed
 make                             # release-build BOTH workspaces + package the bundle

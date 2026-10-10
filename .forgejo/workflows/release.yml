@@ -15,7 +15,8 @@
 #      Actions token cannot create releases, hence the explicit secret.
 #
 # Cut a release with:
-#   git tag v0.1.0 && git push origin v0.1.0
+#   packaging/bump-version.sh 0.1.0 "<one sentence>"   # every place the version lives
+#   git commit, then: git tag v0.1.0 && git push origin v0.1.0
 #
 # Prereleases follow SemVer: a hyphen in the version (v0.1.0-alpha.1, v1.0.0-rc.2,
 # with Cargo.toml carrying the same version) marks the Codeberg release as
