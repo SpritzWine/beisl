@@ -5,6 +5,8 @@
 #   make build      # just compile both workspaces (release)
 #   make clean      # remove dist/ only (cargo targets kept — cheap; incremental
 #                   #   rebuilds still pick up source changes on the current branch)
+#   make install    # stage a system install into $(DESTDIR)$(PREFIX) -- what a
+#                   #   distro package builds against; see packaging/
 #   make distclean  # clean + drop BOTH cargo target dirs, forcing a from-scratch
 #                   #   rebuild. Use after a branch switch if you don't trust the
 #                   #   incremental state — `make distclean && make`. Slower: the
@@ -29,7 +31,16 @@ BUNDLE  := beisl-$(VERSION)
 CLI_TARGET ?= target
 GUI_TARGET ?= crates/beisl-gui/target
 
-.PHONY: all build build-cli build-gui man package clean distclean
+# Where `make install` stages a system install. A distro package sets DESTDIR to
+# its build root and leaves PREFIX at /usr; `make install PREFIX=$HOME/.local` is
+# the same layout for one user. This is NOT what `beisl install` does: that is the
+# tarball's own user-level install, which copies binaries out of an extracted
+# bundle. A packaged beisl is placed by the package manager and must never write
+# into the system itself.
+DESTDIR ?=
+PREFIX  ?= /usr/local
+
+.PHONY: all build build-cli build-gui man generate package install clean distclean
 
 all: package
 
@@ -45,10 +56,12 @@ build-gui:
 
 # docs/*.1.md -> man/*.1 — pure cargo (the docs-gen crate), so CI needs no
 # distro markdown tool. The same files feed the binaries' --help via include_str!.
-man:
+# Man pages and the packaging desktop entries, both rendered from the sources the
+# binaries themselves embed. `man` stays as the name people already type.
+generate man:
 	cargo run --release -p docs-gen --target-dir $(CLI_TARGET)
 
-package: build man
+package: build generate
 	rm -rf $(DIST)/$(BUNDLE)
 	mkdir -p $(DIST)/$(BUNDLE)/man
 	install -m755 $(CLI_TARGET)/release/beisl $(DIST)/$(BUNDLE)/
@@ -60,8 +73,35 @@ package: build man
 	tar -C $(DIST) -czf $(DIST)/$(BUNDLE)-$(ARCH).tar.gz $(BUNDLE)
 	@echo "packaged: $(DIST)/$(BUNDLE)-$(ARCH).tar.gz"
 
+# Everything a distro package ships, in the layout the FHS and the freedesktop
+# specs expect. Depends on `man` for the rendered pages and on the release build.
+install: build generate
+	install -Dm755 $(CLI_TARGET)/release/beisl        $(DESTDIR)$(PREFIX)/bin/beisl
+	install -Dm755 $(CLI_TARGET)/release/beisl-mcp    $(DESTDIR)$(PREFIX)/bin/beisl-mcp
+	install -Dm755 $(GUI_TARGET)/release/beisl-setup  $(DESTDIR)$(PREFIX)/bin/beisl-setup
+	install -Dm755 $(GUI_TARGET)/release/beisl-compat $(DESTDIR)$(PREFIX)/bin/beisl-compat
+	for m in man/*.1; do \
+	    install -Dm644 "$$m" "$(DESTDIR)$(PREFIX)/share/man/man1/$$(basename $$m)"; \
+	done
+	install -Dm644 crates/assets/data/metainfo/org.spritzwine.Beisl.metainfo.xml \
+	    $(DESTDIR)$(PREFIX)/share/metainfo/org.spritzwine.Beisl.metainfo.xml
+	install -Dm644 crates/assets/data/icons/icon-glass-pour.svg \
+	    $(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/org.spritzwine.Beisl.svg
+	install -Dm644 crates/assets/data/icons/icon-glass-pour.svg \
+	    $(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/org.spritzwine.BeislSession.svg
+	install -Dm644 crates/assets/data/icons/icon-symbolic.svg \
+	    $(DESTDIR)$(PREFIX)/share/icons/hicolor/symbolic/apps/org.spritzwine.Beisl-symbolic.svg
+	install -Dm644 packaging/org.spritzwine.Beisl.desktop \
+	    $(DESTDIR)$(PREFIX)/share/applications/org.spritzwine.Beisl.desktop
+	install -Dm644 packaging/org.spritzwine.BeislCompat.desktop \
+	    $(DESTDIR)$(PREFIX)/share/applications/org.spritzwine.BeislCompat.desktop
+	install -Dm644 packaging/org.spritzwine.BeislSession.desktop \
+	    $(DESTDIR)$(PREFIX)/share/applications/org.spritzwine.BeislSession.desktop
+	install -Dm644 LICENSE $(DESTDIR)$(PREFIX)/share/licenses/beisl/LICENSE
+	@echo "installed into $(DESTDIR)$(PREFIX)"
+
 clean:
-	rm -rf $(DIST) man
+	rm -rf $(DIST) man packaging
 
 # From-scratch: also drop both cargo target dirs so nothing stale survives a
 # branch switch. Slower — the beisl-gui git-dep tree recompiles from zero.

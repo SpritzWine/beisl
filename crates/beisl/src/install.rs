@@ -23,6 +23,10 @@ const LEGACY_DESKTOP_FILE: &str = "org.spritzwine.beisl-setup.desktop";
 /// app_id has no desktop file gets a generic gear and the raw id in the taskbar).
 const SESSION_DESKTOP_FILE: &str = "org.spritzwine.BeislSession.desktop";
 /// The compat-finding window's entry; basename = its APP_ID, for the same pairing.
+/// Visible in the app menu like the setup app, but deliberately NOT a second
+/// AppStream component: beisl is one listing in a software centre with several
+/// entries behind it, so this one carries `X-AppStream-Ignore` to stop a distro's
+/// metadata generator synthesising a component from the desktop file.
 const COMPAT_DESKTOP_FILE: &str = "org.spritzwine.BeislCompat.desktop";
 
 // Das Glasl — embedded via the assets crate, so `beisl install` works from a bare
@@ -231,60 +235,29 @@ fn same_file(a: &Path, b: &Path) -> bool {
 fn write_desktop(exec: &Path) -> Result<(), String> {
     let dir = applications_dir();
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
-    let contents = format!(
-        "[Desktop Entry]\n\
-         Type=Application\n\
-         Name=Beisl Setup\n\
-         Comment=Check prerequisites for perf tracing\n\
-         Exec={}\n\
-         Icon={icon}\n\
-         Terminal=false\n\
-         Categories=Utility;System;\n",
-        exec.display(),
-        icon = ICON_NAME,
-    );
-    fs::write(dir.join(DESKTOP_FILE), contents).map_err(|e| format!("write desktop entry: {e}"))?;
+    let exec = exec.display().to_string();
+    fs::write(
+        dir.join(DESKTOP_FILE),
+        assets::desktop::render(assets::desktop::SETUP, &exec),
+    )
+    .map_err(|e| format!("write desktop entry: {e}"))?;
     let _ = fs::remove_file(dir.join(LEGACY_DESKTOP_FILE)); // pre-rename installs
-                                                            // The session window's app_id gets its own (menu-hidden) entry: same artwork,
-                                                            // no Exec anyone should launch by hand — windows land on it via app_id matching.
-    let session = format!(
-        "[Desktop Entry]\n\
-         Type=Application\n\
-         Name=Beisl Session\n\
-         Exec={} --session %f\n\
-         Icon={}\n\
-         Terminal=false\n\
-         NoDisplay=true\n\
-         Categories=Utility;System;\n",
-        exec.display(),
-        SESSION_ICON_NAME,
-    );
-    fs::write(dir.join(SESSION_DESKTOP_FILE), session)
-        .map_err(|e| format!("write session desktop entry: {e}"))?;
-    write_icons()?;
-    Ok(())
+    fs::write(
+        dir.join(SESSION_DESKTOP_FILE),
+        assets::desktop::render(assets::desktop::SESSION, &exec),
+    )
+    .map_err(|e| format!("write session desktop entry: {e}"))?;
+    write_icons()
 }
 
-/// Put das Glasl where the icon theme looks for it. Same artwork under both names
-/// (the setup entry's and the session app_id's); the symbolic variant rides along
-/// for shells that prefer it (tray/menu contexts).
-/// The compat window's own menu entry: same artwork as the setup app, its own app_id.
 fn write_compat_desktop(exec: &Path) -> Result<(), String> {
     let dir = applications_dir();
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
-    let contents = format!(
-        "[Desktop Entry]\n\
-         Type=Application\n\
-         Name=Beisl Compat Findings\n\
-         Comment=Review the compat walls beisl found and file them upstream\n\
-         Exec={}\n\
-         Icon={ICON_NAME}\n\
-         Terminal=false\n\
-         Categories=Utility;System;\n",
-        exec.display(),
-    );
-    fs::write(dir.join(COMPAT_DESKTOP_FILE), contents)
-        .map_err(|e| format!("write desktop entry: {e}"))
+    fs::write(
+        dir.join(COMPAT_DESKTOP_FILE),
+        assets::desktop::render(assets::desktop::COMPAT, &exec.display().to_string()),
+    )
+    .map_err(|e| format!("write desktop entry: {e}"))
 }
 
 /// The AppStream component, beside the desktop entry it launches.
@@ -295,6 +268,9 @@ fn write_metainfo() -> Result<(), String> {
     fs::write(&path, assets::metainfo::XML).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
+/// Put das Glasl where the icon theme looks for it. Same artwork under both names
+/// (the setup entry's and the session app_id's); the symbolic variant rides along
+/// for shells that prefer it (tray/menu contexts).
 fn write_icons() -> Result<(), String> {
     let icons = home().join(".local/share/icons/hicolor");
     let scalable = icons.join("scalable/apps");
