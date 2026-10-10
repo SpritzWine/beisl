@@ -1,23 +1,25 @@
 # beisl for Nix.
 #
-# Built and run once, 2026-10-10, in a nixos/nix container (Nix 2.35.2,
-# nixpkgs-unstable 26.05pre, rustc 1.95.0) with the sandbox on and the
-# container's network off: evaluation, the offline cargo build of both
-# workspaces, `cargo test`, `make check-packaging`, install, and all four
-# binaries answering --version from the store path. The two GUI binaries got
-# the rpath below, and every library name found in them exists on it (checked
-# by name, not by opening a window); `beisl` and `beisl-mcp` kept the plain
-# glibc rpath. NOT verified: the two hashes (no
-# release carries the vendor tarball yet, and the v0.3.0 tag predates the
-# Makefile targets this calls, so the published sources cannot be built as
-# named today), and opening a window on a NixOS desktop.
+# Built and run on 2026-10-10 in a nixos/nix container (Nix 2.35.2,
+# nixpkgs-unstable 26.05pre, rustc 1.95.0) with the sandbox on, which is what
+# keeps the cargo part off the network: evaluation, the offline build of both
+# workspaces, the root workspace's tests (none skipped), `make check-packaging`,
+# install, and all four binaries answering --version from the store path. The
+# two GUI binaries carry the rpath below after Nix's own fixup, and every
+# library name embedded in them resolves to a file on it (checked by name, not
+# by opening a window); `beisl` and `beisl-mcp` keep the plain glibc rpath.
+# NOT verified: the two hashes, and opening a window on a NixOS desktop.
 #
-# That run used the local artifacts instead of the published ones, which is
-# how to build from a checkout until a release ships both:
+# The hashes stay lib.fakeHash because the published sources cannot be built
+# as named today: no release carries the vendor tarball yet, and the newest
+# tag predates the Makefile targets this calls. The first build with a real
+# release prints them. Until then, build from a checkout with the local
+# artifacts (`make sdist vendor` first), which is what the run above did;
+# prev.version keeps the file names right across a version bump:
 #
-#   (callPackage ./packaging/nix/package.nix { }).overrideAttrs (_: {
-#     src = ./dist/beisl-0.3.0.tar.gz;             # make sdist
-#     vendor = ./dist/beisl-0.3.0-vendor.tar.zst;  # make vendor
+#   (callPackage ./packaging/nix/package.nix { }).overrideAttrs (prev: {
+#     src = ./dist + "/beisl-${prev.version}.tar.gz";
+#     vendor = ./dist + "/beisl-${prev.version}-vendor.tar.zst";
 #   })
 #
 # Once a release carries both, with the hashes filled in:
@@ -68,9 +70,9 @@ stdenv.mkDerivation (finalAttrs: {
     hash = lib.fakeHash; # fill in on the first build
   };
 
-  # Published beside the release by upstream's `make vendor`. Not yet attached
-  # to a release as of 0.3.0; until it is, build it locally with `make vendor`
-  # and point this at the file (overrideAttrs, see the top of the file).
+  # Published beside the release by upstream's `make vendor`. No release
+  # carries it yet; until one does, build it locally with `make vendor` and
+  # point this at the file (overrideAttrs, see the top of the file).
   vendor = fetchurl {
     url = "https://codeberg.org/SpritzWine/beisl/releases/download/v${finalAttrs.version}/beisl-${finalAttrs.version}-vendor.tar.zst";
     hash = lib.fakeHash; # fill in on the first build
