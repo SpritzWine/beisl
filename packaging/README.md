@@ -1,8 +1,27 @@
 # Packaging
 
-Recipes for distributions that build from source. Both call `make install
-DESTDIR=... PREFIX=/usr`, so the file layout lives in one place (the Makefile)
-rather than being restated per distro.
+Recipes for distributions that build from source.
+
+**The Makefile is the build system; a recipe is metadata plus four calls.** No
+packaging logic lives here, so adding a distro does not mean reimplementing
+anything, and changing what beisl installs does not mean editing every recipe.
+
+| target | what a recipe uses it for |
+|---|---|
+| `make fetch` | download both workspaces' dependencies (network) |
+| `make vendor` | the same, for a build that must then be offline |
+| `make build generate` | compile, and render the man pages and desktop entries |
+| `make install DESTDIR=... PREFIX=/usr` | stage everything, in FHS layout |
+| `make check-packaging` | validate what a software centre and a linter read |
+
+`make install MANIFEST=<file>` additionally writes every installed path, one
+per line. The rpm spec feeds that to `%files -f`, so the package's file list
+*is* upstream's install list: a file added to `make install` ships without
+anyone touching the spec. That replaced fifteen hand-maintained paths, which
+is exactly the kind of list that silently rots.
+
+What stays per-distro is only what genuinely differs: dependency names, the
+metadata syntax, and whether the build may touch the network.
 
 | Path | For |
 |---|---|
@@ -34,10 +53,9 @@ because cargo clones git dependencies with their submodules. So the vendor
 step caches it back, and the build then finds it without reaching for the
 network:
 
-    cargo vendor --locked vendor
-    opensuse/cache-coupler-data.sh vendor
+    make vendor
 
-The vendored crate sits at `vendor/gamebus-coupler/`, so the relative path its
+`make vendor` does both steps. The vendored crate sits at `vendor/gamebus-coupler/`, so the relative path its
 `build.rs` already uses resolves to `vendor/gamedb/stores.toml`. Verified: the
 whole GUI workspace then compiles with `--offline`. No upstream change needed
 to package today, and the script removes itself from the picture once the

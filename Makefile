@@ -5,8 +5,17 @@
 #   make build      # just compile both workspaces (release)
 #   make clean      # remove dist/ only (cargo targets kept — cheap; incremental
 #                   #   rebuilds still pick up source changes on the current branch)
-#   make install    # stage a system install into $(DESTDIR)$(PREFIX) -- what a
-#                   #   distro package builds against; see packaging/
+#   make fetch      # download both workspaces' dependencies (needs network)
+#   make vendor     # vendor them for an OFFLINE build, into vendor/ and
+#                   #   crates/beisl-gui/vendor/
+#   make install    # stage a system install into $(DESTDIR)$(PREFIX); set
+#                   #   MANIFEST=<file> to also write the list of installed paths
+#   make check-packaging
+#                   # validate what a software centre and a packager will read
+#
+# Those four are the packaging contract: a distro recipe supplies metadata and
+# calls them, so the build logic lives here once instead of in every recipe.
+# See packaging/README.md.
 #   make distclean  # clean + drop BOTH cargo target dirs, forcing a from-scratch
 #                   #   rebuild. Use after a branch switch if you don't trust the
 #                   #   incremental state — `make distclean && make`. Slower: the
@@ -40,7 +49,13 @@ GUI_TARGET ?= crates/beisl-gui/target
 DESTDIR ?=
 PREFIX  ?= /usr/local
 
-.PHONY: all build build-cli build-gui man generate package install clean distclean
+# Set to a path and `make install` also writes every installed file there, one
+# per line, relative to DESTDIR. An rpm spec feeds it to `%files -f`, which is
+# what stops a package's file list drifting from what upstream installs.
+MANIFEST ?=
+
+.PHONY: all build build-cli build-gui man generate package install fetch vendor \
+        check-packaging clean distclean
 
 all: package
 
@@ -98,7 +113,37 @@ install: build generate
 	install -Dm644 packaging/org.spritzwine.BeislSession.desktop \
 	    $(DESTDIR)$(PREFIX)/share/applications/org.spritzwine.BeislSession.desktop
 	install -Dm644 LICENSE $(DESTDIR)$(PREFIX)/share/licenses/beisl/LICENSE
+	@if [ -n "$(MANIFEST)" ]; then \
+	    find "$(DESTDIR)$(PREFIX)" -type f \
+	        | sed -e "s|^$(DESTDIR)||" \
+	        | grep -v '/share/licenses/' \
+	        | sort > "$(MANIFEST)"; \
+	    echo "manifest: $(MANIFEST) ($$(wc -l < "$(MANIFEST)") paths)"; \
+	fi
 	@echo "installed into $(DESTDIR)$(PREFIX)"
+
+# Both workspaces, because the GUI is excluded from the root one and carries
+# its own lockfile: one fetch would miss libcosmic's rev-pinned git tree.
+fetch:
+	cargo fetch --locked
+	cargo fetch --locked --manifest-path crates/beisl-gui/Cargo.toml
+
+# The same, for a build that may not touch the network afterwards. The second
+# step puts back what cargo vendor drops: gamebus-coupler reads a store list
+# from a sibling submodule, outside its own package, so a vendored tree has to
+# have it restored or the build panics. Nothing is downloaded by that step.
+vendor:
+	cargo vendor --locked vendor > vendor-config.toml
+	cargo vendor --locked --manifest-path crates/beisl-gui/Cargo.toml \
+	    crates/beisl-gui/vendor > crates/beisl-gui/vendor-config.toml
+	packaging/cache-coupler-data.sh crates/beisl-gui/vendor
+
+# What a software centre and a packaging linter will read. Worth failing the
+# build over: a component a centre rejects is found before release this way,
+# and after it otherwise.
+check-packaging: generate
+	appstreamcli validate --no-net crates/assets/data/metainfo/org.spritzwine.Beisl.metainfo.xml
+	desktop-file-validate packaging/*.desktop
 
 clean:
 	rm -rf $(DIST) man packaging

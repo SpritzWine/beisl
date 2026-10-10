@@ -17,21 +17,19 @@ depends=('libxkbcommon')
 optdepends=('perf: CPU sampling, without which only frametimes are recorded'
             'mangohud: the frametime side-channel beisl reads'
             'gamebus-presenced: resolves game names, and houses compat findings')
-makedepends=('cargo' 'git')
+makedepends=('cargo' 'git' 'appstream' 'desktop-file-utils')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
 prepare() {
   cd "$pkgname"
   export RUSTUP_TOOLCHAIN=stable
-  cargo fetch --locked
-  cargo fetch --locked --manifest-path crates/beisl-gui/Cargo.toml
+  make fetch
 }
 
 build() {
   cd "$pkgname"
   export RUSTUP_TOOLCHAIN=stable
-  export CARGO_TARGET_DIR=target
   make build generate
 }
 
@@ -39,11 +37,11 @@ check() {
   cd "$pkgname"
   export RUSTUP_TOOLCHAIN=stable
   cargo test --workspace --locked
+  make check-packaging
 }
 
 package() {
   cd "$pkgname"
-  # Everything the package ships comes from one target, so the layout cannot
-  # drift from what upstream installs.
+  # The layout lives in the Makefile, so this recipe cannot drift from it.
   make install DESTDIR="$pkgdir" PREFIX=/usr
 }

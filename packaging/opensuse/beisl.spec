@@ -55,30 +55,17 @@ cp %{SOURCE2} crates/beisl-gui/.cargo/config.toml
 make build generate CLI_TARGET=target GUI_TARGET=crates/beisl-gui/target
 
 %install
-make install DESTDIR=%{buildroot} PREFIX=%{_prefix}
+# MANIFEST makes upstream's install list the package's file list, so the two
+# cannot drift: a file added to `make install` ships without touching this spec.
+make install DESTDIR=%{buildroot} PREFIX=%{_prefix} \
+    MANIFEST=%{_builddir}/beisl-filelist
 
 %check
 cargo test --workspace --offline
-appstream-util validate-relax --nonet \
-    %{buildroot}%{_datadir}/metainfo/org.spritzwine.Beisl.metainfo.xml
+make check-packaging
 
-%files
+%files -f %{_builddir}/beisl-filelist
 %license LICENSE
 %doc README.md
-%{_bindir}/beisl
-%{_bindir}/beisl-mcp
-%{_bindir}/beisl-setup
-%{_bindir}/beisl-compat
-%{_mandir}/man1/beisl.1%{?ext_man}
-%{_mandir}/man1/beisl-mcp.1%{?ext_man}
-%{_mandir}/man1/beisl-setup.1%{?ext_man}
-%{_mandir}/man1/beisl-compat.1%{?ext_man}
-%{_datadir}/applications/org.spritzwine.Beisl.desktop
-%{_datadir}/applications/org.spritzwine.BeislCompat.desktop
-%{_datadir}/applications/org.spritzwine.BeislSession.desktop
-%{_datadir}/icons/hicolor/scalable/apps/org.spritzwine.Beisl.svg
-%{_datadir}/icons/hicolor/scalable/apps/org.spritzwine.BeislSession.svg
-%{_datadir}/icons/hicolor/symbolic/apps/org.spritzwine.Beisl-symbolic.svg
-%{_datadir}/metainfo/org.spritzwine.Beisl.metainfo.xml
 
 %changelog
