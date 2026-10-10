@@ -1,0 +1,49 @@
+# Maintainer: fschaupp <spritzwine.absently488@passinbox.com>
+#
+# beisl builds TWO cargo workspaces: the light CLI one, and crates/beisl-gui,
+# which is excluded from it because libcosmic pulls ~48 rev-pinned git
+# dependencies. Those are fetched in prepare(), which is why this is not a
+# `--offline` build; everything is pinned by the two committed lockfiles.
+pkgname=beisl
+pkgver=0.3.0
+pkgrel=1
+pkgdesc="Find out what made a game stutter: frametimes attributed to game, Wine, driver or kernel"
+arch=('x86_64')
+url="https://codeberg.org/SpritzWine/beisl"
+license=('LGPL-2.1-or-later')
+depends=('libxkbcommon')
+# perf does the sampling; beisl-setup checks for it and explains the fix when it
+# is missing, so it is not a hard dependency - beisl still records frametimes.
+optdepends=('perf: CPU sampling, without which only frametimes are recorded'
+            'mangohud: the frametime side-channel beisl reads'
+            'gamebus-presenced: resolves game names, and houses compat findings')
+makedepends=('cargo' 'git')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked
+  cargo fetch --locked --manifest-path crates/beisl-gui/Cargo.toml
+}
+
+build() {
+  cd "$pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  make build generate
+}
+
+check() {
+  cd "$pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --workspace --locked
+}
+
+package() {
+  cd "$pkgname"
+  # Everything the package ships comes from one target, so the layout cannot
+  # drift from what upstream installs.
+  make install DESTDIR="$pkgdir" PREFIX=/usr
+}

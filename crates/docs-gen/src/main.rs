@@ -107,4 +107,23 @@ mod tests {
             }
         }
     }
+
+    /// The distro recipes carry the version in their own syntax, and a packager
+    /// building a stale one ships binaries that disagree with their package. This
+    /// is the same drift the metainfo's newest release guards against.
+    #[test]
+    fn the_packaging_recipes_name_the_version_being_built() {
+        let v = env!("CARGO_PKG_VERSION");
+        let pkgbuild = include_str!("../../../packaging/arch/PKGBUILD");
+        let spec = include_str!("../../../packaging/opensuse/beisl.spec");
+        assert!(
+            pkgbuild.contains(&format!("pkgver={v}")),
+            "PKGBUILD pkgver is not {v}"
+        );
+        assert!(
+            spec.contains(&format!("Version:        {v}")),
+            "spec Version is not {v}"
+        );
+    }
+
 }
