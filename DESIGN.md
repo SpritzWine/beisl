@@ -437,6 +437,15 @@ dist work:
 
 #### Agreed design (2026-10-10): the AppImage stays the app, shims point at it
 
+**Built 2026-10-10** as designed below, apart from signed releases. Verified
+against a real image in a scratch home: each launcher reaches its tool; a moved
+file, a script in its place and a world-writable file are each named and the
+game still starts; a game started through the image gets the same environment
+as one started through the native binary; the setup window runs from inside the
+mount, and the mount is gone after the process is killed. The code is
+`preflight::appimage`, `beisl install`, the setup app's AppImage page, and
+`packaging/appimage/`.
+
 Decided against the obvious alternative of having the AppImage unpack its
 binaries into `~/.local/bin`. That would use the format as a self-extracting
 archive, which is what the tarball's `beisl install` already is, and would throw
@@ -514,16 +523,11 @@ away the one thing an AppImage is: a single file that is the application.
   portable, so the AppImage adds a double-clickable file and catalogue reach on
   top of it, not a technical gain.
 
-Known code gaps it will need: `preflight::find_tool` looks on `PATH` and in
-`~/.local/bin` but not beside the running executable, so a GUI inside the mount
-would not find its sibling tools without the shims; and `beisl install` looks for
-man pages next to the binary, which is not where an AppDir keeps them.
 
-To be tested on hardware before it is called done: whether the runtime works
-with only `fusermount3` present (the classic one needs libfuse2, which current
-Fedora and Ubuntu do not install), a full Steam launch through the shim with the
-mount living as long as the game, and what happens to the mount when the game is
-killed.
+Still to be tested on hardware: whether the runtime works with only
+`fusermount3` present (the development machine has both; the pinned runtime is
+statically linked, so libfuse2 itself is not needed), and a full Steam launch
+through a launcher with the mount living as long as the game.
 
 ## Case study: the Saints Row GPU hang (2026-07-05)
 

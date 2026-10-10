@@ -174,11 +174,14 @@ srpm: sdist vendor
 # then points at that terminal's mount. Found the hard way; the mount being
 # read-only was the only thing that made it harmless.
 override BEISL_APPDIR := $(abspath $(DIST))/Beisl.AppDir
+# Where the pinned appimagetool and runtime are kept once fetched and verified.
+# Overridable so a build without network can be handed a cache filled elsewhere.
+TOOL_CACHE ?= $(abspath $(DIST))/tools
 appimage:
 	rm -rf $(BEISL_APPDIR)
 	$(MAKE) install DESTDIR=$(BEISL_APPDIR) PREFIX=/usr
 	packaging/appimage/build.sh $(BEISL_APPDIR) \
-	    $(abspath $(DIST))/Beisl-$(VERSION)-$(ARCH).AppImage $(abspath $(DIST))/tools
+	    $(abspath $(DIST))/Beisl-$(VERSION)-$(ARCH).AppImage $(TOOL_CACHE)
 
 # What a software centre and a packaging linter will read. Worth failing the
 # build over: a component a centre rejects is found before release this way,
