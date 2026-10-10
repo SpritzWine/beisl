@@ -4,8 +4,8 @@ Game perf-tracing tool (Rust, early v0): wraps a game launch (`beisl %command%` 
 sets up the environment (MangoHud frametime CSV side-channel, optional GPU pin), records
 `perf` + logs into a per-run trace dir under `~/.local/share/beisl/traces/run-*/`
 (`session.json`, `beisl.log`, `perf.log`, `perf.data`, MangoHud CSV), and publishes live
-state for a session window. Wine-agnostic by design. `DESIGN.md` has the architecture,
-case studies, and roadmap. Symbol resolution (Exports tier), artifact export, the trace
+state for a session window. Wine-agnostic by design. `DESIGN.md` is the current design:
+architecture, the rules it does not bend, case studies, and what is still open. Symbol resolution (Exports tier), artifact export, the trace
 library, and the MCP server are built; the Full/DWARF symbol tier is still open.
 
 ## Mandatory rules (all projects)

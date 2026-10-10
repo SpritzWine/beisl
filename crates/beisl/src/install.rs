@@ -186,8 +186,7 @@ fn copy_man_pages(src: &Path) -> Result<bool, String> {
 
 /// Set up from an AppImage: nothing is copied out of it. The file stays where the
 /// user keeps it and is the application; what lands in `~/.local/bin` are scripts
-/// that hand over to it at its actual path (DESIGN.md, "Agreed design
-/// (2026-10-10)"). Running this again re-points them, which is how a moved or
+/// that hand over to it at its actual path (DESIGN.md, "AppImage"). Running this again re-points them, which is how a moved or
 /// replaced file is followed.
 fn install_from_appimage(
     image: &preflight::appimage::Running,

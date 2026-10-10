@@ -3,7 +3,7 @@
 //! An AppImage is the application, as one file the user keeps wherever they like.
 //! So nothing is copied out of it. Setting up writes small scripts into
 //! `~/.local/bin` that hand over to the file at its actual path, and setup rechecks
-//! that path every time it runs (DESIGN.md, "Agreed design (2026-10-10)").
+//! that path every time it runs (DESIGN.md, "AppImage").
 //!
 //! Detection only, like the rest of this crate: what is here inspects and renders;
 //! `beisl install` does the writing.

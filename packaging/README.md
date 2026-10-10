@@ -113,7 +113,7 @@ additionally needs the host's libxkbcommon, which every desktop has.
 
 What the AppImage does once it is on a user's machine - launchers instead of
 copied binaries, what they check, what setup shows - is in `DESIGN.md`,
-"Agreed design (2026-10-10)". One trap for anyone working on it: `APPDIR` and
+the "AppImage" section. One trap for anyone working on it: `APPDIR` and
 `APPIMAGE` are inherited by every shell opened from a terminal that is itself
 an AppImage. Do not name a variable after them, and do not believe them
 without checking (`preflight::appimage::running` does).

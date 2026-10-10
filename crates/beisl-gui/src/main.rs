@@ -125,7 +125,7 @@ enum Page {
     /// The trace library: past runs on disk. Each run opens in the session window it
     /// already had while recording (`beisl-setup --session <dir>`) — the ask, the
     /// results view, and live/error states all come for free by reusing that window
-    /// instead of re-embedding its surfaces here (DESIGN.md: "reusing that same view").
+    /// instead of re-embedding its surfaces here (DESIGN.md, "Surfaces": the library opens the same window).
     Traces,
 }
 

@@ -212,7 +212,7 @@ impl Session {
 /// The trace library: enumerating past runs on disk.
 ///
 /// The wrapper writes each trace to `<data>/beisl/traces/run-<unix_ts>/`; this module is
-/// the UI-agnostic "list past runs" answer the trace library (DESIGN.md, v1) builds on.
+/// the UI-agnostic "list past runs" answer the trace library (DESIGN.md, "Surfaces") builds on.
 /// It lives here because `session.json` is already this crate's bridge between the
 /// wrapper and the GUI — the library is the same bridge, across time instead of live.
 pub mod library {
