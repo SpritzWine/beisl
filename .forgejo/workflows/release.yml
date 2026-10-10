@@ -1,8 +1,12 @@
 # Release pipeline (Codeberg / Forgejo Actions).
 #
 # Trigger: pushing a tag `v*` whose version matches Cargo.toml. Builds both
-# workspaces via `make` (the same dist tarball a local build produces) and
-# attaches it + SHA256SUMS to a Codeberg release for the tag.
+# workspaces once and attaches to a Codeberg release for the tag:
+#   beisl-<v>-<arch>.tar.gz       the bundle `beisl install` runs from
+#   beisl-<v>.tar.gz              the source, as distro recipes expect it
+#   beisl-<v>-vendor.tar.zst      every dependency, for a build with no network
+#   SHA256SUMS
+# The last two are what packaging/ builds from (see packaging/README.md).
 #
 # One-time repo setup on Codeberg:
 #   1. Settings → Units → enable Actions.
@@ -97,17 +101,26 @@ jobs:
 
       - name: Build and package
         # libxkbcommon-dev: see the container comment up top (sctk build script).
+        # zstd packs the vendor tarball; desktop-file-utils and appstream are what
+        # `make check-packaging` validates the desktop entries and metainfo with.
         run: |
-          apt-get -qq update && apt-get -qq install -y --no-install-recommends libxkbcommon-dev >/dev/null
+          apt-get -qq update && apt-get -qq install -y --no-install-recommends \
+            libxkbcommon-dev zstd desktop-file-utils appstream >/dev/null
           make
+          make check-packaging
+
+      - name: Source and vendor tarballs
+        # What a distro builds from with no network (packaging/README.md): the
+        # source at this tag, and every dependency of both cargo workspaces.
+        run: make sdist vendor
 
       - name: Collect release assets
-        # forgejo-release uploads everything in release-dir; dist/ also holds
-        # the unpacked bundle tree, so stage only the tarball + checksums.
+        # dist/ also holds the unpacked bundle tree, so stage only what is
+        # published, plus checksums.
         run: |
           mkdir -p dist/release
-          mv dist/beisl-*.tar.gz dist/release/
-          cd dist/release && sha256sum * > SHA256SUMS
+          mv dist/beisl-*.tar.gz dist/beisl-*-vendor.tar.zst dist/release/
+          cd dist/release && sha256sum * > SHA256SUMS && cat SHA256SUMS
 
       - name: Publish release
         # Straight Forgejo API, no action: forgejo-release is composite bash, but it

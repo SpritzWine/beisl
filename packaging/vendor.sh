@@ -41,7 +41,10 @@ vendor_one "$root/crates/beisl-gui/Cargo.toml" crates/beisl-gui
 # Put back what cargo vendor drops (see the script for the why).
 "$root/packaging/cache-coupler-data.sh" "$stage/crates/beisl-gui/vendor"
 
-# Stable order, owner and mtime, so the same lockfiles give the same tarball.
+# Fixed order, owner and mtime keep run-to-run noise out of the tarball. It is
+# still not bit-identical across machines (measured: a Debian 12 container and a
+# Fedora host disagree, tar and zstd versions differ), so a recipe that pins a
+# hash must pin the PUBLISHED file's, not rebuild and compare.
 mkdir -p "$(dirname "$out")"
 tar -C "$stage" --sort=name --owner=0 --group=0 --numeric-owner \
     --mtime='2000-01-01 00:00Z' -cf - . | zstd -q -19 -T0 -o "$out" -f
