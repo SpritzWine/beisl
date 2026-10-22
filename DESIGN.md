@@ -39,7 +39,8 @@ Each of these has decided an argument at least once.
   a missing AppImage behind a launcher, a wall in the game itself: the game still
   starts, untraced if need be, and Beisl says why.
 - **Nothing is done for the user that the user did not ask for.** No report is
-  submitted, no trace deleted or analyzed over MCP, no privileged change folded
+  submitted, no trace deleted or analyzed over MCP (its one write, a spike label,
+  exists only when the client's config asks for it), no privileged change folded
   into a batch. Privileged fixes are described by library code and executed by
   the caller through `pkexec`, each on its own click where they are standing
   changes.
@@ -47,6 +48,10 @@ Each of these has decided an argument at least once.
   record mode; samples that could not be placed are disclosed as a gap, never
   spread over the layers; a clean run of a healthy game is reported as a result,
   with conviction, so the tool is believed when it does blame Wine.
+- **A hypothesis is never the answer.** The measurements are. A likely cause is
+  shown beside them, with its confidence, who said it and the measurements it
+  rests on, and nothing is said when nothing is sure: a wrong cause stated
+  confidently sends the user after the wrong fix.
 - **No overlay of our own.** Drawing into a running game means becoming a Vulkan
   layer, which is reimplementing MangoHud. Feedback during a run is an audio cue
   and the session window.
@@ -144,6 +149,41 @@ that is the answer: the game was not running.
 
 **What it does not do yet:** hot symbols stored per spike in the artifact, and
 anything finer than the frame (no call graphs).
+
+## Likely causes
+
+Each measured spike carries a feature map (`artifact::features`): its length and
+neighbours against the second before, how many spikes come with it and how many
+share its length, the game's sample rate, the shifts in layers and in thread
+classes (shader compile, render, cache IO, workers, audio, runtime, from the
+thread's name), and the sensor deltas around it. What cannot be measured is
+absent, never zero. On synthetic runs the shape already parts what perf cannot
+in degraded mode: contention comes in bursts of irregular frames, a CPU quota in
+bursts of repeating length, a stopped process as isolated frames.
+
+`crates/hypothesis` turns that into a likely cause (shader-compile,
+cpu-contention, throttle, blocked, gpu-bound, memory-pressure, cpu-work) through
+three layers in turn: nearest neighbours over the spikes the user labelled, when
+close ones agree, saying which they resemble; a small logistic regression over
+all labels for the cases between; readable rules underneath, the only answer
+before any label exists. Below a threshold all of them abstain. The learned
+layers speak only once leave-one-out (neighbours) or five folds (model) over the
+user's own labels shows them right at least 70% of the time and at least as
+often as the rules on the same spikes.
+
+Labels are what makes it learn: `beisl label`, the session window, and an
+assistant through beisl-mcp's `label_spike` (only with `--allow-labels`). They
+live in `~/.local/share/beisl/labels.jsonl` and nowhere else, one appended line
+each, the newest per spike winning. Each records who gave it: an agent's label
+counts a third until the user confirms it and never grades a layer, so a
+confident wrong assistant cannot teach the model. A sure verdict asks the user
+only to confirm; an unsure one lays out the candidates and their evidence.
+
+Measured on three synthetic runs labelled by what was injected (2026-10-22):
+with 13 labels both learned layers stay silent; with 20 the model is graded 14
+of 15 right against the rules' 6 and judges all five held-out spikes right,
+including ones the rules abstained on. Synthetic spikes of one run resemble each
+other, so that shows the mechanism, not accuracy on real games.
 
 ## Symbols
 
@@ -284,7 +324,8 @@ main workspace (crates.io only, light)
   crates/symbol-resolver  perf.data addresses -> symbols and layers, by tier
   crates/artifact         frametimes + samples + diagnostics -> artifact.json, report.txt
   crates/compat           what a log line says about a game's ability to run
-  crates/beisl-mcp        the read-only MCP server
+  crates/hypothesis       a likely cause per spike: rules, local labels, learners
+  crates/beisl-mcp        the MCP server (read-only; labels only when allowed)
   crates/assets           embedded payloads: icons, desktop entries, AppStream
                           component, launcher and shim scripts, udev rule
   crates/docs-gen         renders docs/*.1.md to man pages, and the desktop entries
@@ -295,7 +336,8 @@ own workspace (libcosmic and its git dependencies, own lockfile)
 ```
 
 `beisl`, `beisl-gui` and `beisl-mcp` depend on `preflight` and `session`; nothing
-depends on `beisl`. The file-based `session.json` is the only bridge between the
+depends on `beisl`. `hypothesis` depends only on `session` (for the data root),
+and `artifact` on it, to name the likely causes in the report. The file-based `session.json` is the only bridge between the
 wrapper and the window, which is why a window can be a different process, a
 different build, or on the other side of a sandbox.
 
@@ -462,10 +504,11 @@ data that work needs - and a trace nobody can read is a trace nobody fixes.
 - **Tighter perf scoping**: the game's process tree in its own cgroup instead of
   system-wide sampling plus filtering. Call graphs are not recorded either.
 - **Spike correlation, the rest of it**: which symbols were hot during a given
-  hitch in the artifact, report and MCP (the layer split per spike is done, and
-  the session window looks up any frame's hot symbols on demand), and a named,
-  likely cause per spike on top of it. Design in the vault: "Stutter-Cause Hypothesis - Fault Harness
-  and Feature Vector".
+  hitch, stored in the artifact, report and MCP (the session window looks them up
+  on demand); likely causes judged on real games rather than synthetic runs; a
+  harness corpus of injected causes seeding labels; and the agreed opt-in export
+  of labels. Design in the vault: "Stutter-Cause Hypothesis - Fault Harness and
+  Feature Vector".
 - **A/B compare**: two traces side by side, tiers and outcomes labeled.
 - **Feedback polish**: MangoHud's own logging indicator or a notification on
   start and stop; a notification when a launcher behind a menu entry fails, which

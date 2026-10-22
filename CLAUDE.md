@@ -38,9 +38,10 @@ Main workspace (`Cargo.toml`, crates.io deps only, mostly std):
   the `data/` files live inside this crate so `include_str!` paths stay short.
 - `crates/beisl` - the wrapper binary; subcommands: trace (default via `%command%`),
   `--check` (aliases `--preflight`, `doctor`), `install`/`uninstall`, `symbols <dir>`
-  (resolve a captured trace), `--version`. `run.rs` orchestrates a trace; `mangohud.rs`,
-  `perf.rs`, `gpu.rs` handle the pieces; `walls.rs` watches the logs for a compat wall
-  live and `handoff.rs` drops the finding into gamebus-setup's inbox at exit.
+  (resolve a captured trace), `label <run>` (what a spike really was), `--version`.
+  `run.rs` orchestrates a trace; `mangohud.rs`, `perf.rs`, `gpu.rs` handle the pieces;
+  `walls.rs` watches the logs for a compat wall live and `handoff.rs` drops the finding
+  into gamebus-setup's inbox at exit.
 - `crates/preflight` - UI-agnostic setup checks (perf/llvm/paranoid/mangohud/GPU) +
   persisted config. Detection only; privileged fixes are *described* (`Fix` +
   `fix_command()`) and executed by the caller via pkexec, never from inside the crate.
@@ -54,8 +55,13 @@ Main workspace (`Cargo.toml`, crates.io deps only, mostly std):
 - `crates/compat` - what a log line says about a game's ability to run at all: the
   compat-wall signatures, shared by the wrapper (live warning in the session window) and
   `beisl-mcp` (post-hoc `compat-wall` event). std only.
-- `crates/beisl-mcp` - `beisl-mcp` binary: read-only MCP server (JSON-RPC over stdio,
-  hand-rolled - no async runtime) over the trace library; opt-in, ships in the bundle.
+- `crates/hypothesis` - a likely cause per spike (rules, the local label store,
+  nearest-neighbour and logistic learners behind a leave-one-out gate). std + serde;
+  its only workspace dependency is `session`. A hypothesis is shown beside the
+  measurement, never instead of it.
+- `crates/beisl-mcp` - `beisl-mcp` binary: MCP server (JSON-RPC over stdio, hand-rolled -
+  no async runtime) over the trace library; opt-in, ships in the bundle. Read-only except
+  `label_spike`, which exists only with `--allow-labels`.
 - `crates/docs-gen` - packaging tool: renders `docs/*.1.md` into man pages (mandown).
   `docs/*.1.md` are the SINGLE SOURCE for user-facing usage text: each binary embeds
   its file via `include_str!` and prints everything above the `<!-- help-end -->`
@@ -74,7 +80,8 @@ Dependency direction: `beisl`, `beisl-gui`, and `beisl-mcp` all depend on `prefl
 `session`; `beisl` and `beisl-gui` also depend on `artifact` (which itself depends on
 `symbol-resolver` + `session` - the latter so `TraceArtifact::persist` can name
 `artifact.json`/`report.txt` from the one place that owns those constants); `beisl` and
-`beisl-mcp` both depend on `compat`; nothing depends on `beisl`.
+`beisl-mcp` both depend on `compat`; `artifact`, `beisl`, `beisl-mcp` and `beisl-gui`
+depend on `hypothesis`; nothing depends on `beisl`.
 
 ## Commands (verified)
 
