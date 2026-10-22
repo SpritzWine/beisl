@@ -14,8 +14,9 @@ beisl-compat - GUI: review the compat walls beisl found, and the games gamebus c
 
 A front-end over gamebus-setup's compat stash: scan beisl's traces for compat
 walls, read each finding's evidence, draft a ProtonDB report or an
-AreWeAntiCheatYet issue, and mark what you filed. Nothing is submitted by the
-program; every draft is text for you to review and file yourself.
+AreWeAntiCheatYet issue, mark what you filed, or dismiss one not worth filing.
+Nothing is submitted by the program; every draft is text for you to review and
+file yourself.
 
 A second tab, Identity misses, lists the launches gamebus saw without an
 authoritative identity, and lets you dismiss, restore, promote or correct them.
@@ -30,7 +31,10 @@ the findings themselves.
 Every action is one of `gamebus-setup compat`'s own subcommands, run for you
 and always with `--json`: `--scan` pulls findings from beisl over its MCP
 server and records them, `--export protondb|awacy --key <key>` drafts a
-submission, and `--reported <key> --target <name>` remembers what you filed.
+submission, `--reported <key> --target <name>` remembers what you filed, and
+`--dismiss <key>` / `--undismiss <key>` park a finding or bring it back. A
+dismissed finding keeps its evidence and stops asking to be reported; the list
+hides it behind a switch, as the identity misses tab does with its own.
 The window reimplements none of that -- not even which targets a finding still
 wants -- so it and `gamebus-setup compat` can never disagree about what a
 finding is.

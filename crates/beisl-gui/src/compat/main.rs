@@ -162,6 +162,20 @@ struct Listing {
     refused: Vec<(String, String)>,
 }
 
+/// The findings the list shows, in stash order, and how many dismissed ones it is
+/// holding back.
+fn visible_findings(findings: &[Finding], show_dismissed: bool) -> (Vec<&Finding>, usize) {
+    let parked = findings
+        .iter()
+        .filter(|f| f.record.dismissed.is_some())
+        .count();
+    let shown = findings
+        .iter()
+        .filter(|f| show_dismissed || f.record.dismissed.is_none())
+        .collect();
+    (shown, parked)
+}
+
 fn parse_listing(out: &str) -> Result<Listing, String> {
     let v: serde_json::Value = serde_json::from_str(out).map_err(|e| e.to_string())?;
     let rows = v
@@ -351,6 +365,10 @@ enum Job {
         key: String,
         target: String,
     },
+    Dismiss {
+        key: String,
+        restore: bool,
+    },
 }
 
 /// A draft as gamebus-setup rendered it: the body to review, where to file it, and the
@@ -395,6 +413,9 @@ enum Message {
     Back,
     Draft(String),
     MarkReported(String),
+    /// Dismiss the selected finding (true) or restore it to the review list (false).
+    DismissFinding(bool),
+    ShowDismissedFindings(bool),
     OpenUrl(String),
     CopyDraft,
 }
@@ -419,6 +440,9 @@ struct App {
     mcp_found: bool,
     presenced: preflight::Check,
     findings: Vec<Finding>,
+    /// Same as `show_dismissed`, for the findings: a dismissed one keeps its evidence
+    /// but no longer wants a decision, so it is out of the way unless asked for.
+    show_dismissed_findings: bool,
     /// Why the last list call produced nothing usable. Never "no findings": an answer
     /// that did not arrive must not read as an empty stash.
     load_error: Option<String>,
@@ -686,6 +710,19 @@ impl App {
                     self.note = Some(format!("Could not mark: {}", why(&err)));
                 }
             }
+            Job::Dismiss { restore, .. } => {
+                if ok {
+                    self.reload();
+                    self.note = Some(if restore {
+                        "Restored to the review list.".to_string()
+                    } else {
+                        "Dismissed: it keeps its evidence and stops asking to be reported."
+                            .to_string()
+                    });
+                } else {
+                    self.note = Some(format!("Could not change it: {}", why(&err)));
+                }
+            }
         }
     }
 }
@@ -719,6 +756,7 @@ impl Application for App {
             mcp_found: preflight::find_tool("beisl-mcp").is_some(),
             presenced: preflight::gamebus_presence_check(),
             findings: Vec::new(),
+            show_dismissed_findings: false,
             load_error: None,
             selected: None,
             job: None,
@@ -860,6 +898,17 @@ impl Application for App {
                     self.start(job, &["--reported", &key, "--target", &target]);
                 }
             }
+            Message::DismissFinding(dismiss) => {
+                if let (Some(key), false) = (self.selected.clone(), self.busy()) {
+                    let flag = if dismiss { "--dismiss" } else { "--undismiss" };
+                    let job = Job::Dismiss {
+                        key: key.clone(),
+                        restore: !dismiss,
+                    };
+                    self.start(job, &[flag, &key]);
+                }
+            }
+            Message::ShowDismissedFindings(v) => self.show_dismissed_findings = v,
             Message::OpenUrl(url) => {
                 // The desktop's own opener; the URL came from gamebus-setup's draft.
                 let _ = std::process::Command::new("xdg-open").arg(url).spawn();
@@ -1050,13 +1099,23 @@ impl App {
             col = col.push(widget::text::body(e.clone()));
         }
 
-        let mut section = widget::settings::section().title("Findings");
-        if self.findings.is_empty() && self.load_error.is_none() && !self.busy() {
-            section = section.add(widget::text::caption(
-                "No compat findings yet. Run a game under beisl, then scan.",
-            ));
+        let (shown, parked) = visible_findings(&self.findings, self.show_dismissed_findings);
+        if parked > 0 {
+            col = col.push(
+                widget::toggler(self.show_dismissed_findings)
+                    .label(format!("Show {parked} dismissed"))
+                    .on_toggle(Message::ShowDismissedFindings),
+            );
         }
-        for f in &self.findings {
+        let mut section = widget::settings::section().title("Findings");
+        if shown.is_empty() && self.load_error.is_none() && !self.busy() {
+            section = section.add(widget::text::caption(if parked > 0 {
+                "Every finding is dismissed. The switch above shows them."
+            } else {
+                "No compat findings yet. Run a game under beisl, then scan."
+            }));
+        }
+        for f in shown {
             let mut head = widget::Row::new()
                 .spacing(12)
                 .push(widget::text::body(f.display_title().to_string()))
@@ -1309,6 +1368,36 @@ impl App {
         }
         col = col.push(report);
 
+        // Dismissing is gamebus's "not worth filing": the finding and its evidence stay,
+        // it just stops being offered. Reversible, so no confirm.
+        let (label, why, dismiss) = match &f.record.dismissed {
+            Some(when) => (
+                "Restore",
+                format!("Dismissed {when}. Restoring puts it back on the review list."),
+                false,
+            ),
+            None => (
+                "Dismiss",
+                "Not worth filing? Dismissed, it keeps its evidence and stops asking \
+                 to be reported."
+                    .to_string(),
+                true,
+            ),
+        };
+        let mut button = widget::button::standard(label);
+        if !self.busy() {
+            button = button.on_press(Message::DismissFinding(dismiss));
+        }
+        col = col.push(
+            widget::settings::section().title("Review").add(
+                widget::Row::new()
+                    .spacing(12)
+                    .push(widget::text::caption(why))
+                    .push(widget::Space::new().width(Length::Fill))
+                    .push(button),
+            ),
+        );
+
         if self.busy() {
             col = col.push(widget::text::caption("Running gamebus-setup..."));
         }
@@ -1434,6 +1523,25 @@ mod tests {
         "refused": [{"path": "/x/0001-run-42.json", "why": "not JSON"}]
       }
     }"#;
+
+    #[test]
+    fn dismissed_findings_wait_behind_the_switch() {
+        let mut findings = parse_listing(LIST).unwrap().findings;
+        findings[0].record.dismissed = Some("2026-10-22".into());
+        let (shown, parked) = visible_findings(&findings, false);
+        assert_eq!(parked, 1);
+        assert_eq!(
+            shown.iter().map(|f| f.key.as_str()).collect::<Vec<_>>(),
+            ["steam:4809930"]
+        );
+        // Shown, they keep their place in the list rather than moving to the end.
+        let (shown, parked) = visible_findings(&findings, true);
+        assert_eq!(parked, 1);
+        assert_eq!(
+            shown.iter().map(|f| f.key.as_str()).collect::<Vec<_>>(),
+            ["steam:1", "steam:4809930"]
+        );
+    }
 
     #[test]
     fn listing_carries_key_needs_and_inbox() {
