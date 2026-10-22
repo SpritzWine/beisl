@@ -82,6 +82,90 @@ impl Layer {
     }
 }
 
+/// What a thread does, read from its name: in degraded mode, with no kernel and no
+/// foreign samples, the threads a spike's samples land in are much of what can tell its
+/// causes apart. Names as measured across 26 real traces (2026-10-22); the kernel cuts a
+/// `comm` at 15 characters, which every prefix here survives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ThreadClass {
+    /// DXVK's pipeline compile workers (`dxvk-shader-n`/`-l`/`-h`). The driver compiles
+    /// on the calling thread, so driver time in these threads is shader compilation.
+    ShaderCompile,
+    /// Getting frames out: DXVK's command stream and submission threads, vkd3d-proton's
+    /// queue/fence/swapchain threads, engine render threads.
+    Render,
+    /// Pipeline-cache file IO: `dxvk-cache`, `vkd3d-disk$`.
+    CacheIo,
+    /// Engine job pools (Unreal, Unity, VRage, .NET).
+    Worker,
+    Audio,
+    /// Wine and the runtime around it: wineserver, Wine's helper threads and services,
+    /// pressure-vessel, Steam's launch wrapper.
+    Runtime,
+    /// The observer itself: MangoHud's sampler thread, inside the game's process.
+    Observer,
+    /// Anything else, the game's own main thread included (it carries the exe's name).
+    Other,
+}
+
+impl ThreadClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ThreadClass::ShaderCompile => "shader-compile",
+            ThreadClass::Render => "render",
+            ThreadClass::CacheIo => "cache-io",
+            ThreadClass::Worker => "worker",
+            ThreadClass::Audio => "audio",
+            ThreadClass::Runtime => "runtime",
+            ThreadClass::Observer => "observer",
+            ThreadClass::Other => "other",
+        }
+    }
+}
+
+/// Classify a thread by its `comm`. Most specific first: `dxvk-shader-*` before the
+/// rest of `dxvk-*`, the cache threads before the render ones.
+pub fn thread_class(comm: &str) -> ThreadClass {
+    let lower = comm.to_ascii_lowercase();
+    let starts = |p: &[&str]| p.iter().any(|x| lower.starts_with(x));
+    if starts(&["dxvk-shader"]) {
+        ThreadClass::ShaderCompile
+    } else if starts(&["dxvk-cache", "vkd3d-disk"]) {
+        ThreadClass::CacheIo
+    } else if starts(&["dxvk-", "vkd3d", "renderthread", "rhithread"]) {
+        ThreadClass::Render
+    } else if starts(&[
+        "taskgraph",
+        "poolthread",
+        "job.worker",
+        "vrageworker",
+        ".net tp",
+    ]) {
+        ThreadClass::Worker
+    } else if starts(&["audio", "fmod", "faudio"]) {
+        ThreadClass::Audio
+    } else if starts(&["mangohud"]) {
+        ThreadClass::Observer
+    } else if starts(&[
+        "wine",
+        "explorer.exe",
+        "xalia.exe",
+        "tabtip.exe",
+        "services.exe",
+        "rpcss.exe",
+        "plugplay.exe",
+        "svchost.exe",
+        "pressure-vessel",
+        "pv-",
+        "steam-launch-wr",
+        "reaper",
+    ]) {
+        ThreadClass::Runtime
+    } else {
+        ThreadClass::Other
+    }
+}
+
 /// Bucket a sample's DSO into a [`Layer`]. Ordered most-specific first and wine-agnostic:
 /// it keys on the *kind* of module, not on a particular build — the translation DLLs and
 /// driver libs carry the same names under any Proton/GE/SpritzWine tree, and wine's own
@@ -279,6 +363,8 @@ pub struct WindowTally {
     /// The window's hottest named functions, aggregated and ordered like
     /// [`Resolution::symbols`], at most [`WINDOW_SYMBOLS`].
     pub symbols: Vec<SymbolCount>,
+    /// Samples per [`ThreadClass`], biggest first, ties in class order.
+    pub threads: Vec<(ThreadClass, u64)>,
 }
 
 /// How many hot symbols a [`WindowTally`] keeps. A frame holds a handful of samples;
@@ -445,7 +531,13 @@ pub fn resolve_perf_data_with_debuginfod(
         let module = basename(&sample.dso);
         if let Some(t) = sample.time {
             span = Some(span.map_or((t, t), |(lo, hi)| (lo.min(t), hi.max(t))));
-            win.add(t, sample.pid, layer, named.as_deref().map(|s| (module, s)));
+            win.add(
+                t,
+                sample.pid,
+                &sample.comm,
+                layer,
+                named.as_deref().map(|s| (module, s)),
+            );
         }
         match named {
             Some(sym) => {
@@ -525,6 +617,7 @@ struct WindowAcc {
     layers: HashMap<Layer, (u64, u64)>,
     pids: HashMap<i32, u64>,
     symbols: HashMap<(String, String), u64>,
+    threads: HashMap<ThreadClass, u64>,
 }
 
 impl<'a> WindowTallies<'a> {
@@ -534,7 +627,7 @@ impl<'a> WindowTallies<'a> {
     }
 
     /// One sample at perf time `t`; `named` is its `(module basename, function)`.
-    fn add(&mut self, t: f64, pid: i32, layer: Layer, named: Option<(&str, &str)>) {
+    fn add(&mut self, t: f64, pid: i32, comm: &str, layer: Layer, named: Option<(&str, &str)>) {
         for (w, acc) in self.windows.iter().zip(&mut self.accs) {
             if t < w.start || t >= w.end {
                 continue;
@@ -542,6 +635,7 @@ impl<'a> WindowTallies<'a> {
             let l = acc.layers.entry(layer).or_insert((0, 0));
             l.0 += 1;
             *acc.pids.entry(pid).or_insert(0) += 1;
+            *acc.threads.entry(thread_class(comm)).or_insert(0) += 1;
             if let Some((module, sym)) = named {
                 l.1 += 1;
                 *acc.symbols
@@ -564,6 +658,11 @@ impl<'a> WindowTallies<'a> {
                         .unwrap_or(0),
                     layers: sorted_tallies(acc.layers),
                     symbols,
+                    threads: {
+                        let mut t: Vec<(ThreadClass, u64)> = acc.threads.into_iter().collect();
+                        t.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+                        t
+                    },
                 }
             })
             .collect()
@@ -689,6 +788,8 @@ pub fn detect_tier(pe_paths: &[String]) -> FidelityTier {
 }
 
 struct Sample {
+    /// The thread's name, as perf printed it (spaces kept, runs of them collapsed).
+    comm: String,
     pid: i32,
     /// perf's sample time in seconds; `None` for a line printed without `time`.
     time: Option<f64>,
@@ -720,7 +821,10 @@ fn parse_sample(line: &str) -> Option<Sample> {
         None => None,
     };
     let pid = tok.parse().ok()?;
+    let mut comm: Vec<&str> = toks.collect();
+    comm.reverse();
     Some(Sample {
+        comm: comm.join(" "),
         pid,
         time,
         ip,
@@ -812,9 +916,53 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.pid, 80406);
+        assert_eq!(s.comm, "wine_rpcrt4_io");
         assert_eq!(s.ip, 0x6ffffff8f8df);
         assert_eq!(s.sym, "[unknown]");
         assert_eq!(s.dso, "/lib/wine/x86_64-windows/ntdll.dll");
+        // A name with a space survives: engines number their threads that way.
+        let t = parse_sample("RenderThread 1 4242 1.5: 7f00 foo (/x/game.so)").unwrap();
+        assert_eq!(
+            (t.comm.as_str(), t.pid, t.time),
+            ("RenderThread 1", 4242, Some(1.5))
+        );
+    }
+
+    /// Thread names as they appear in real traces (2026-10-22), 15-character kernel cut
+    /// included.
+    #[test]
+    fn thread_names_sort_into_what_the_thread_does() {
+        use ThreadClass::*;
+        for (comm, class) in [
+            ("dxvk-shader-n", ShaderCompile),
+            ("dxvk-shader-h", ShaderCompile),
+            ("dxvk-cache", CacheIo),
+            ("vkd3d-disk$", CacheIo),
+            ("dxvk-cs", Render),
+            ("dxvk-submit", Render),
+            ("vkd3d_queue", Render),
+            ("vkd3d-swapchain", Render),
+            ("RenderThread 1", Render),
+            ("RHIThread", Render),
+            ("TaskGraphThread", Worker),
+            ("PoolThread 12", Worker),
+            ("Job.Worker 3", Worker),
+            ("VRageWorker 9", Worker),
+            (".NET TP Worker", Worker),
+            ("audio_client_ma", Audio),
+            ("FMOD stream thr", Audio),
+            ("FAudio_AudioCli", Audio),
+            ("mangohud-amdgpu", Observer),
+            ("wineserver", Runtime),
+            ("wine_rpcrt4_io", Runtime),
+            ("explorer.exe", Runtime),
+            ("xalia.exe", Runtime),
+            ("pressure-vessel", Runtime),
+            ("AssettoCorsa.ex", Other),
+            ("Icarus-Win64-Sh", Other),
+        ] {
+            assert_eq!(thread_class(comm), class, "{comm}");
+        }
     }
 
     #[test]
@@ -856,19 +1004,19 @@ mod tests {
         ];
         let mut w = WindowTallies::new(&windows);
         let blorp = Some(("libvulkan_intel.so", "blorp_exec"));
-        w.add(1.2, 7, Layer::Driver, blorp);
-        w.add(1.2, 7, Layer::Driver, blorp);
+        w.add(1.2, 7, "dxvk-shader-n", Layer::Driver, blorp);
+        w.add(1.2, 7, "dxvk-shader-n", Layer::Driver, blorp);
         // Where the windows overlap a sample counts in both.
-        w.add(1.6, 7, Layer::Driver, blorp);
+        w.add(1.6, 7, "dxvk-shader-n", Layer::Driver, blorp);
         let names: Vec<String> = (0..11).map(|i| format!("f{i:02}")).collect();
         for n in &names {
-            w.add(1.3, 9, Layer::Game, Some(("libc.so.6", n)));
+            w.add(1.3, 9, "Game.exe", Layer::Game, Some(("libc.so.6", n)));
         }
         // Unnamed: in the counts and the split, never in the list.
-        w.add(1.4, 7, Layer::Other, None);
+        w.add(1.4, 7, "dxvk-cs", Layer::Other, None);
         // Half-open: the first window's end belongs to the second only.
-        w.add(2.0, 7, Layer::Game, Some(("vkcube", "main")));
-        w.add(0.5, 7, Layer::Game, Some(("vkcube", "early")));
+        w.add(2.0, 7, "vkcube", Layer::Game, Some(("vkcube", "main")));
+        w.add(0.5, 7, "vkcube", Layer::Game, Some(("vkcube", "early")));
 
         let t = w.finish(Some(7));
         assert_eq!((t[0].samples, t[0].dominant_pid_samples), (15, 4));
@@ -904,6 +1052,16 @@ mod tests {
             .map(|s| (s.module.as_str(), s.samples))
             .collect();
         assert_eq!(second, [("libvulkan_intel.so", 1), ("vkcube", 1)]);
+
+        // Thread classes beside the layers: 11 game-thread samples, 3 compile, 1 render.
+        assert_eq!(
+            t[0].threads,
+            [
+                (ThreadClass::Other, 11),
+                (ThreadClass::ShaderCompile, 3),
+                (ThreadClass::Render, 1)
+            ]
+        );
     }
 
     #[test]
