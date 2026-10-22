@@ -42,7 +42,7 @@ pub fn configure(cmd: &mut Command, run_dir: &Path, pci_dev: Option<&str>) -> Op
     }
     cfg.push_str(&format!(
         "output_folder={},toggle_logging={},autostart_log={}",
-        run_dir.display(),
+        escape(&run_dir.display().to_string()),
         TOGGLE_KEY,
         AUTOSTART_LOG_SECS
     ));
@@ -51,7 +51,7 @@ pub fn configure(cmd: &mut Command, run_dir: &Path, pci_dev: Option<&str>) -> Op
     // idle iGPU while the game renders on the discrete card — filling the CSV's GPU
     // columns with garbage (0% load, idle clocks).
     if let Some(addr) = pci_dev {
-        cfg.push_str(&format!(",pci_dev={addr}"));
+        cfg.push_str(&format!(",pci_dev={}", escape(addr)));
     }
     // A user's own log_duration=N would auto-stop the always-on log after N seconds,
     // quietly truncating CSV coverage for exactly the users most likely to carry a
@@ -70,6 +70,23 @@ pub fn configure(cmd: &mut Command, run_dir: &Path, pci_dev: Option<&str>) -> Op
     //   explicitly (Steam's mangohud integration and the `mangohud` prefix handle it
     //   for us; otherwise set VK_ADD_LAYER / the `mangohud` exec prefix).
     overridden
+}
+
+/// `value` made safe inside MANGOHUD_CONFIG, whose parser splits on `,` `:` `;` and `=`
+/// even within a value. Unescaped, a PCI address reaches MangoHud as `pci_dev=0000`
+/// (rejected) plus two unknown options, and the GPU columns then describe whatever card
+/// it falls back to: on a dGPU + iGPU box, the idle iGPU's 0 % load and idle clocks in
+/// every pinned trace (measured 2026-10-22, MangoHud 0.8.3-rc1). MangoHud keeps a
+/// delimiter that follows a backslash.
+fn escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        if matches!(c, ',' | ':' | ';' | '=') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// The value of `key` in a comma-separated MangoHud config, if present (last wins,
@@ -156,7 +173,7 @@ mod tests {
             cfg,
             format!(
                 "output_folder=/tmp/run,toggle_logging={TOGGLE_KEY},\
-                 autostart_log={AUTOSTART_LOG_SECS},pci_dev={ARC_SLOT},log_duration=0"
+                 autostart_log={AUTOSTART_LOG_SECS},pci_dev=0000\\:03\\:00.0,log_duration=0"
             )
         );
 
@@ -183,7 +200,7 @@ mod tests {
             cfg.starts_with("fps_limit=60,"),
             "user config must survive: {cfg}"
         );
-        assert!(cfg.contains(&format!(",pci_dev={ARC_SLOT}")), "got: {cfg}");
+        assert!(cfg.contains(r",pci_dev=0000\:03\:00.0,"), "got: {cfg}");
         assert!(
             cfg.ends_with(",log_duration=0"),
             "the guard trails all: {cfg}"
@@ -192,6 +209,13 @@ mod tests {
         unsafe {
             std::env::remove_var("MANGOHUD_CONFIG");
         }
+    }
+
+    #[test]
+    fn values_escape_the_delimiters_mangohud_splits_on() {
+        assert_eq!(escape("0000:0b:00.0"), r"0000\:0b\:00.0");
+        assert_eq!(escape("/data/a,b;c=d"), r"/data/a\,b\;c\=d");
+        assert_eq!(escape("/plain/path"), "/plain/path");
     }
 
     fn gpu(vendor: &str, device: &str, slot: &str) -> PhysicalGpu {
