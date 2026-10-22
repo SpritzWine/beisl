@@ -10,7 +10,7 @@ beisl — game perf tracing: perf CPU samples + MangoHud frametimes, wine-agnost
                                      (aliases: --preflight, doctor)
     beisl symbols <trace-run-dir>    resolve, report, and save a captured trace
     beisl label <run> [<n> <cause>]  what a spike really was: teaches the
-                                     likely causes (`beisl label --stats`)
+                                     likely causes (`--stats`, `--retrain`)
     beisl install                    copy beisl into ~/.local/bin
                                      (+ "Beisl Setup" menu entry when bundled)
     beisl uninstall                  remove the per-user install
@@ -71,7 +71,11 @@ Causes: shader-compile, cpu-contention, throttle, blocked, gpu-bound,
 memory-pressure, cpu-work. Labels stay on this machine, in
 ~/.local/share/beisl/labels.jsonl, the newest per spike winning. Learned
 answers appear only once they beat the rules on your own labels; `--stats`
-says which layers speak and on what record.
+says which layers speak, on what record, and how many labels came since the
+last training. Training is never automatic, so judging stays fast however many
+labels pile up: `--retrain` trains on all of them and saves the result
+(~/.local/share/beisl/label-model.json), and a new label already votes as a
+neighbour before that.
 
 **install / uninstall** — per-user install into ~/.local/bin, desktop entry,
 icons, and man pages; uninstall names anything root-owned it cannot remove.

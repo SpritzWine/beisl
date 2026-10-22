@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use artifact::TraceArtifact;
-use hypothesis::{Cause, Judge, Label, LabelSource, LabelStore, Review};
+use hypothesis::{Cause, Judge, Label, LabelSource, LabelStore, ModelStore, Review};
 
 use crate::out::out;
 
@@ -16,6 +16,7 @@ pub fn run(args: &[String]) -> ExitCode {
     match args.first().map(String::as_str) {
         None => usage(),
         Some("--stats") => stats(),
+        Some("--retrain") => retrain(),
         Some(run) => {
             let Some(dir) = run_dir(run) else {
                 eprintln!("beisl: no trace run at {run}");
@@ -49,7 +50,7 @@ pub fn run(args: &[String]) -> ExitCode {
 fn usage() -> ExitCode {
     eprintln!(
         "beisl: usage: beisl label <run> [<n> <cause> [--note TEXT] | <n> --confirm]\n       \
-         beisl label --stats\n\ncauses: {}",
+         beisl label --stats | --retrain\n\ncauses: {}",
         causes()
     );
     ExitCode::from(2)
@@ -229,7 +230,7 @@ fn stats() -> ExitCode {
         .iter()
         .filter(|l| l.source == LabelSource::Agent && !l.confirmed)
         .count();
-    let judge = Judge::new(loaded.labels);
+    let judge = Judge::load(&store, &ModelStore::default_path());
     let g = judge.gate();
     out!(
         "{} label(s): {user} yours, {agent} from an agent ({unconfirmed} unconfirmed), \
@@ -256,6 +257,15 @@ fn stats() -> ExitCode {
             format!("{what}: silent ({record})")
         }
     };
+    if judge.trained_at().is_none() {
+        if g.labels > 0 {
+            out!(
+                "never trained: nothing is graded and the learned layers stay silent until \
+                 `beisl label --retrain`"
+            );
+        }
+        return ExitCode::SUCCESS;
+    }
     out!(
         "rules: answered {} of your {} label(s), right on {}",
         g.rules.answered,
@@ -272,5 +282,62 @@ fn stats() -> ExitCode {
     } else {
         out!("{}", say(g.model_on, &g.model, "model"));
     }
+    match judge.trained_at() {
+        None if g.labels > 0 => {
+            out!("never trained: the learned layers stay silent until `beisl label --retrain`")
+        }
+        None => {}
+        Some(at) => {
+            let new = judge.untrained_labels();
+            out!(
+                "trained {} ago{}",
+                ago(at),
+                if new > 0 {
+                    format!(
+                        "; {new} label(s) since already vote as neighbours, and count \
+                         everywhere after `beisl label --retrain`"
+                    )
+                } else {
+                    String::new()
+                }
+            );
+        }
+    }
     ExitCode::SUCCESS
+}
+
+/// Train on every label and save it: the slow part, only when asked for.
+fn retrain() -> ExitCode {
+    let (labels, model) = (LabelStore::default_path(), ModelStore::default_path());
+    let started = std::time::Instant::now();
+    match Judge::retrain(&labels, &model) {
+        Ok(j) => {
+            out!(
+                "Trained on {} label(s) in {} ms.",
+                j.gate().labels,
+                started.elapsed().as_millis()
+            );
+            stats()
+        }
+        Err(e) => {
+            eprintln!(
+                "beisl: could not save the training to {} ({e})",
+                model.path().display()
+            );
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn ago(at: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let s = now.saturating_sub(at);
+    match s {
+        0..=119 => format!("{s} s"),
+        120..=7199 => format!("{} min", s / 60),
+        7200..=172_799 => format!("{} h", s / 3600),
+        _ => format!("{} days", s / 86_400),
+    }
 }

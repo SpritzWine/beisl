@@ -17,6 +17,8 @@
 //! harness) is kept, and an agent's label weighs less until the user confirms it.
 
 use std::collections::BTreeMap;
+use std::io;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -25,7 +27,7 @@ pub mod learn;
 mod rules;
 
 pub use labels::{Label, LabelSource, LabelStore};
-pub use learn::Gate;
+pub use learn::{Gate, Snapshot};
 
 /// A spike as named measurements (built by the artifact crate's `features` module).
 pub type Features = BTreeMap<String, f32>;
@@ -145,9 +147,54 @@ pub const MIN_CONFIDENCE: f32 = 0.5;
 /// From this on a verdict asks only for a confirmation.
 pub const CONFIRM_CONFIDENCE: f32 = 0.75;
 
-/// The cascade, trained once from a set of labels.
+/// The trained state on disk, beside the labels it was trained from.
+pub struct ModelStore {
+    path: PathBuf,
+}
+
+impl ModelStore {
+    pub fn at(path: impl Into<PathBuf>) -> Self {
+        ModelStore { path: path.into() }
+    }
+
+    pub fn default_path() -> Self {
+        ModelStore::at(session::library::data_root().join("label-model.json"))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The last training, if there is one this build can read.
+    pub fn load(&self) -> Option<Snapshot> {
+        let snap: Snapshot = serde_json::from_slice(&std::fs::read(&self.path).ok()?).ok()?;
+        (snap.version == learn::SNAPSHOT_VERSION).then_some(snap)
+    }
+
+    /// Staged and renamed, so a judge loading meanwhile sees the old training or the
+    /// new one, never half of either.
+    pub fn save(&self, snap: &Snapshot) -> io::Result<()> {
+        if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let mut tmp = self.path.as_os_str().to_owned();
+        tmp.push(format!(".tmp.{}", std::process::id()));
+        let tmp = PathBuf::from(tmp);
+        let json = serde_json::to_vec(snap).map_err(io::Error::other)?;
+        std::fs::write(&tmp, json)?;
+        std::fs::rename(&tmp, &self.path).inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })
+    }
+}
+
+/// The cascade: rules, plus whatever the last training taught it.
 pub struct Judge {
     learned: learn::Learned,
+    trained_at: Option<u64>,
+    /// Labels newer than the last training: they already vote as neighbours, but
+    /// change the gate and the model only once trained on.
+    untrained: usize,
 }
 
 impl Judge {
@@ -156,15 +203,66 @@ impl Judge {
         Judge::new(Vec::new())
     }
 
+    /// Trained here and now on `labels`, kept in memory only.
     pub fn new(labels: Vec<Label>) -> Self {
         Judge {
             learned: learn::Learned::train(labels),
+            trained_at: None,
+            untrained: 0,
         }
     }
 
-    /// From the user's label store; rules only when there is none.
+    /// The labels as they are and the last training, without training: what every
+    /// report, listing and window uses, so judging stays fast however many labels
+    /// pile up. With no training yet, the learned layers are silent.
+    pub fn load(labels: &LabelStore, model: &ModelStore) -> Self {
+        let labels = labels.load().labels;
+        match model.load() {
+            Some(snap) => Judge {
+                untrained: labels
+                    .iter()
+                    .filter(|l| l.at > snap.newest_label_at)
+                    .count(),
+                trained_at: Some(snap.trained_at),
+                learned: learn::Learned::from_snapshot(snap, labels),
+            },
+            None => Judge {
+                untrained: labels.len(),
+                trained_at: None,
+                learned: learn::Learned::untrained(labels),
+            },
+        }
+    }
+
+    /// The user's labels and their last training.
     pub fn load_default() -> Self {
-        Judge::new(LabelStore::default_path().load().labels)
+        Judge::load(&LabelStore::default_path(), &ModelStore::default_path())
+    }
+
+    /// Train on every label in `labels` and save the result to `model`: the slow part,
+    /// run only when someone asks for it.
+    pub fn retrain(labels: &LabelStore, model: &ModelStore) -> io::Result<Self> {
+        let learned = learn::Learned::train(labels.load().labels);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        model.save(&learned.snapshot(now))?;
+        Ok(Judge {
+            learned,
+            trained_at: Some(now),
+            untrained: 0,
+        })
+    }
+
+    /// When the training in use was made (unix seconds); `None` if never, or if this
+    /// judge was trained in memory.
+    pub fn trained_at(&self) -> Option<u64> {
+        self.trained_at
+    }
+
+    /// Labels that came after the last training.
+    pub fn untrained_labels(&self) -> usize {
+        self.untrained
     }
 
     /// Which learned layers the gate let speak, and on what evidence.

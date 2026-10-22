@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 
 use compat::{wall_signature, wine_builtin_drivers, WALL_PRIORITY};
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
@@ -77,8 +77,17 @@ impl Server {
     /// The labels beside the library they describe: for the default library, the
     /// same `labels.jsonl` that `beisl label` and the session window write.
     fn labels(&self) -> hypothesis::LabelStore {
-        let base = self.traces_root.parent().unwrap_or(&self.traces_root);
-        hypothesis::LabelStore::at(base.join("labels.jsonl"))
+        hypothesis::LabelStore::at(self.data_dir().join("labels.jsonl"))
+    }
+
+    /// Their last training, which only the user starts (`beisl label --retrain`, or
+    /// the window): this server judges with it and never trains.
+    fn model(&self) -> hypothesis::ModelStore {
+        hypothesis::ModelStore::at(self.data_dir().join("label-model.json"))
+    }
+
+    fn data_dir(&self) -> &Path {
+        self.traces_root.parent().unwrap_or(&self.traces_root)
     }
 
     /// Pump the stdio transport until EOF (the client hanging up is the shutdown).
@@ -493,7 +502,7 @@ impl Server {
         let Ok(mut art) = serde_json::from_str::<Value>(&text) else {
             return Ok(text);
         };
-        let judge = hypothesis::Judge::new(self.labels().load().labels);
+        let judge = hypothesis::Judge::load(&self.labels(), &self.model());
         let mut judged = false;
         if let Some(spikes) = art.get_mut("spikes").and_then(Value::as_array_mut) {
             for s in spikes {

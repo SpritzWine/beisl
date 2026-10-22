@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::rules;
 use crate::{Candidate, Cause, Features, Hypothesis, Label, Source, MIN_CONFIDENCE};
@@ -32,7 +32,7 @@ pub const MIN_FOR_MODEL: usize = 15;
 const FOLDS: usize = 5;
 
 /// How a layer did on the user's trusted labels.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Score {
     pub answered: usize,
     pub right: usize,
@@ -53,7 +53,7 @@ impl Score {
 }
 
 /// Which learned layers may speak, and on what record.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Gate {
     pub labels: usize,
     /// Labels the user stands behind: the only ones a layer is graded on.
@@ -72,7 +72,67 @@ pub(crate) struct Learned {
     pub(crate) gate: Gate,
 }
 
+/// What training produces, saved so that using the learned layers never means
+/// training them: the scale features are compared on, the model, and the gate's
+/// verdict. The neighbours still vote over the labels as they are now, so a new label
+/// counts at once; whether a layer may speak changes only at the next training.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Snapshot {
+    pub version: u32,
+    /// Unix seconds.
+    pub trained_at: u64,
+    pub trained_on: usize,
+    /// The newest label it saw, so a reader can count the ones that came after.
+    pub newest_label_at: u64,
+    pub gate: Gate,
+    scaler: Scaler,
+    model: Option<Logistic>,
+}
+
+/// Bump when [`Snapshot`]'s shape changes: an older one is ignored, and the learned
+/// layers stay silent until the next training rather than misreading it.
+pub const SNAPSHOT_VERSION: u32 = 1;
+
 impl Learned {
+    /// Labels known, nothing trained: the learned layers stay silent.
+    pub(crate) fn untrained(labels: Vec<Label>) -> Self {
+        let gate = Gate {
+            labels: labels.len(),
+            trusted: labels.iter().filter(|l| l.trusted()).count(),
+            ..Gate::default()
+        };
+        Learned {
+            labels,
+            scaler: Scaler {
+                stats: BTreeMap::new(),
+            },
+            model: None,
+            gate,
+        }
+    }
+
+    pub(crate) fn from_snapshot(snap: Snapshot, labels: Vec<Label>) -> Self {
+        Learned {
+            labels,
+            scaler: snap.scaler,
+            model: snap.model,
+            gate: snap.gate,
+        }
+    }
+
+    pub(crate) fn snapshot(&self, trained_at: u64) -> Snapshot {
+        Snapshot {
+            version: SNAPSHOT_VERSION,
+            trained_at,
+            trained_on: self.labels.len(),
+            newest_label_at: self.labels.iter().map(|l| l.at).max().unwrap_or(0),
+            gate: self.gate.clone(),
+            scaler: Scaler {
+                stats: self.scaler.stats.clone(),
+            },
+            model: self.model.clone(),
+        }
+    }
     pub(crate) fn train(labels: Vec<Label>) -> Self {
         let scaler = Scaler::fit(&labels);
         let trusted: Vec<usize> = (0..labels.len()).filter(|&i| labels[i].trusted()).collect();
@@ -193,6 +253,7 @@ fn rules_answer(f: &Features) -> Option<Cause> {
 
 /// Per-feature mean and spread over the labels, so a count of spikes and a share of
 /// samples weigh alike in a distance.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct Scaler {
     stats: BTreeMap<String, (f32, f32)>,
 }
@@ -281,6 +342,7 @@ fn knn(
 
 /// Multinomial logistic regression over the standardised features, a missing feature
 /// read as average (0 after scaling).
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct Logistic {
     keys: Vec<String>,
     classes: Vec<Cause>,
@@ -448,6 +510,50 @@ mod tests {
         assert!(knn(&between, &judge.learned.labels, scaler, None).is_none());
         let h = judge.judge(&between).hypothesis.unwrap();
         assert_eq!((h.cause, h.source), (Cause::Blocked, Source::Model));
+    }
+
+    #[test]
+    fn a_saved_training_judges_like_the_one_it_came_from_and_counts_what_came_after() {
+        use crate::{LabelStore, ModelStore};
+        let dir = std::env::temp_dir().join(format!("beisl-retrain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let labels = LabelStore::at(dir.join("labels.jsonl"));
+        let model = ModelStore::at(dir.join("label-model.json"));
+        let mut all = clusters(30, LabelSource::User);
+        for l in &all {
+            labels.append(l).unwrap();
+        }
+
+        // Labels but no training: the learned layers say nothing yet.
+        let before = Judge::load(&labels, &model);
+        assert!(!before.gate().neighbours_on && !before.gate().model_on);
+        assert_eq!((before.trained_at(), before.untrained_labels()), (None, 30));
+
+        let trained = Judge::retrain(&labels, &model).unwrap();
+        let loaded = Judge::load(&labels, &model);
+        assert_eq!(loaded.gate(), trained.gate());
+        assert_eq!(loaded.untrained_labels(), 0);
+        let probe = crate::tests::feats(&[
+            ("ft_ratio_log", 4.0),
+            ("burst_1s", 1.5),
+            ("t_log_s", 3.0),
+            ("thread_render_share", 0.95),
+        ]);
+        assert_eq!(loaded.judge(&probe), trained.judge(&probe));
+
+        // A label after the training is counted as new, and already votes.
+        let mut late = all.pop().unwrap();
+        late.t_seconds = 999.0;
+        late.at += 60;
+        labels.append(&late).unwrap();
+        assert_eq!(Judge::load(&labels, &model).untrained_labels(), 1);
+
+        // A training from another format is ignored, not misread.
+        let mut stale = model.load().unwrap();
+        stale.version += 1;
+        model.save(&stale).unwrap();
+        assert!(model.load().is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
