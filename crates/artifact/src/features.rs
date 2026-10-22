@@ -152,6 +152,14 @@ pub(crate) fn window_features(w: &SpikeWindow, frame_s: f64, out: &mut Features)
             (t.pct - t.baseline_pct) / 100.0,
         );
     }
+    // Present with the thread split, behind the same gate.
+    if !w.threads.is_empty() {
+        out.insert("compile_share".into(), w.compile_pct / 100.0);
+        out.insert(
+            "compile_delta".into(),
+            (w.compile_pct - w.baseline_compile_pct) / 100.0,
+        );
+    }
 }
 
 /// A layer or class name as a feature key: `dxvk/vkd3d` -> `dxvk_vkd3d`.
@@ -326,6 +334,8 @@ mod tests {
                 baseline_pct,
             })
             .collect(),
+            compile_pct: 30.0,
+            baseline_compile_pct: 2.0,
         };
         window_features(&window, 0.1, &mut f);
         assert!(f.len() > 40, "only {} features written", f.len());
@@ -354,6 +364,8 @@ mod tests {
                 pct: 70.0,
                 baseline_pct: 5.0,
             }],
+            compile_pct: 0.0,
+            baseline_compile_pct: 0.0,
         };
         let mut f = Features::new();
         window_features(&w, 0.05, &mut f);

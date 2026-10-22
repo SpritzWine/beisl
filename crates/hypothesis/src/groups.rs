@@ -67,6 +67,10 @@ pub fn group_of(feature: &str) -> Option<FeatureGroup> {
     if feature == "game_base_rate_log" || feature == "layer_game_delta" {
         return Some(Game);
     }
+    if feature == "compile_share" || feature == "compile_delta" {
+        // The driver's compiler is the stack's, whichever thread the game lent it.
+        return Some(Environment);
+    }
     if let Some(class) = feature
         .strip_prefix("thread_")
         .and_then(|r| r.rsplit_once('_'))
@@ -224,6 +228,7 @@ mod tests {
             ("thread_shader_compile_share", Environment),
             ("thread_cache_io_delta", Environment),
             ("thread_observer_share", Environment),
+            ("compile_delta", Environment),
         ] {
             assert_eq!(group_of(name), Some(group), "{name}");
         }

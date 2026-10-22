@@ -43,6 +43,20 @@ pub(crate) fn candidates(f: &Features) -> Vec<Candidate> {
     let burst = get("burst_1s");
     let repeats = get("repeat_len_log").map(|l| l.exp_m1().round());
 
+    // By symbol first: it sees compilation on any thread, the game's own included.
+    if let Some(d) = get("compile_delta").filter(|&d| d >= 0.2) {
+        let share = get("compile_share").unwrap_or(d);
+        add(
+            Cause::ShaderCompile,
+            0.8,
+            vec![format!(
+                "the driver's shader compiler took {:.0}% of the frame's samples, {:.0} \
+                 points more than before",
+                share * 100.0,
+                d * 100.0
+            )],
+        );
+    }
     if let Some(d) = get("thread_shader_compile_delta").filter(|&d| d >= 0.2) {
         let share = get("thread_shader_compile_share").unwrap_or(d);
         add(
@@ -122,17 +136,16 @@ pub(crate) fn candidates(f: &Features) -> Vec<Candidate> {
         add(Cause::MemoryPressure, 0.5, paging);
     }
 
-    if running {
-        let more_game = get("layer_game_delta").filter(|&d| d >= 0.1);
-        let more_samples = get("sample_rate_ratio").filter(|&r| r >= 1.0);
-        if more_game.is_some() || more_samples.is_some() {
+    // The game's own code has to be what grew: extra samples alone can be the driver's
+    // compiler working on the game's threads (a real Saints Row trace, 2026-10-22).
+    let compiling = get("compile_delta").is_some_and(|d| d >= 0.2);
+    if running && !compiling {
+        if let Some(d) = get("layer_game_delta").filter(|&d| d >= 0.1) {
             let mut why: Vec<String> = rate_line.iter().cloned().collect();
-            if let Some(d) = more_game {
-                why.push(format!(
-                    "the game's own code took {:.0} points more",
-                    d * 100.0
-                ));
-            }
+            why.push(format!(
+                "the game's own code took {:.0} points more",
+                d * 100.0
+            ));
             add(Cause::CpuWork, 0.5, why);
         }
     }
@@ -186,6 +199,24 @@ mod tests {
         assert!(c[0].evidence[0].contains("70%"));
         // The other reading stays on the checklist.
         assert!(c.iter().any(|x| x.cause == Cause::Blocked));
+    }
+
+    /// Saints Row, 2026-10-22: the game's threads stayed busy, 92-96% of it in RADV's
+    /// compiler. Busy is not the game's own work.
+    #[test]
+    fn compiling_on_the_games_threads_is_compile_not_cpu_work() {
+        let f = feats(&[
+            ("game_rate_ratio", 1.2),
+            ("sample_rate_ratio", 1.4),
+            ("compile_share", 0.94),
+            ("compile_delta", 0.9),
+            ("layer_game_delta", -0.3),
+            ("burst_1s", 4.0),
+        ]);
+        let c = candidates(&f);
+        assert_eq!(c[0].cause, Cause::ShaderCompile);
+        assert!(c[0].evidence[0].contains("94%"));
+        assert!(!c.iter().any(|x| x.cause == Cause::CpuWork));
     }
 
     #[test]

@@ -68,6 +68,14 @@ pub struct SpikeWindow {
     /// over all samples, behind the same gate. Empty on artifacts from before it.
     #[serde(default)]
     pub threads: Vec<ThreadShare>,
+    /// Share of the samples in a driver's shader compiler, in the frame and in the
+    /// second before, behind the same gate as `threads` (0 below it, and on artifacts
+    /// from before it). Caught by symbol, so compilation on the game's own threads
+    /// counts too.
+    #[serde(default)]
+    pub compile_pct: f32,
+    #[serde(default)]
+    pub baseline_compile_pct: f32,
 }
 
 impl Spike {
@@ -92,7 +100,12 @@ impl SpikeWindow {
                 l.layer, l.pct, l.baseline_pct
             ));
         }
-        if let Some(t) = self
+        if self.compile_pct - self.baseline_compile_pct >= THREAD_SHIFT_PCT {
+            parts.push(format!(
+                "shader compiler {:.0}% (was {:.0}%)",
+                self.compile_pct, self.baseline_compile_pct
+            ));
+        } else if let Some(t) = self
             .threads
             .iter()
             .filter(|t| t.pct - t.baseline_pct >= THREAD_SHIFT_PCT)
@@ -1124,6 +1137,12 @@ fn spike_window(res: &Resolution, frame: Window, base: Window, n: usize) -> Opti
         v.sort_by(|x, y| y.pct.total_cmp(&x.pct));
         v
     };
+    let pct = |t: &WindowTally| 100.0 * t.compile as f32 / t.samples.max(1) as f32;
+    let (compile_pct, baseline_compile_pct) = if f.samples < MIN_SPLIT_SAMPLES {
+        (0.0, 0.0)
+    } else {
+        (pct(f), pct(b))
+    };
     Some(SpikeWindow {
         samples: f.samples,
         baseline_samples: b.samples,
@@ -1131,6 +1150,8 @@ fn spike_window(res: &Resolution, frame: Window, base: Window, n: usize) -> Opti
         baseline_game_samples: b.dominant_pid_samples,
         layers,
         threads,
+        compile_pct,
+        baseline_compile_pct,
     })
 }
 
@@ -1624,6 +1645,7 @@ mod tests {
                 .collect(),
             threads: vec![],
             symbols: vec![],
+            compile: 0,
         }
     }
 
@@ -2213,6 +2235,8 @@ mod tests {
                 baseline_pct: 22.0,
             }],
             threads: vec![],
+            compile_pct: 0.0,
+            baseline_compile_pct: 0.0,
         };
         a.spikes = vec![
             Spike {

@@ -94,7 +94,8 @@ pub enum ThreadClass {
     /// Getting frames out: DXVK's command stream and submission threads, vkd3d-proton's
     /// queue/fence/swapchain threads, engine render threads.
     Render,
-    /// Pipeline-cache file IO: `dxvk-cache`, `vkd3d-disk$`.
+    /// Pipeline- and shader-cache file IO: `dxvk-cache`, `vkd3d-disk$`, and Mesa's
+    /// `:disk$N` threads, which compress and write what the driver compiled on a miss.
     CacheIo,
     /// Engine job pools (Unreal, Unity, VRage, .NET).
     Worker,
@@ -130,7 +131,7 @@ pub fn thread_class(comm: &str) -> ThreadClass {
     let starts = |p: &[&str]| p.iter().any(|x| lower.starts_with(x));
     if starts(&["dxvk-shader"]) {
         ThreadClass::ShaderCompile
-    } else if starts(&["dxvk-cache", "vkd3d-disk"]) {
+    } else if starts(&["dxvk-cache", "vkd3d-disk", ":disk$"]) {
         ThreadClass::CacheIo
     } else if starts(&["dxvk-", "vkd3d", "renderthread", "rhithread"]) {
         ThreadClass::Render
@@ -164,6 +165,24 @@ pub fn thread_class(comm: &str) -> ThreadClass {
     } else {
         ThreadClass::Other
     }
+}
+
+/// Whether a named sample sits in a GPU driver's shader compiler: Mesa's NIR passes and
+/// SPIR-V front end, RADV's ACO, Intel's backend, or LLVM (radeonsi, llvmpipe). Thread
+/// names cannot see this: vkd3d-proton compiles on the game's own threads, and DXVK's
+/// workers spend part of their time elsewhere. Found on a real Saints Row trace, where
+/// 92-96% of the game's samples in each stalled frame were `nir_*`/`aco::` on unnamed
+/// threads (2026-10-22).
+pub fn is_shader_compiler(module: &str, symbol: &str) -> bool {
+    module.starts_with("libLLVM")
+        || symbol.starts_with("nir_")
+        || symbol.contains("_nir_")
+        || symbol.starts_with("vtn_")
+        || symbol.starts_with("spirv_to_nir")
+        || symbol.contains("aco::")
+        || symbol.starts_with("aco_")
+        || symbol.starts_with("brw_")
+        || symbol.starts_with("elk_")
 }
 
 /// Bucket a sample's DSO into a [`Layer`]. Ordered most-specific first and wine-agnostic:
@@ -365,6 +384,9 @@ pub struct WindowTally {
     pub symbols: Vec<SymbolCount>,
     /// Samples per [`ThreadClass`], biggest first, ties in class order.
     pub threads: Vec<(ThreadClass, u64)>,
+    /// Samples in a driver's shader compiler ([`is_shader_compiler`]), whatever thread
+    /// ran them.
+    pub compile: u64,
 }
 
 /// How many hot symbols a [`WindowTally`] keeps. A frame holds a handful of samples;
@@ -618,6 +640,7 @@ struct WindowAcc {
     pids: HashMap<i32, u64>,
     symbols: HashMap<(String, String), u64>,
     threads: HashMap<ThreadClass, u64>,
+    compile: u64,
 }
 
 impl<'a> WindowTallies<'a> {
@@ -636,6 +659,9 @@ impl<'a> WindowTallies<'a> {
             l.0 += 1;
             *acc.pids.entry(pid).or_insert(0) += 1;
             *acc.threads.entry(thread_class(comm)).or_insert(0) += 1;
+            if named.is_some_and(|(module, sym)| is_shader_compiler(module, sym)) {
+                acc.compile += 1;
+            }
             if let Some((module, sym)) = named {
                 l.1 += 1;
                 *acc.symbols
@@ -658,6 +684,7 @@ impl<'a> WindowTallies<'a> {
                         .unwrap_or(0),
                     layers: sorted_tallies(acc.layers),
                     symbols,
+                    compile: acc.compile,
                     threads: {
                         let mut t: Vec<(ThreadClass, u64)> = acc.threads.into_iter().collect();
                         t.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
@@ -928,6 +955,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_drivers_compiler_is_found_by_symbol() {
+        for (module, sym) in [
+            ("libvulkan_radeon.so", "nir_opt_algebraic"),
+            (
+                "libvulkan_radeon.so",
+                "aco::(anonymous namespace)::schedule_block",
+            ),
+            ("libvulkan_radeon.so", "ac_nir_lower_ngg"),
+            ("libvulkan_intel.so", "brw_compile_fs"),
+            ("libvulkan_intel.so", "vtn_handle_body_instruction"),
+            ("libLLVM.so.19", "llvm::SelectionDAG::Combine"),
+        ] {
+            assert!(is_shader_compiler(module, sym), "{module} {sym}");
+        }
+        for (module, sym) in [
+            ("libvulkan_radeon.so", "radv_CmdDrawIndexed"),
+            ("libc.so.6", "__memcpy_avx_unaligned_erms"),
+            ("game.exe", "UpdateNirvana"),
+        ] {
+            assert!(!is_shader_compiler(module, sym), "{module} {sym}");
+        }
+    }
+
     /// Thread names as they appear in real traces (2026-10-22), 15-character kernel cut
     /// included.
     #[test]
@@ -938,6 +989,7 @@ mod tests {
             ("dxvk-shader-h", ShaderCompile),
             ("dxvk-cache", CacheIo),
             ("vkd3d-disk$", CacheIo),
+            (":disk$0", CacheIo),
             ("dxvk-cs", Render),
             ("dxvk-submit", Render),
             ("vkd3d_queue", Render),
