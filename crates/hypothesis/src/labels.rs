@@ -3,7 +3,8 @@
 //! else.
 //!
 //! Append-only so nothing a person said is ever rewritten in place: a correction is a
-//! newer label for the same spike, and the newest one wins when the file is read.
+//! newer label for the same spike, and the newest one wins when the file is read. Taking
+//! a label back is a line too, a retraction, after which the spike is unlabelled again.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -48,6 +49,10 @@ pub struct Label {
     pub note: String,
     /// Unix seconds.
     pub at: u64,
+    /// This line takes back every earlier label for its spike ("don't know" after all)
+    /// and is not a label itself. Its cause is the one it took back, for the record.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retracted: bool,
 }
 
 impl Label {
@@ -66,6 +71,19 @@ impl Label {
         self.weight() >= 1.0
     }
 
+    /// A line that takes back `label`: same spike, the user's, no features to learn from.
+    pub fn retraction(label: &Label, at: u64) -> Label {
+        Label {
+            features: Features::new(),
+            source: LabelSource::User,
+            confirmed: true,
+            note: String::new(),
+            at,
+            retracted: true,
+            ..label.clone()
+        }
+    }
+
     /// The spike this labels: a run and a timeline position to the millisecond.
     pub fn key(&self) -> (String, i64) {
         (self.run.clone(), (self.t_seconds * 1000.0).round() as i64)
@@ -79,6 +97,9 @@ pub struct Loaded {
     pub labels: Vec<Label>,
     /// Lines that did not parse: from a newer beisl, or damaged. Kept in the file.
     pub skipped: usize,
+    /// When each retraction was made: a change to the labels a training may not have
+    /// seen, though no label is added.
+    pub retracted_at: Vec<u64>,
 }
 
 pub struct LabelStore {
@@ -124,7 +145,11 @@ impl LabelStore {
                 Ok(label) => {
                     let key = label.key();
                     newest.retain(|l| l.key() != key);
-                    newest.push(label);
+                    if label.retracted {
+                        out.retracted_at.push(label.at);
+                    } else {
+                        newest.push(label);
+                    }
                 }
                 Err(_) => out.skipped += 1,
             }
@@ -151,6 +176,7 @@ pub(crate) mod tests {
             confirmed: source == LabelSource::User,
             note: String::new(),
             at: 1_792_600_000,
+            retracted: false,
         }
     }
 
@@ -186,6 +212,35 @@ pub(crate) mod tests {
             .map(|l| (l.t_seconds, l.cause))
             .collect();
         assert_eq!(causes, [(40.0, Cause::Blocked), (12.3457, Cause::Throttle)]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_retraction_unlabels_the_spike_until_the_next_label() {
+        let dir = std::env::temp_dir().join(format!("beisl-retract-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = LabelStore::at(dir.join("labels.jsonl"));
+        let agent = label("run-1", 5.0, Cause::Throttle, LabelSource::Agent);
+        let mine = label("run-1", 5.0, Cause::Blocked, LabelSource::User);
+        let other = label("run-1", 9.0, Cause::CpuWork, LabelSource::User);
+        for l in [&agent, &mine, &other] {
+            store.append(l).unwrap();
+        }
+        store
+            .append(&Label::retraction(&mine, 1_792_600_100))
+            .unwrap();
+        let loaded = store.load();
+        // Both earlier lines for that spike are gone, the agent's too; the other spike stays.
+        let left: Vec<f64> = loaded.labels.iter().map(|l| l.t_seconds).collect();
+        assert_eq!(left, [9.0]);
+        assert_eq!(loaded.retracted_at, [1_792_600_100]);
+        // A plain label line carries no `retracted` key at all.
+        assert!(!serde_json::to_string(&other).unwrap().contains("retracted"));
+        // Labelling it again brings it back.
+        store
+            .append(&label("run-1", 5.0, Cause::GpuBound, LabelSource::User))
+            .unwrap();
+        assert_eq!(store.load().labels.len(), 2);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

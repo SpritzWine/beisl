@@ -583,7 +583,7 @@ impl TraceArtifact {
     pub fn persist(&self, run_dir: &Path, judge: &hypothesis::Judge) -> io::Result<()> {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let report = self.render_report_with(judge);
+        let report = self.render_report_with(judge, &self.context_in(run_dir));
         let artifact_path = run_dir.join(session::library::ARTIFACT_FILE);
         let report_path = run_dir.join(session::library::REPORT_FILE);
         write_staged(&[
@@ -596,6 +596,12 @@ impl TraceArtifact {
     /// game ran through Wine (see `hypothesis::groups`).
     pub fn context(&self) -> hypothesis::Context {
         hypothesis::Context::new(&self.game, self.game_maps_pe)
+    }
+
+    /// [`context`](Self::context) plus the card the run used, from its CSV in
+    /// `run_dir`: the GPU readings of two spikes compare only on the same card.
+    pub fn context_in(&self, run_dir: &Path) -> hypothesis::Context {
+        self.context().with_gpu(run_gpu(run_dir))
     }
 
     /// The stretch of the log behind timeline point `i`, to hand to [`analyze_frame`].
@@ -652,11 +658,16 @@ impl TraceArtifact {
     /// A human-readable report (what `beisl symbols` prints and the run dir keeps as
     /// `report.txt`).
     pub fn render_report(&self) -> String {
-        self.render_report_with(&hypothesis::Judge::rules_only())
+        self.render_report_with(&hypothesis::Judge::rules_only(), &self.context())
     }
 
-    /// [`render_report`](Self::render_report) with the likely causes from `judge`.
-    pub fn render_report_with(&self, judge: &hypothesis::Judge) -> String {
+    /// [`render_report`](Self::render_report) with the likely causes from `judge`,
+    /// judged in `ctx` (see [`context_in`](Self::context_in)).
+    pub fn render_report_with(
+        &self,
+        judge: &hypothesis::Judge,
+        ctx: &hypothesis::Context,
+    ) -> String {
         use std::fmt::Write as _;
         let mut o = String::new();
         let _ = writeln!(o, "Beisl trace report — {}", self.game);
@@ -749,7 +760,7 @@ impl TraceArtifact {
                     }
                     let _ = writeln!(o);
                     if !s.features.is_empty() {
-                        let v = judge.judge(&s.features, &self.context());
+                        let v = judge.judge(&s.features, ctx);
                         let _ = writeln!(o, "             {}", v.line());
                         if let Some(h) = &v.hypothesis {
                             for e in h.evidence.iter().take(2) {
@@ -1004,6 +1015,22 @@ fn worst_in(frames: &[Frame], span: TimelineSpan) -> Option<usize> {
 /// than taught to the classifier as the game's.
 fn drop_unanchored_gpu_readings(features: &mut Features) {
     features.retain(|k, _| !(k.starts_with("gpu_") && k.ends_with("_delta")));
+}
+
+/// The card a run's frames were drawn on, as MangoHud's CSV header names it (the Vulkan
+/// device, so on a multi-GPU box the one that actually ran). Read from the run dir when
+/// asked for and never stored in the artifact, which beisl-mcp serves: a GPU model is a
+/// hardware fact, and stays in local labels.
+pub fn run_gpu(run_dir: &Path) -> Option<String> {
+    let csv = frametime_clock(run_dir)
+        .map(|c| run_dir.join(c.csv))
+        .or_else(|| find_csv(run_dir))?;
+    let text = std::fs::read_to_string(csv).ok()?;
+    let mut lines = text.lines();
+    let (header, values) = (lines.next()?, lines.next()?);
+    let col = header.split(',').position(|c| c.trim() == "gpu")?;
+    let gpu = values.split(',').nth(col)?.trim();
+    (!gpu.is_empty()).then(|| gpu.to_string())
 }
 
 /// The CSV the wrapper anchored on perf's clock, when it is still in the run dir.
@@ -1506,6 +1533,26 @@ mod tests {
             "t={}",
             spikes[0].t_seconds
         );
+    }
+
+    #[test]
+    fn the_runs_card_comes_from_the_csv_header() {
+        let dir = std::env::temp_dir().join(format!("beisl-gpu-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("Game_2026-10-22_09-00-00.csv"),
+            "os,cpu,gpu,ram,kernel,driver,cpuscheduler\n\
+             Steam Runtime 4,AMD Ryzen 7 7700X 8-Core Processor,AMD Radeon RX 6700 XT \
+             (RADV NAVI22),31687508,7.2.9-200.fc44.x86_64,,performance\n\
+             fps,frametime,elapsed\n60,16.0,16000000\n",
+        )
+        .unwrap();
+        assert_eq!(
+            run_gpu(&dir).as_deref(),
+            Some("AMD Radeon RX 6700 XT (RADV NAVI22)")
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(run_gpu(&dir), None);
     }
 
     #[test]

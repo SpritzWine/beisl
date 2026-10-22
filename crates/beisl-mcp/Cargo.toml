@@ -13,6 +13,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+artifact = { path = "../artifact" }   # the run's card for its context (artifact::run_gpu)
 compat = { path = "../compat" }
 hypothesis = { path = "../hypothesis" }   # live verdicts per spike, label_spike
 preflight = { path = "../preflight" }

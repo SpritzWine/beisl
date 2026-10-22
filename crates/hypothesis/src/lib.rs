@@ -53,6 +53,11 @@ pub enum Cause {
     MemoryPressure,
     /// The game kept running and simply had more of its own work in that frame.
     CpuWork,
+    /// Can't tell from what was measured. A real answer: stored so the spike stops
+    /// being asked, but never trained on and never grading a layer, because a guess
+    /// teaches worse than nothing. Not in [`Cause::ALL`], which lists what a spike can
+    /// be put down to.
+    Unknown,
 }
 
 impl Cause {
@@ -76,11 +81,21 @@ impl Cause {
             Cause::GpuBound => "gpu-bound",
             Cause::MemoryPressure => "memory-pressure",
             Cause::CpuWork => "cpu-work",
+            Cause::Unknown => "unknown",
         }
     }
 
+    /// One of [`Cause::ALL`], or `unknown`.
     pub fn parse(s: &str) -> Option<Cause> {
-        Cause::ALL.into_iter().find(|c| c.as_str() == s)
+        Cause::ALL
+            .into_iter()
+            .chain([Cause::Unknown])
+            .find(|c| c.as_str() == s)
+    }
+
+    /// Whether a label with this cause teaches anything: everything but `unknown`.
+    pub fn is_known(self) -> bool {
+        self != Cause::Unknown
     }
 
     /// What it means, for a person.
@@ -93,6 +108,7 @@ impl Cause {
             Cause::GpuBound => "the CPU waited on the GPU",
             Cause::MemoryPressure => "paging or swapping",
             Cause::CpuWork => "the game's own extra CPU work",
+            Cause::Unknown => "can't tell from what was measured",
         }
     }
 }
@@ -218,13 +234,20 @@ impl Judge {
     /// report, listing and window uses, so judging stays fast however many labels
     /// pile up. With no training yet, the learned layers are silent.
     pub fn load(labels: &LabelStore, model: &ModelStore) -> Self {
-        let labels = labels.load().labels;
+        let loaded = labels.load();
+        let labels = loaded.labels;
         match model.load() {
             Some(snap) => Judge {
+                // A retraction after the training changed what it should have seen too.
                 untrained: labels
                     .iter()
                     .filter(|l| l.at > snap.newest_label_at)
-                    .count(),
+                    .count()
+                    + loaded
+                        .retracted_at
+                        .iter()
+                        .filter(|&&at| at > snap.trained_at)
+                        .count(),
                 trained_at: Some(snap.trained_at),
                 learned: learn::Learned::from_snapshot(snap, labels),
             },
@@ -262,7 +285,7 @@ impl Judge {
         self.trained_at
     }
 
-    /// Labels that came after the last training.
+    /// Labels, and retractions, that came after the last training.
     pub fn untrained_labels(&self) -> usize {
         self.untrained
     }
@@ -332,7 +355,7 @@ pub(crate) mod tests {
 
     #[test]
     fn causes_round_trip_through_their_names() {
-        for c in Cause::ALL {
+        for c in Cause::ALL.into_iter().chain([Cause::Unknown]) {
             assert_eq!(Cause::parse(c.as_str()), Some(c));
             let json = serde_json::to_string(&c).unwrap();
             assert_eq!(json, format!("\"{}\"", c.as_str()));

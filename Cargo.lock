@@ -36,6 +36,7 @@ dependencies = [
 name = "beisl-mcp"
 version = "0.4.0"
 dependencies = [
+ "artifact",
  "compat",
  "hypothesis",
  "preflight",

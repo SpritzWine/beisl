@@ -93,11 +93,12 @@ pub struct Snapshot {
 
 /// Bump when [`Snapshot`]'s shape changes: an older one is ignored, and the learned
 /// layers stay silent until the next training rather than misreading it.
-pub const SNAPSHOT_VERSION: u32 = 2;
+pub const SNAPSHOT_VERSION: u32 = 3;
 
 impl Learned {
     /// Labels known, nothing trained: the learned layers stay silent.
     pub(crate) fn untrained(labels: Vec<Label>) -> Self {
+        let labels = teaching(labels);
         let gate = Gate {
             labels: labels.len(),
             trusted: labels.iter().filter(|l| l.trusted()).count(),
@@ -115,7 +116,7 @@ impl Learned {
 
     pub(crate) fn from_snapshot(snap: Snapshot, labels: Vec<Label>) -> Self {
         Learned {
-            labels,
+            labels: teaching(labels),
             scaler: snap.scaler,
             model: snap.model,
             gate: snap.gate,
@@ -136,6 +137,7 @@ impl Learned {
         }
     }
     pub(crate) fn train(labels: Vec<Label>) -> Self {
+        let labels = teaching(labels);
         let scaler = Scaler::fit(&labels);
         let trusted: Vec<usize> = (0..labels.len()).filter(|&i| labels[i].trusted()).collect();
         let mut gate = Gate {
@@ -250,6 +252,12 @@ impl Learned {
         }
         None
     }
+}
+
+/// The labels that teach: a can't-tell answer is kept in the store, out of here.
+fn teaching(mut labels: Vec<Label>) -> Vec<Label> {
+    labels.retain(|l| l.cause.is_known());
+    labels
 }
 
 fn rules_answer(f: &Features) -> Option<Cause> {
@@ -630,6 +638,27 @@ mod tests {
         // spike only identical features remain.
         assert_eq!(d(&native, work), 0.0);
         assert!(d(&native, blocked) > 0.0);
+    }
+
+    #[test]
+    fn a_cant_tell_answer_never_teaches() {
+        let mut labels = clusters(30, LabelSource::User);
+        let taught = Judge::new(labels.clone());
+        for l in labels.iter_mut().take(10) {
+            l.cause = Cause::Unknown;
+        }
+        let judge = Judge::new(labels);
+        // Ten fewer labels to learn and grade on, and no "unknown" class to predict.
+        assert_eq!(judge.gate().labels, 20);
+        assert_eq!(taught.gate().labels, 30);
+        let probe = crate::tests::feats(&[
+            ("ft_ratio_log", 6.0),
+            ("burst_1s", 3.0),
+            ("t_log_s", 1.0),
+            ("cpu_mhz_delta", 0.9),
+        ]);
+        let v = judge.judge(&probe, &Context::default());
+        assert_ne!(v.hypothesis.map(|h| h.cause), Some(Cause::Unknown));
     }
 
     #[test]

@@ -502,12 +502,22 @@ impl Server {
         let Ok(mut art) = serde_json::from_str::<Value>(&text) else {
             return Ok(text);
         };
+        let id = self.run_id(args)?;
+        let labels = self.labels().load().labels;
         let judge = hypothesis::Judge::load(&self.labels(), &self.model());
-        let ctx = context_of(&art);
+        let ctx = context_of(&art, &self.traces_root.join(&id));
         let mut judged = false;
         if let Some(spikes) = art.get_mut("spikes").and_then(Value::as_array_mut) {
             for s in spikes {
                 let Some(f) = features_of(s) else { continue };
+                // What it is already labelled, so an assistant need not ask again.
+                let t = s["t_seconds"].as_f64().unwrap_or_default();
+                let key = (id.clone(), (t * 1000.0).round() as i64);
+                if let Some(l) = labels.iter().find(|l| l.key() == key) {
+                    s["label"] = json!({
+                        "cause": l.cause, "source": l.source, "confirmed": l.confirmed
+                    });
+                }
                 s["verdict"] = serde_json::to_value(judge.judge(&f, &ctx)).unwrap_or(Value::Null);
                 judged = true;
             }
@@ -551,7 +561,7 @@ impl Server {
             t_seconds: spike["t_seconds"].as_f64().unwrap_or_default(),
             frametime_ms: spike["frametime_ms"].as_f64().unwrap_or_default() as f32,
             features,
-            context: context_of(&art),
+            context: context_of(&art, &self.traces_root.join(&id)),
             cause,
             source: hypothesis::LabelSource::Agent,
             confirmed: false,
@@ -559,6 +569,7 @@ impl Server {
             at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs()),
+            retracted: false,
         };
         self.labels()
             .append(&label)
@@ -574,12 +585,14 @@ impl Server {
     }
 }
 
-/// The run's game and stack, from the artifact's own fields (as `TraceArtifact::context`).
-fn context_of(art: &Value) -> hypothesis::Context {
+/// The run's game and stack, from the artifact's own fields, and its card from the
+/// run's CSV (as `TraceArtifact::context_in`).
+fn context_of(art: &Value, run_dir: &Path) -> hypothesis::Context {
     hypothesis::Context::new(
         art.get("game").and_then(Value::as_str).unwrap_or_default(),
         art.get("game_maps_pe").and_then(Value::as_bool),
     )
+    .with_gpu(artifact::run_gpu(run_dir))
 }
 
 /// A spike's feature map, when it has one.
@@ -973,8 +986,10 @@ fn tools_list(allow_labels: bool) -> Value {
     ]});
     if allow_labels {
         let causes: Vec<&str> = hypothesis::Cause::ALL
+            .into_iter()
+            .chain([hypothesis::Cause::Unknown])
             .map(hypothesis::Cause::as_str)
-            .to_vec();
+            .collect();
         if let Some(list) = tools["tools"].as_array_mut() {
             list.push(json!({
                 "name": "label_spike",
@@ -982,7 +997,9 @@ fn tools_list(allow_labels: bool) -> Value {
                                 judgement: it trains the likely-cause hypotheses beisl shows \
                                 beside each spike. Label only when the evidence carries it \
                                 (get_artifact's verdict, candidates and features, the \
-                                report, the logs). It is stored as an agent's label: it \
+                                report, the logs). When it does not, `unknown` (can't \
+                                tell) is a full answer: stored so the spike stops being \
+                                asked, never trained on. It is stored as an agent's label: it \
                                 counts for a third of the user's own until the user \
                                 confirms it, and never grades the learned layers by \
                                 itself.",
@@ -1210,6 +1227,10 @@ mod tests {
             art["spikes"][1].get("verdict").is_none(),
             "unmeasured: no verdict"
         );
+        assert!(
+            art["spikes"][0].get("label").is_none(),
+            "nothing labelled yet"
+        );
 
         let writer = Server::new(root).allowing_labels();
         assert!(names(&writer).contains(&"label_spike".to_string()));
@@ -1231,6 +1252,18 @@ mod tests {
             (l.run.as_str(), l.t_seconds, l.note.as_str()),
             ("run-300", 3.5, "stalls on load")
         );
+        // Its label rides along with the spike, so an assistant need not ask again.
+        let resp = call(
+            &writer,
+            json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
+                   "params":{"name":"get_artifact","arguments":{"run_id":"run-300"}}}),
+        );
+        let art: Value =
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(art["spikes"][0]["label"]["cause"], "throttle");
+        assert_eq!(art["spikes"][0]["label"]["source"], "agent");
+        // "Can't tell" is an answer an agent may give.
+        assert_eq!(label(&writer, "unknown")["result"]["isError"], false);
         std::fs::remove_dir_all(&base).unwrap();
     }
 

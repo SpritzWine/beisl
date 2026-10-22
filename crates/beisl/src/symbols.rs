@@ -49,7 +49,10 @@ pub fn run(run_dir: &str) -> ExitCode {
             // A retry succeeded on the same perf.data — drop any stale failure verdict.
             session::library::clear_invalid(dir);
             let judge = hypothesis::Judge::load_default();
-            out!("{}", a.render_report_with(&judge).trim_end());
+            out!(
+                "{}",
+                a.render_report_with(&judge, &a.context_in(dir)).trim_end()
+            );
             // The report already printed above - that's this command's whole point - so
             // a persistence failure (e.g. a read-only run dir) must not fail the command.
             if let Err(e) = a.persist(dir, &judge) {

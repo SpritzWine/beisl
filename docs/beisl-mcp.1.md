@@ -43,7 +43,8 @@ deleting traces stay in the app, where a human confirms them.
                         (each against the second before it, with a verdict:
                         its likely cause if one is sure enough, the candidates
                         and their evidence, and whether it wants a confirmation
-                        or a checklist), the per-layer CPU split, hottest
+                        or a checklist; and its label, once it has one), the
+                        per-layer CPU split, hottest
                         functions, diagnostics
     get_report          the same analysis as human-readable prose
     get_log             the tail of a run's beisl, game, perf, or proton log
@@ -57,7 +58,8 @@ deleting traces stay in the app, where a human confirms them.
                         volume-GUID path bug) and fires even on a clean exit
     label_spike         with --allow-labels only: record what spike N of a run
                         was (shader-compile, cpu-contention, throttle, blocked,
-                        gpu-bound, memory-pressure, cpu-work). Stored as the
+                        gpu-bound, memory-pressure, cpu-work, or unknown when
+                        it cannot be told: an answer, never trained on). Stored as the
                         agent's label, beside beisl label's in
                         ~/.local/share/beisl/labels.jsonl: it counts a third of
                         the user's own until the user confirms it, and never

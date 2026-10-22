@@ -10,7 +10,9 @@
 //! Florian, 2026-10-22: "hardware related issues could transfer across games and will not
 //! be submitted (in case the data will be shared sometime), gamedata will not be
 //! considered with that much of a weight across games, environment ones could be filtered
-//! when comparing native vs proton games."
+//! when comparing native vs proton games." The GPU's readings got their own group the
+//! same day, when labelling real traces showed games rendering on different cards of
+//! one machine (an Arc A770 and an RX 6700 XT, beside an iGPU).
 
 use serde::{Deserialize, Serialize};
 
@@ -19,8 +21,13 @@ use serde::{Deserialize, Serialize};
 pub enum FeatureGroup {
     /// The frame and its neighbours: length, bursts, repeats, whether the game ran.
     Spike,
-    /// The machine's sensors around the spike.
+    /// The machine's CPU-side sensors around the spike: CPU clock, load, temperature and
+    /// power, RAM and swap.
     Hardware,
+    /// The GPU's sensors around the spike. Apart from the rest of the machine because
+    /// one machine can render on more than one card: what an Arc's readings mean is
+    /// not what a Radeon's do.
+    Gpu,
     /// The game's own threads, code and rhythm.
     Game,
     /// The stack between game and hardware: Wine, DXVK/vkd3d, driver, kernel, and the
@@ -32,7 +39,7 @@ impl FeatureGroup {
     /// Whether a feature of this group may ever leave the machine, should labels be
     /// shared one day. The machine's own readings never do.
     pub fn shareable(self) -> bool {
-        self != FeatureGroup::Hardware
+        !matches!(self, FeatureGroup::Hardware | FeatureGroup::Gpu)
     }
 }
 
@@ -95,7 +102,14 @@ pub fn group_of(feature: &str) -> Option<FeatureGroup> {
         "swap_used",
         "gpu_vram_used",
     ];
-    SENSORS.contains(&sensor).then_some(Hardware)
+    if !SENSORS.contains(&sensor) {
+        return None;
+    }
+    Some(if sensor.starts_with("gpu_") {
+        Gpu
+    } else {
+        Hardware
+    })
 }
 
 /// What runs between the game and the hardware, as far as it matters for comparing.
@@ -120,6 +134,10 @@ pub struct Context {
     pub game: Option<String>,
     #[serde(default)]
     pub env: Env,
+    /// The card the game ran on, as MangoHud's CSV names it. Kept in local labels only:
+    /// like every hardware fact, it never leaves the machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<String>,
 }
 
 impl Context {
@@ -132,13 +150,22 @@ impl Context {
             Some(false) => Env::Native,
             None => Env::Unknown,
         };
-        Context { game, env }
+        Context {
+            game,
+            env,
+            gpu: None,
+        }
+    }
+
+    pub fn with_gpu(mut self, gpu: Option<String>) -> Self {
+        self.gpu = gpu.filter(|g| !g.trim().is_empty());
+        self
     }
 }
 
 /// Across another game, the game's own features count this much.
 pub const OTHER_GAME: f32 = 0.25;
-/// When either side's environment is unknown, its features count this much.
+/// When either side's environment, or card, is unknown, its features count this much.
 pub const UNSURE_ENV: f32 = 0.5;
 
 /// How much a feature of `group` counts when comparing a spike from `a` with one from
@@ -146,6 +173,11 @@ pub const UNSURE_ENV: f32 = 0.5;
 pub fn weight(group: FeatureGroup, a: &Context, b: &Context) -> f32 {
     match group {
         FeatureGroup::Spike | FeatureGroup::Hardware => 1.0,
+        FeatureGroup::Gpu => match (&a.gpu, &b.gpu) {
+            (Some(x), Some(y)) if x == y => 1.0,
+            (Some(_), Some(_)) => 0.0,
+            _ => UNSURE_ENV,
+        },
         FeatureGroup::Game => match (&a.game, &b.game) {
             (Some(x), Some(y)) if x == y => 1.0,
             _ => OTHER_GAME,
@@ -180,7 +212,9 @@ mod tests {
             ("game_rate_ratio", Spike),
             ("t_log_s", Spike),
             ("cpu_mhz_delta", Hardware),
-            ("gpu_vram_used_delta", Hardware),
+            ("ram_used_delta", Hardware),
+            ("gpu_vram_used_delta", Gpu),
+            ("gpu_temp_delta", Gpu),
             ("game_base_rate_log", Game),
             ("layer_game_delta", Game),
             ("thread_render_share", Game),
@@ -217,6 +251,17 @@ mod tests {
         assert_eq!(weight(Environment, &proton_a, &proton_b), 1.0);
         assert_eq!(weight(Environment, &proton_a, &native), 0.0);
         assert_eq!(weight(Environment, &native, &unknown), UNSURE_ENV);
+        // A GPU's readings compare only on the same card: the CPU's stay machine-wide.
+        let arc = proton_a
+            .clone()
+            .with_gpu(Some("Intel(R) Arc(tm) A770 Graphics (DG2)".into()));
+        let radeon = proton_a
+            .clone()
+            .with_gpu(Some("AMD Radeon RX 6700 XT (RADV NAVI22)".into()));
+        assert_eq!(weight(Gpu, &arc, &arc), 1.0);
+        assert_eq!(weight(Gpu, &arc, &radeon), 0.0);
+        assert_eq!(weight(Gpu, &arc, &proton_b), UNSURE_ENV);
+        assert_eq!(weight(Hardware, &arc, &radeon), 1.0);
     }
 
     #[test]

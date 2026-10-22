@@ -61,7 +61,8 @@ pub enum Msg {
     Label(i64, Cause),
     /// Lay out a hitch's checklist: "Not quite", "Change", "No".
     OpenChecklist(i64),
-    /// "Don't know": put the checklist away, storing nothing.
+    /// "Don't know": a stored answer (`Cause::Unknown`) that replaces any earlier label,
+    /// stops the hitch asking, and is never trained on.
     DontKnow(i64),
     /// Train on every label, in the background: the one slow part, only when asked.
     Retrain,
@@ -314,9 +315,7 @@ impl Application for SessionApp {
             Msg::OpenChecklist(key) => {
                 self.choices.insert(key, Choice::Open);
             }
-            Msg::DontKnow(key) => {
-                self.choices.insert(key, Choice::Closed);
-            }
+            Msg::DontKnow(key) => self.store_label(key, Cause::Unknown),
             Msg::Retrain => {
                 if self.retraining.is_none() {
                     self.retrain_note = None;
@@ -733,7 +732,7 @@ impl SessionApp {
     fn context(&self) -> Context {
         self.artifact
             .as_ref()
-            .map(TraceArtifact::context)
+            .map(|a| a.context_in(&self.dir))
             .unwrap_or_default()
     }
 
@@ -811,10 +810,11 @@ impl SessionApp {
             Ask::Unmeasured => return None,
             Ask::Said(cause) => col.push(
                 row()
-                    .push(widget::text::caption(format!(
-                        "You said: {}",
-                        cause.as_str()
-                    )))
+                    .push(widget::text::caption(if cause.is_known() {
+                        format!("You said: {}", cause.as_str())
+                    } else {
+                        "You said: don't know".to_string()
+                    }))
                     .push(small("Change", Msg::OpenChecklist(key))),
             ),
             Ask::Proposed { cause, note } => {
@@ -836,7 +836,6 @@ impl SessionApp {
                     .push(small("Not quite", Msg::OpenChecklist(key))),
             ),
             Ask::Checklist => col.push(checklist(key, &v.candidates)),
-            Ask::Closed => col.push(small("Say what it was", Msg::OpenChecklist(key))),
         };
         Some(
             widget::container(col)
@@ -1640,8 +1639,6 @@ fn human_bytes(b: u64) -> String {
 enum Choice {
     /// "Not quite", "Change" or "No": lay the checklist out whatever else is known.
     Open,
-    /// "Don't know": put it away.
-    Closed,
 }
 
 /// Where a hitch's review stands, which decides what sits under its verdict.
@@ -1659,14 +1656,11 @@ enum Ask {
     /// Sure enough that a yes will do.
     Confirm(Cause),
     Checklist,
-    /// Unsure, and the user put the checklist away without an answer.
-    Closed,
 }
 
 /// `verdict` is `None` for an unmeasured hitch; `newest` is the label that stands for it.
 /// An opened checklist outranks everything, since the user asked for it; what someone
-/// said outranks what the judge thinks; "Don't know" only quiets an unsure verdict, so a
-/// sure one goes back to asking for a yes.
+/// said outranks what the judge thinks, "don't know" included, which is a stored answer.
 fn ask_of(verdict: Option<&Verdict>, newest: Option<&Label>, choice: Option<Choice>) -> Ask {
     let Some(v) = verdict else {
         return Ask::Unmeasured;
@@ -1687,7 +1681,6 @@ fn ask_of(verdict: Option<&Verdict>, newest: Option<&Label>, choice: Option<Choi
     }
     match (&v.hypothesis, v.review) {
         (Some(h), Review::Confirm) => Ask::Confirm(h.cause),
-        _ if choice == Some(Choice::Closed) => Ask::Closed,
         _ => Ask::Checklist,
     }
 }
@@ -1725,6 +1718,7 @@ fn user_label(
         confirmed: true,
         note: String::new(),
         at,
+        retracted: false,
     }
 }
 
@@ -1898,7 +1892,6 @@ mod tests {
         let none = verdict(None);
         let mine = user_label("run-1", 12.0, 80.0, &feats(), Cause::Throttle, 1);
         let open = Some(Choice::Open);
-        let closed = Some(Choice::Closed);
 
         assert_eq!(ask_of(None, Some(&mine), open), Ask::Unmeasured);
         assert_eq!(
@@ -1907,21 +1900,23 @@ mod tests {
         );
         assert_eq!(ask_of(Some(&unsure), None, None), Ask::Checklist);
         assert_eq!(ask_of(Some(&none), None, None), Ask::Checklist);
-        // "Not quite" on a sure one; "Don't know" takes it back to the yes.
+        // "Not quite" on a sure one.
         assert_eq!(ask_of(Some(&sure), None, open), Ask::Checklist);
+        // "Don't know" is an answer like any other: it stands until changed, sure
+        // verdict or not.
+        let dont_know = user_label("run-1", 12.0, 80.0, &feats(), Cause::Unknown, 2);
         assert_eq!(
-            ask_of(Some(&sure), None, closed),
-            Ask::Confirm(Cause::ShaderCompile)
+            ask_of(Some(&sure), Some(&dont_know), None),
+            Ask::Said(Cause::Unknown)
         );
-        assert_eq!(ask_of(Some(&unsure), None, closed), Ask::Closed);
+        assert_eq!(
+            ask_of(Some(&unsure), Some(&dont_know), open),
+            Ask::Checklist
+        );
 
         // What someone said outranks the judge, and "Change" reopens it.
         assert_eq!(
             ask_of(Some(&sure), Some(&mine), None),
-            Ask::Said(Cause::Throttle)
-        );
-        assert_eq!(
-            ask_of(Some(&sure), Some(&mine), closed),
             Ask::Said(Cause::Throttle)
         );
         assert_eq!(ask_of(Some(&sure), Some(&mine), open), Ask::Checklist);

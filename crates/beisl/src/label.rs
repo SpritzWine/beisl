@@ -51,8 +51,8 @@ pub fn run(args: &[String]) -> ExitCode {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "beisl: usage: beisl label <run> [<n> <cause> [--note TEXT] | <n> --confirm] [--as-agent]\n       \
-         beisl label --stats | --retrain\n\ncauses: {}",
+        "beisl: usage: beisl label <run> [<n> <cause> [--note TEXT] | <n> --confirm | <n> --unset] [--as-agent]\n       \
+         beisl label --stats | --retrain\n\ncauses: {}, or unknown (can't tell)",
         causes()
     );
     ExitCode::from(2)
@@ -93,13 +93,22 @@ fn list(dir: &Path, art: &TraceArtifact) -> ExitCode {
     }
     if art.spikes.iter().all(|s| s.features.is_empty()) {
         out!(
-            "\nThis run was analyzed before beisl measured its spikes, so there is nothing \
-             to label. Re-analyze it with `beisl symbols {}`; a run recorded before beisl \
-             put frametimes and perf on one clock stays unmeasured.",
+            "\nThis run was analyzed before beisl measured its spikes. Re-analyze it with \
+             `beisl symbols {}` and its spikes get their frametime shape and sensor \
+             readings; a run recorded before frametimes and perf shared a clock gets no \
+             per-spike CPU picture on top.",
             dir.display()
         );
         return ExitCode::SUCCESS;
     }
+    if art.spikes.iter().all(|s| s.window.is_none()) {
+        out!(
+            "(recorded before frametimes and perf shared a clock: these spikes have their \
+             shape and sensor readings, but no CPU picture, so the rules can say less)"
+        );
+    }
+    let ctx = art.context_in(dir);
+    let labels = LabelStore::default_path().load().labels;
     for (n, s) in art.spikes.iter().enumerate() {
         out!(
             "\n{:>2}  {:6.1} ms at {:.1}s",
@@ -111,7 +120,23 @@ fn list(dir: &Path, art: &TraceArtifact) -> ExitCode {
             out!("    not measured");
             continue;
         }
-        let v = judge.judge(&s.features, &art.context());
+        let key = (run_name(dir), (s.t_seconds * 1000.0).round() as i64);
+        if let Some(l) = labels.iter().find(|l| l.key() == key) {
+            let by = match (l.source, l.confirmed) {
+                (LabelSource::User, _) => "you",
+                (_, true) => "an agent, confirmed by you",
+                (LabelSource::Agent, false) => "an agent, not confirmed yet",
+                (LabelSource::Harness, false) => "the harness",
+            };
+            let what = if l.cause.is_known() {
+                l.cause.as_str()
+            } else {
+                "don't know"
+            };
+            out!("    labelled: {what} (by {by})");
+            continue;
+        }
+        let v = judge.judge(&s.features, &ctx);
         let ask = match v.review {
             Review::Confirm => "sure: confirm with --confirm",
             Review::Checklist => "unsure: which is it?",
@@ -125,7 +150,7 @@ fn list(dir: &Path, art: &TraceArtifact) -> ExitCode {
         if v.review == Review::Checklist {
             if v.candidates.is_empty() {
                 out!(
-                    "      the rules see no candidate here; say what it was: {}",
+                    "      the rules see no candidate here; say what it was: {}, or unknown",
                     causes()
                 );
             }
@@ -138,10 +163,12 @@ fn list(dir: &Path, art: &TraceArtifact) -> ExitCode {
         }
     }
     out!(
-        "\nLabel one:   beisl label {} <n> <cause>   ({})\nConfirm one: beisl label {} <n> --confirm",
-        run_name(dir),
+        "\nLabel one:   beisl label {run} <n> <cause>   ({})\n\
+         Can't tell:  beisl label {run} <n> unknown   (an answer: never trained on)\n\
+         Confirm one: beisl label {run} <n> --confirm\n\
+         Take back:   beisl label {run} <n> --unset",
         causes(),
-        run_name(dir)
+        run = run_name(dir)
     );
     ExitCode::SUCCESS
 }
@@ -165,9 +192,12 @@ fn record(dir: &Path, art: &TraceArtifact, i: usize, rest: &[String]) -> ExitCod
         .cloned()
         .unwrap_or_default();
     let agent = rest.iter().any(|a| a == "--as-agent");
+    if rest.first().map(String::as_str) == Some("--unset") {
+        return unset(dir, spike.t_seconds, i);
+    }
     let cause = match rest.first().map(String::as_str) {
         Some("--confirm") => match Judge::load_default()
-            .judge(&spike.features, &art.context())
+            .judge(&spike.features, &art.context_in(dir))
             .hypothesis
         {
             Some(h) => h.cause,
@@ -196,7 +226,7 @@ fn record(dir: &Path, art: &TraceArtifact, i: usize, rest: &[String]) -> ExitCod
         t_seconds: spike.t_seconds,
         frametime_ms: spike.frametime_ms,
         features: spike.features.clone(),
-        context: art.context(),
+        context: art.context_in(dir),
         cause,
         source: if agent {
             LabelSource::Agent
@@ -208,6 +238,7 @@ fn record(dir: &Path, art: &TraceArtifact, i: usize, rest: &[String]) -> ExitCod
         at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs()),
+        retracted: false,
     };
     let store = LabelStore::default_path();
     if let Err(e) = store.append(&label) {
@@ -241,6 +272,7 @@ fn stats() -> ExitCode {
         count(LabelSource::Agent),
         count(LabelSource::Harness),
     );
+    let cant_tell = loaded.labels.iter().filter(|l| !l.cause.is_known()).count();
     let unconfirmed = loaded
         .labels
         .iter()
@@ -251,9 +283,12 @@ fn stats() -> ExitCode {
     out!(
         "{} label(s): {user} yours, {agent} from an agent ({unconfirmed} unconfirmed), \
          {harness} from the harness  [{}]",
-        g.labels,
+        loaded.labels.len(),
         store.path().display()
     );
+    if cant_tell > 0 {
+        out!("{cant_tell} of them say \"don't know\": kept as answers, never trained on");
+    }
     if loaded.skipped > 0 {
         out!(
             "{} line(s) in it could not be read (a newer beisl, or damage) and are kept as they are",
@@ -320,6 +355,41 @@ fn stats() -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+/// Take back whatever the spike is labelled: it is unlabelled again, as if never said.
+fn unset(dir: &Path, t_seconds: f64, i: usize) -> ExitCode {
+    let store = LabelStore::default_path();
+    let key = (run_name(dir), (t_seconds * 1000.0).round() as i64);
+    let Some(label) = store.load().labels.into_iter().find(|l| l.key() == key) else {
+        out!(
+            "Spike {} of {} has no label to take back.",
+            i + 1,
+            run_name(dir)
+        );
+        return ExitCode::SUCCESS;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    if let Err(e) = store.append(&Label::retraction(&label, now)) {
+        eprintln!(
+            "beisl: could not save it in {} ({e})",
+            store.path().display()
+        );
+        return ExitCode::FAILURE;
+    }
+    out!(
+        "Spike {} of {} is unlabelled again (it was {}).",
+        i + 1,
+        run_name(dir),
+        if label.cause.is_known() {
+            label.cause.as_str()
+        } else {
+            "don't know"
+        }
+    );
+    stats()
 }
 
 /// Train on every label and save it: the slow part, only when asked for.

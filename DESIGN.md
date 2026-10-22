@@ -181,14 +181,23 @@ only to confirm; an unsure one lays out the candidates and their evidence.
 
 **Features have a provenance** (`hypothesis::groups`), and a comparison between two
 spikes is conditioned on it. The spike's own shape is the symptom and compares
-anywhere. The machine's sensors transfer across games, so a hardware cause
-learned on one game helps on the next; they are also the one group that never
-leaves the machine, should labels ever be shared. The game's own threads and
-rhythm are its habits: a labelled spike from another game counts a quarter on
-them, and the model shrinks them ten times harder. The environment (Wine, the
-translation layer, driver and kernel, their threads) is left out entirely
-between a native game and a Wine one. Every label stores its game and whether it
-ran through Wine; a training from before this is ignored until the next one.
+anywhere. The machine's CPU-side sensors transfer across games, so a hardware
+cause learned on one game helps on the next; the GPU's readings compare only
+between spikes from the same card, since one machine can render on more than one
+(this one has an Arc A770, an RX 6700 XT and an iGPU, and the GPU pin decides).
+Both are the hardware that never leaves the machine, should labels ever be shared.
+The game's own threads and rhythm are its habits: a labelled spike from another
+game counts a quarter on them, and the model shrinks them ten times harder. The
+environment (Wine, the translation layer, driver and kernel, their threads) is
+left out entirely between a native game and a Wine one. Every label stores its
+game, whether it ran through Wine, and the card (from the run's CSV, never from
+the artifact, which MCP serves); a training from before this is ignored until
+the next one.
+
+**"Don't know" is an answer.** Stored as `unknown`, it stops a spike asking and
+replaces any earlier label, and it is never trained on and never grades a layer:
+a guess teaches worse than nothing. `beisl label --unset` instead takes a label
+back entirely, leaving the spike unanswered.
 
 Measured on three synthetic runs labelled by what was injected (2026-10-22):
 with 13 labels both learned layers stay silent; with 20 the model is graded 14

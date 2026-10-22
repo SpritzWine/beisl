@@ -61,18 +61,22 @@ and, when the run dir is writable, save artifact.json + report.txt into it
 (fetches GPU-driver debug symbols on demand via debuginfod when the local
 perf supports it).
 
-**label <run> [<n> <cause> [--note TEXT] | <n> --confirm] [--as-agent]**, **label --stats** -
+**label <run> [<n> <cause> [--note TEXT] | <n> --confirm | <n> --unset] [--as-agent]**,
+**label --stats** -
 every worst spike of an analyzed run comes with a likely cause, from readable
 rules at first and from what you labelled later; this is where you say what it
 really was. Without a spike number it lists the run's spikes: a sure verdict
 asks only for `--confirm`, an unsure one lays out its candidates and the
 measurements behind each. `<run>` is a run directory or its `run-<n>` name.
 Causes: shader-compile, cpu-contention, throttle, blocked, gpu-bound,
-memory-pressure, cpu-work. A label remembers its game and whether it ran through
-Wine: what it says about the machine counts for every game, what it says about
-the game counts little for others, and Wine's layers are never compared with a
-native game's. Labels stay on this machine, in
-~/.local/share/beisl/labels.jsonl, the newest per spike winning. Learned
+memory-pressure, cpu-work; or `unknown`, an answer in its own right when the
+measurements cannot tell: stored so the spike stops asking, never trained on. A
+label remembers its game, whether it ran through Wine, and the card: what it
+says about the CPU side counts for every game, the GPU's readings only on the
+same card, what it says about the game counts little for others, and Wine's
+layers are never compared with a native game's. Labels stay on this machine, in
+~/.local/share/beisl/labels.jsonl, the newest per spike winning; `--unset`
+takes a spike's label back, leaving it unlabelled again. Learned
 answers appear only once they beat the rules on your own labels. An assistant
 driving this command passes `--as-agent`: its label then counts a third of yours
 and never grades a layer until you confirm it, like one from beisl-mcp's
