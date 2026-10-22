@@ -19,6 +19,7 @@ mod cue;
 mod gpu;
 mod handoff;
 mod install;
+mod label;
 mod mangohud;
 mod out;
 mod perf;
@@ -52,6 +53,7 @@ fn main() -> ExitCode {
             return install::run(install::Action::Install { relax });
         }
         Some("uninstall") => return install::run(install::Action::Uninstall),
+        Some("label") => return label::run(&args[1..]),
         Some("symbols") => {
             let Some(dir) = args.get(1) else {
                 eprintln!("beisl: usage: beisl symbols <trace-run-dir>");

@@ -1,6 +1,6 @@
 # NAME
 
-beisl-mcp — read-only MCP server over recorded beisl traces (JSON-RPC on stdio)
+beisl-mcp - MCP server over recorded beisl traces, read-only unless asked (JSON-RPC on stdio)
 
 # SYNOPSIS
 
@@ -14,6 +14,9 @@ beisl-mcp — read-only MCP server over recorded beisl traces (JSON-RPC on stdio
                           (~/.local/share/beisl/traces); for testing a
                           consumer against a fixture tree without moving
                           XDG_DATA_HOME for every other tool
+    beisl-mcp --allow-labels
+                          also offer label_spike, the one tool that writes:
+                          the assistant may record what a spike really was
 
 # DESCRIPTION
 
@@ -27,7 +30,8 @@ Full docs: `man beisl-mcp` or docs/ in the repository.
 
 The server is entirely opt-in: the transport is the process's own stdin and
 stdout — no ports, no sockets — and nothing runs unless an AI client is
-configured to start the binary. All tools are read-only; analyzing and
+configured to start the binary. Every tool reads, except label_spike, which
+exists only when the client's config passes `--allow-labels`; analyzing and
 deleting traces stay in the app, where a human confirms them.
 
 # TOOLS
@@ -36,8 +40,11 @@ deleting traces stay in the app, where a human confirms them.
                         analyzed?
     get_setup_status    the preflight checklist (same checks as `beisl --check`)
     get_artifact        a run's analyzed trace as JSON: frame stats and spikes
-                        (each against the second before it), the per-layer CPU
-                        split, hottest functions, diagnostics
+                        (each against the second before it, with a verdict:
+                        its likely cause if one is sure enough, the candidates
+                        and their evidence, and whether it wants a confirmation
+                        or a checklist), the per-layer CPU split, hottest
+                        functions, diagnostics
     get_report          the same analysis as human-readable prose
     get_log             the tail of a run's beisl, game, perf, or proton log
     get_crash_summary   pre-chewed crash forensics for a run that "just died"
@@ -48,6 +55,13 @@ deleting traces stay in the app, where a human confirms them.
                         structurally cannot run here (a vendor kernel-mode
                         anti-cheat driver, a missing Wine export, or a
                         volume-GUID path bug) and fires even on a clean exit
+    label_spike         with --allow-labels only: record what spike N of a run
+                        was (shader-compile, cpu-contention, throttle, blocked,
+                        gpu-bound, memory-pressure, cpu-work). Stored as the
+                        agent's label, beside beisl label's in
+                        ~/.local/share/beisl/labels.jsonl: it counts a third of
+                        the user's own until the user confirms it, and never
+                        decides on its own whether a learned layer may speak
 
 # SEE ALSO
 

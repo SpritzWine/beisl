@@ -7,6 +7,7 @@ name = "artifact"
 version = "0.4.0"
 dependencies = [
  "compat",
+ "hypothesis",
  "serde",
  "serde_json",
  "session",
@@ -24,6 +25,7 @@ dependencies = [
  "artifact",
  "assets",
  "compat",
+ "hypothesis",
  "libc",
  "preflight",
  "serde_json",
@@ -35,6 +37,7 @@ name = "beisl-mcp"
 version = "0.4.0"
 dependencies = [
  "compat",
+ "hypothesis",
  "preflight",
  "serde_json",
  "session",

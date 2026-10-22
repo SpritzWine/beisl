@@ -572,10 +572,13 @@ impl TraceArtifact {
     /// renamed back to back (see [`write_staged`]), so a failure partway through - e.g.
     /// disk full after the artifact but before the report - can't leave a fresh file
     /// beside a stale sibling that a reader would treat as a matching, current pair.
-    pub fn persist(&self, run_dir: &Path) -> io::Result<()> {
+    ///
+    /// `judge` names the likely causes in `report.txt`, as of now: the caller decides
+    /// whose labels it learned from (the user's store for a real run).
+    pub fn persist(&self, run_dir: &Path, judge: &hypothesis::Judge) -> io::Result<()> {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let report = self.render_report();
+        let report = self.render_report_with(judge);
         let artifact_path = run_dir.join(session::library::ARTIFACT_FILE);
         let report_path = run_dir.join(session::library::REPORT_FILE);
         write_staged(&[
@@ -638,6 +641,11 @@ impl TraceArtifact {
     /// A human-readable report (what `beisl symbols` prints and the run dir keeps as
     /// `report.txt`).
     pub fn render_report(&self) -> String {
+        self.render_report_with(&hypothesis::Judge::rules_only())
+    }
+
+    /// [`render_report`](Self::render_report) with the likely causes from `judge`.
+    pub fn render_report_with(&self, judge: &hypothesis::Judge) -> String {
         use std::fmt::Write as _;
         let mut o = String::new();
         let _ = writeln!(o, "Beisl trace report — {}", self.game);
@@ -729,6 +737,23 @@ impl TraceArtifact {
                         let _ = write!(o, "   {w}");
                     }
                     let _ = writeln!(o);
+                    if !s.features.is_empty() {
+                        let v = judge.judge(&s.features);
+                        let _ = writeln!(o, "             {}", v.line());
+                        if let Some(h) = &v.hypothesis {
+                            for e in h.evidence.iter().take(2) {
+                                let _ = writeln!(o, "               - {e}");
+                            }
+                        }
+                    }
+                }
+                if self.spikes.iter().any(|s| !s.features.is_empty()) {
+                    let _ = writeln!(
+                        o,
+                        "  (a likely cause is a hypothesis, from rules or from spikes you \
+                         labelled, and can be wrong; the measurements stand either way. \
+                         Confirm or correct one with `beisl label <run-dir>`.)"
+                    );
                 }
                 if self.spikes.iter().any(|s| s.window.is_some()) {
                     let _ = writeln!(
@@ -2268,7 +2293,7 @@ mod tests {
         let a = sample_artifact("Persisted");
         let dir = std::env::temp_dir().join(format!("beisl-persist-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        a.persist(&dir).unwrap();
+        a.persist(&dir, &hypothesis::Judge::rules_only()).unwrap();
 
         let artifact_path = dir.join(session::library::ARTIFACT_FILE);
         let report_path = dir.join(session::library::REPORT_FILE);
@@ -2300,10 +2325,10 @@ mod tests {
         let mut a = sample_artifact("First");
         let dir = std::env::temp_dir().join(format!("beisl-persist-twice-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        a.persist(&dir).unwrap();
+        a.persist(&dir, &hypothesis::Judge::rules_only()).unwrap();
 
         a.game = "Second".into();
-        a.persist(&dir).unwrap();
+        a.persist(&dir, &hypothesis::Judge::rules_only()).unwrap();
 
         let artifact_path = dir.join(session::library::ARTIFACT_FILE);
         let report_path = dir.join(session::library::REPORT_FILE);

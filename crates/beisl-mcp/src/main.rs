@@ -41,17 +41,27 @@ fn main() -> ExitCode {
     // `--traces-dir` serves a library other than the default one. Only reason it exists:
     // testing against a fixture tree previously meant setting XDG_DATA_HOME around the
     // process, which also moves every other tool's data - a blunt instrument for a
-    // read-only server. Not a security boundary: the server is already read-only and the
-    // caller already chose to run this binary.
-    let root = match std::env::args().skip(1).collect::<Vec<_>>().as_slice() {
-        [] => session::library::default_root(),
-        [flag, dir] if flag == "--traces-dir" => PathBuf::from(dir),
-        _ => {
-            eprintln!("beisl-mcp: usage: beisl-mcp [--traces-dir DIR]");
-            return ExitCode::from(2);
+    // read-only server. Not a security boundary: the server reads only, unless the user
+    // adds --allow-labels, and the caller already chose to run this binary.
+    let mut root = session::library::default_root();
+    let mut allow_labels = false;
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--traces-dir" => match args.next() {
+                Some(dir) => root = PathBuf::from(dir),
+                None => return usage(),
+            },
+            // The one write: an assistant may record what a spike was. Opt-in per client
+            // config, never on by default (see `Server::allowing_labels`).
+            "--allow-labels" => allow_labels = true,
+            _ => return usage(),
         }
-    };
-    let server = beisl_mcp::Server::new(root);
+    }
+    let mut server = beisl_mcp::Server::new(root);
+    if allow_labels {
+        server = server.allowing_labels();
+    }
     match server.serve(io::stdin().lock(), io::stdout().lock()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -59,4 +69,9 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn usage() -> ExitCode {
+    eprintln!("beisl-mcp: usage: beisl-mcp [--traces-dir DIR] [--allow-labels]");
+    ExitCode::from(2)
 }

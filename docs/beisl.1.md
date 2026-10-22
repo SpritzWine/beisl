@@ -9,6 +9,8 @@ beisl — game perf tracing: perf CPU samples + MangoHud frametimes, wine-agnost
     beisl --check                    setup checklist in the terminal
                                      (aliases: --preflight, doctor)
     beisl symbols <trace-run-dir>    resolve, report, and save a captured trace
+    beisl label <run> [<n> <cause>]  what a spike really was: teaches the
+                                     likely causes (`beisl label --stats`)
     beisl install                    copy beisl into ~/.local/bin
                                      (+ "Beisl Setup" menu entry when bundled)
     beisl uninstall                  remove the per-user install
@@ -59,6 +61,18 @@ and, when the run dir is writable, save artifact.json + report.txt into it
 (fetches GPU-driver debug symbols on demand via debuginfod when the local
 perf supports it).
 
+**label <run> [<n> <cause> [--note TEXT] | <n> --confirm]**, **label --stats** -
+every worst spike of an analyzed run comes with a likely cause, from readable
+rules at first and from what you labelled later; this is where you say what it
+really was. Without a spike number it lists the run's spikes: a sure verdict
+asks only for `--confirm`, an unsure one lays out its candidates and the
+measurements behind each. `<run>` is a run directory or its `run-<n>` name.
+Causes: shader-compile, cpu-contention, throttle, blocked, gpu-bound,
+memory-pressure, cpu-work. Labels stay on this machine, in
+~/.local/share/beisl/labels.jsonl, the newest per spike winning. Learned
+answers appear only once they beat the rules on your own labels; `--stats`
+says which layers speak and on what record.
+
 **install / uninstall** — per-user install into ~/.local/bin, desktop entry,
 icons, and man pages; uninstall names anything root-owned it cannot remove.
 
@@ -102,6 +116,9 @@ analysis step only.
     ~/.local/share/gamebus-presenced/compat-inbox/
                                           one JSON drop per run that hit a compat wall,
                                           for gamebus-setup to take into its findings
+    ~/.local/share/beisl/labels.jsonl     what spikes really were (beisl label, the
+                                          session window, and beisl-mcp with
+                                          --allow-labels); never leaves the machine
     $XDG_CONFIG_HOME/beisl/config.toml    persisted preferences
     /usr/bin/beisl                        optional launcher shim (see beisl-setup(1):
                                           Steam's containerized client needs it for

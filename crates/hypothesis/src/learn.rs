@@ -28,7 +28,7 @@ const PRECISION_FLOOR: f32 = 0.7;
 /// And must have answered at least this many of them, or its record is luck.
 const MIN_GRADED: usize = 5;
 /// Trusted labels before the model is even graded; below this it overfits noise.
-const MIN_FOR_MODEL: usize = 15;
+pub const MIN_FOR_MODEL: usize = 15;
 const FOLDS: usize = 5;
 
 /// How a layer did on the user's trusted labels.

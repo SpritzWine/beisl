@@ -119,11 +119,15 @@ It exposes six read-only tools:
 - `list_traces` — every run, newest first: id, game, start time, duration, analyzed?
 - `get_setup_status` — the preflight checklist (the same checks as `beisl --check`)
 - `get_artifact` - a run's analyzed trace as JSON: frame stats and spikes (each
-  against the second before it), the per-layer CPU split (who ate the frame: kernel/driver/dxvk/wine/game), hottest
+  against the second before it, with a likely cause when one is sure enough), the
+  per-layer CPU split (who ate the frame: kernel/driver/dxvk/wine/game), hottest
   functions, diagnostics
 - `get_report` — the same analysis, human-readable prose
 - `get_log` — the tail of a run's `beisl`, `game`, or `perf` log
 - `get_crash_summary` — pre-chewed crash forensics for a run that "just died"
+- `label_spike` - only when the client's config starts `beisl-mcp --allow-labels`:
+  the assistant records what a spike really was. It counts for a third of your own
+  labels until you confirm it with `beisl label`
 
 Put together, "which layer ate the frame in last night's session?" becomes a question
 you can literally ask. Deleting and analyzing stay in the app, where a human

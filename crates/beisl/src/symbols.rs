@@ -48,10 +48,11 @@ pub fn run(run_dir: &str) -> ExitCode {
         Ok(a) => {
             // A retry succeeded on the same perf.data — drop any stale failure verdict.
             session::library::clear_invalid(dir);
-            out!("{}", a.render_report().trim_end());
+            let judge = hypothesis::Judge::load_default();
+            out!("{}", a.render_report_with(&judge).trim_end());
             // The report already printed above - that's this command's whole point - so
             // a persistence failure (e.g. a read-only run dir) must not fail the command.
-            if let Err(e) = a.persist(dir) {
+            if let Err(e) = a.persist(dir, &judge) {
                 eprintln!("beisl: couldn't save artifact.json/report.txt in {run_dir} ({e})");
             }
             ExitCode::SUCCESS

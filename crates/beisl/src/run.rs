@@ -812,7 +812,7 @@ fn write_report(
     };
     // Best-effort, same stance as the resolve above: a write failure (disk full, a
     // read-only run dir) must never turn a captured trace into a wrapper error.
-    let _ = art.persist(run_dir);
+    let _ = art.persist(run_dir, &hypothesis::Judge::load_default());
     // A retry succeeded on the same perf.data — drop any stale failure verdict.
     session::library::clear_invalid(run_dir);
     let headline = art.headline();

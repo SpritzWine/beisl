@@ -55,11 +55,30 @@ const MAX_LINE_LEN: usize = 300;
 
 pub struct Server {
     traces_root: PathBuf,
+    /// `label_spike` exists: the one tool that writes. Off unless the user started the
+    /// server with `--allow-labels`, so wiring beisl-mcp into a client never quietly
+    /// hands that client write access.
+    allow_labels: bool,
 }
 
 impl Server {
     pub fn new(traces_root: PathBuf) -> Self {
-        Self { traces_root }
+        Self {
+            traces_root,
+            allow_labels: false,
+        }
+    }
+
+    pub fn allowing_labels(mut self) -> Self {
+        self.allow_labels = true;
+        self
+    }
+
+    /// The labels beside the library they describe: for the default library, the
+    /// same `labels.jsonl` that `beisl label` and the session window write.
+    fn labels(&self) -> hypothesis::LabelStore {
+        let base = self.traces_root.parent().unwrap_or(&self.traces_root);
+        hypothesis::LabelStore::at(base.join("labels.jsonl"))
     }
 
     /// Pump the stdio transport until EOF (the client hanging up is the shutdown).
@@ -97,7 +116,7 @@ impl Server {
         let result = match method {
             "initialize" => Ok(self.initialize(&params)),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(tools_list()),
+            "tools/list" => Ok(tools_list(self.allow_labels)),
             "tools/call" => Ok(self.tools_call(&params)),
             other => Err(format!("method not found: {other}")),
         };
@@ -144,7 +163,13 @@ impl Server {
             "get_setup_status" => Ok(self.setup_status()),
             "get_crash_summary" => self.crash_summary(args),
             "list_events" => Ok(self.list_events(args)),
-            "get_artifact" => self.read_run_file(args, ARTIFACT_FILE, None),
+            "get_artifact" => self.artifact(args),
+            "label_spike" if self.allow_labels => self.label_spike(args),
+            "label_spike" => Err(
+                "label_spike is off: the user starts beisl-mcp with --allow-labels to let \
+                 an assistant record what a spike was"
+                    .to_string(),
+            ),
             "get_report" => self.read_run_file(args, REPORT_FILE, None),
             "get_log" => {
                 // A fixed name map — the run_id is the only user-shaped path input.
@@ -461,6 +486,91 @@ impl Server {
 }
 
 impl Server {
+    /// artifact.json with a verdict on each measured spike, judged now from the current
+    /// labels: they keep changing after analysis, so a stored verdict would go stale.
+    fn artifact(&self, args: &Value) -> Result<String, String> {
+        let text = self.read_run_file(args, ARTIFACT_FILE, None)?;
+        let Ok(mut art) = serde_json::from_str::<Value>(&text) else {
+            return Ok(text);
+        };
+        let judge = hypothesis::Judge::new(self.labels().load().labels);
+        let mut judged = false;
+        if let Some(spikes) = art.get_mut("spikes").and_then(Value::as_array_mut) {
+            for s in spikes {
+                let Some(f) = features_of(s) else { continue };
+                s["verdict"] = serde_json::to_value(judge.judge(&f)).unwrap_or(Value::Null);
+                judged = true;
+            }
+        }
+        if !judged {
+            return Ok(text);
+        }
+        Ok(serde_json::to_string_pretty(&art).unwrap_or(text))
+    }
+
+    fn label_spike(&self, args: &Value) -> Result<String, String> {
+        let id = self.run_id(args)?;
+        let n = args
+            .get("spike")
+            .and_then(Value::as_u64)
+            .filter(|&n| n >= 1)
+            .ok_or("spike is required: 1, 2, ... in the artifact's order")?
+            as usize;
+        let cause = args
+            .get("cause")
+            .and_then(Value::as_str)
+            .and_then(hypothesis::Cause::parse)
+            .ok_or("cause must be one of the causes in the tool's schema")?;
+        let note = args
+            .get("note")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let text = self.read_run_file(args, ARTIFACT_FILE, None)?;
+        let art: Value = serde_json::from_str(&text).map_err(|e| format!("{id}: {e}"))?;
+        let spike = art
+            .get("spikes")
+            .and_then(Value::as_array)
+            .and_then(|s| s.get(n - 1))
+            .ok_or_else(|| format!("{id} has no spike {n}"))?;
+        let features = features_of(spike).ok_or_else(|| {
+            format!("spike {n} of {id} was not measured, so there is nothing to learn from")
+        })?;
+        let label = hypothesis::Label {
+            run: id.clone(),
+            t_seconds: spike["t_seconds"].as_f64().unwrap_or_default(),
+            frametime_ms: spike["frametime_ms"].as_f64().unwrap_or_default() as f32,
+            features,
+            cause,
+            source: hypothesis::LabelSource::Agent,
+            confirmed: false,
+            note,
+            at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs()),
+        };
+        self.labels()
+            .append(&label)
+            .map_err(|e| format!("could not save the label: {e}"))?;
+        Ok(format!(
+            "Recorded: spike {n} of {id} was {} ({}), as an agent's label. It trains at a \
+             third of the user's weight and is not ground truth until the user confirms it: \
+             `beisl label {id} {n} {}`, or in the session window.",
+            cause.as_str(),
+            cause.describe(),
+            cause.as_str()
+        ))
+    }
+}
+
+/// A spike's feature map, when it has one.
+fn features_of(spike: &Value) -> Option<hypothesis::Features> {
+    serde_json::from_value::<hypothesis::Features>(spike.get("features")?.clone())
+        .ok()
+        .filter(|f| !f.is_empty())
+}
+
+impl Server {
     /// The run_id gate every path-touching tool goes through — mirrors
     /// `library::delete_run`'s stance: only `run-*` names, no path fragments.
     fn run_id(&self, args: &Value) -> Result<String, String> {
@@ -729,10 +839,10 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-fn tools_list() -> Value {
+fn tools_list(allow_labels: bool) -> Value {
     let run_id =
         json!({ "type": "string", "description": "A run id from list_traces (run-<unix_ts>)" });
-    json!({ "tools": [
+    let mut tools = json!({ "tools": [
         {
             "name": "list_traces",
             "description": "List all recorded game-performance runs, newest first: run_id, \
@@ -757,7 +867,10 @@ fn tools_list() -> Value {
             "name": "get_artifact",
             "description": "The analyzed trace as JSON: frame stats and spikes (each with its \
                             frame's CPU picture against the second before it, when recorded \
-                            with a shared clock), the per-layer CPU split (who ate the frame: kernel/driver/dxvk/wine/game), \
+                            with a shared clock, plus a live verdict: the likely cause if \
+                            one is sure enough, the candidates with their evidence, and \
+                            whether it wants a confirmation or a checklist), the per-layer \
+                            CPU split (who ate the frame: kernel/driver/dxvk/wine/game), \
                             hottest functions, timeline (a max-per-bucket peak envelope for \
                             charting, NOT a frametime distribution), diagnostics. Only \
                             analyzed runs have one.",
@@ -838,7 +951,39 @@ fn tools_list() -> Value {
                              },
                              "additionalProperties": false }
         }
-    ]})
+    ]});
+    if allow_labels {
+        let causes: Vec<&str> = hypothesis::Cause::ALL
+            .map(hypothesis::Cause::as_str)
+            .to_vec();
+        if let Some(list) = tools["tools"].as_array_mut() {
+            list.push(json!({
+                "name": "label_spike",
+                "description": "Record what one of a run's worst spikes really was, as YOUR \
+                                judgement: it trains the likely-cause hypotheses beisl shows \
+                                beside each spike. Label only when the evidence carries it \
+                                (get_artifact's verdict, candidates and features, the \
+                                report, the logs). It is stored as an agent's label: it \
+                                counts for a third of the user's own until the user \
+                                confirms it, and never grades the learned layers by \
+                                itself.",
+                "inputSchema": { "type": "object",
+                                 "properties": {
+                                     "run_id": run_id,
+                                     "spike": { "type": "integer", "minimum": 1,
+                                                "description": "1-based, in the order of the \
+                                                                artifact's spikes (worst first)" },
+                                     "cause": { "type": "string", "enum": causes },
+                                     "note": { "type": "string",
+                                               "description": "What makes you sure, for the \
+                                                               user who confirms it" }
+                                 },
+                                 "required": ["run_id", "spike", "cause"],
+                                 "additionalProperties": false }
+            }));
+        }
+    }
+    tools
 }
 
 fn error_response(id: Value, code: i64, message: &str) -> String {
@@ -985,6 +1130,89 @@ mod tests {
                 "list_events"
             ]
         );
+    }
+
+    #[test]
+    fn labels_are_written_only_when_allowed_and_verdicts_ride_along() {
+        let base = fixture_root("labels");
+        let root = base.join("traces");
+        let dir = root.join("run-300");
+        std::fs::create_dir_all(&dir).unwrap();
+        // One measured spike (starved, isolated: the rules say blocked), one not.
+        std::fs::write(
+            dir.join(ARTIFACT_FILE),
+            json!({"schema_version": 1, "spikes": [
+                {"t_seconds": 3.5, "frametime_ms": 300.0,
+                 "features": {"game_rate_ratio": 0.0, "burst_1s": 0.0}},
+                {"t_seconds": 9.0, "frametime_ms": 80.0}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let names = |s: &Server| -> Vec<String> {
+            let r = call(s, json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}));
+            r["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let label = |s: &Server, cause: &str| {
+            call(
+                s,
+                json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+                       "params":{"name":"label_spike","arguments":
+                           {"run_id":"run-300","spike":1,"cause":cause,"note":"stalls on load"}}}),
+            )
+        };
+
+        let read_only = Server::new(root.clone());
+        assert!(!names(&read_only).contains(&"label_spike".to_string()));
+        assert_eq!(label(&read_only, "blocked")["result"]["isError"], true);
+        assert!(
+            !base.join("labels.jsonl").exists(),
+            "nothing written without the flag"
+        );
+
+        let resp = call(
+            &read_only,
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+                   "params":{"name":"get_artifact","arguments":{"run_id":"run-300"}}}),
+        );
+        let art: Value =
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            art["spikes"][0]["verdict"]["hypothesis"]["cause"],
+            "blocked"
+        );
+        assert_eq!(art["spikes"][0]["verdict"]["review"], "checklist");
+        assert!(
+            art["spikes"][1].get("verdict").is_none(),
+            "unmeasured: no verdict"
+        );
+
+        let writer = Server::new(root).allowing_labels();
+        assert!(names(&writer).contains(&"label_spike".to_string()));
+        let resp = label(&writer, "throttle");
+        assert_eq!(resp["result"]["isError"], false, "{resp}");
+        assert!(resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("agent's label"));
+        assert_eq!(label(&writer, "not-a-cause")["result"]["isError"], true);
+        let stored = hypothesis::LabelStore::at(base.join("labels.jsonl")).load();
+        let l = &stored.labels[0];
+        assert_eq!(
+            (l.cause, l.source),
+            (hypothesis::Cause::Throttle, hypothesis::LabelSource::Agent)
+        );
+        assert!(!l.confirmed && !l.trusted());
+        assert_eq!(
+            (l.run.as_str(), l.t_seconds, l.note.as_str()),
+            ("run-300", 3.5, "stalls on load")
+        );
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

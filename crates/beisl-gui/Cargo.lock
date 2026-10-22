@@ -213,6 +213,7 @@ name = "artifact"
 version = "0.4.0"
 dependencies = [
  "compat",
+ "hypothesis",
  "serde",
  "serde_json",
  "session",
@@ -503,6 +504,7 @@ dependencies = [
  "ed25519-dalek",
  "enumflags2",
  "gamebus-coupler",
+ "hypothesis",
  "libcosmic",
  "plotters",
  "plotters-backend",
@@ -2048,6 +2050,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27f864f10dfb56725ce5ce5472bc52252c8f93a4ab86327122cebf62c5f59a17"
 dependencies = [
  "typenum",
+]
+
+[[package]]
+name = "hypothesis"
+version = "0.4.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "session",
 ]
 
 [[package]]

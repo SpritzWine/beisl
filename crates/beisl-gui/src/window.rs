@@ -1314,7 +1314,7 @@ fn spawn_analyze(
             &record_mode,
             debuginfod_urls.as_deref(),
         )
-        .and_then(|a| a.persist(&dir));
+        .and_then(|a| a.persist(&dir, &hypothesis::Judge::load_default()));
         let mut a = s2.lock().unwrap();
         if let Err(e) = result {
             a.error = Some(e.to_string());
