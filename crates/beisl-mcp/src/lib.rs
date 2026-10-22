@@ -755,8 +755,9 @@ fn tools_list() -> Value {
         },
         {
             "name": "get_artifact",
-            "description": "The analyzed trace as JSON: frame stats and spikes, the per-layer \
-                            CPU split (who ate the frame: kernel/driver/dxvk/wine/game), \
+            "description": "The analyzed trace as JSON: frame stats and spikes (each with its \
+                            frame's CPU picture against the second before it, when recorded \
+                            with a shared clock), the per-layer CPU split (who ate the frame: kernel/driver/dxvk/wine/game), \
                             hottest functions, timeline (a max-per-bucket peak envelope for \
                             charting, NOT a frametime distribution), diagnostics. Only \
                             analyzed runs have one.",

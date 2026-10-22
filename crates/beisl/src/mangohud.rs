@@ -130,6 +130,54 @@ fn sample_pci_dev_from(pin: Option<&GpuPin>, gpus: &[PhysicalGpu]) -> Option<Str
     }
 }
 
+/// Where the run's frametime CSV ends on CLOCK_MONOTONIC, for the artifact to line spike
+/// frames up with perf.data (see [`session::FrametimeClock`]). Call once the game has
+/// exited: MangoHud flushes per frame, so the mtime is when the last row was written,
+/// and the realtime/monotonic offset read now converts it. The newest CSV is the one
+/// that was logging at the end.
+pub fn frametime_clock(run_dir: &Path) -> Option<session::FrametimeClock> {
+    let (csv, mtime) = std::fs::read_dir(run_dir)
+        .ok()?
+        .flatten()
+        .filter(|e| {
+            Path::new(&e.file_name())
+                .extension()
+                .is_some_and(|x| x.eq_ignore_ascii_case("csv"))
+        })
+        .filter_map(|e| Some((e.file_name(), e.metadata().ok()?.modified().ok()?)))
+        .max_by_key(|(_, m)| *m)?;
+    let mtime = mtime
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs_f64();
+    Some(session::FrametimeClock {
+        csv: csv.to_string_lossy().into_owned(),
+        end_monotonic_s: mtime - realtime_minus_monotonic(),
+    })
+}
+
+/// CLOCK_REALTIME minus CLOCK_MONOTONIC, from the tightest of a few bracketed reads so a
+/// preemption between the two calls can't skew it.
+fn realtime_minus_monotonic() -> f64 {
+    fn now(clock: libc::clockid_t) -> f64 {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        unsafe { libc::clock_gettime(clock, &mut ts) };
+        ts.tv_sec as f64 + ts.tv_nsec as f64 / 1e9
+    }
+    (0..5)
+        .map(|_| {
+            let a = now(libc::CLOCK_MONOTONIC);
+            let r = now(libc::CLOCK_REALTIME);
+            let b = now(libc::CLOCK_MONOTONIC);
+            (b - a, r - (a + b) / 2.0)
+        })
+        .min_by(|x, y| x.0.total_cmp(&y.0))
+        .map_or(0.0, |(_, off)| off)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,6 +197,39 @@ mod tests {
     const IGPU_SLOT: &str = "0000:16:00.0";
     // The Arc as a MESA_VK_DEVICE_SELECT selector: bare ids (no 0x), force-suffix `!`.
     const ARC_SELECT: &str = "8086:56a0!";
+
+    #[test]
+    fn frametime_clock_anchors_the_newest_csv_on_the_monotonic_clock() {
+        let dir = std::env::temp_dir().join(format!("beisl-ftclock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("perf.data"), b"").unwrap();
+        let old = dir.join("Game_2026-10-22_09-00-00.csv");
+        std::fs::write(&old, b"x").unwrap();
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(hour_ago)
+            .unwrap();
+        std::fs::write(dir.join("Game_2026-10-22_10-00-00.csv"), b"x").unwrap();
+
+        let clock = frametime_clock(&dir).unwrap();
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+        let mono_now = ts.tv_sec as f64 + ts.tv_nsec as f64 / 1e9;
+        assert_eq!(clock.csv, "Game_2026-10-22_10-00-00.csv");
+        // Just written, so its end is "now" on the monotonic clock, give or take the
+        // filesystem's timestamp granularity.
+        assert!(
+            (clock.end_monotonic_s - mono_now).abs() < 0.5,
+            "{clock:?} vs {mono_now}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     fn mangohud_config(cmd: &Command) -> String {
         cmd.get_envs()

@@ -65,17 +65,20 @@ pub fn set_perf_pid(pid: u32) {
 /// The caller appends the game's argv (with a `--` separator) — this only builds the
 /// perf-side flags.
 pub fn degraded_args(perf_data: &Path) -> Vec<String> {
-    vec![
-        "record".to_string(),
-        "-q".to_string(),
-        "-e".to_string(),
-        "cycles:u".to_string(),
-        "-F".to_string(),
-        "499".to_string(),
-        "-o".to_string(),
-        perf_data.display().to_string(),
-    ]
+    let mut args: Vec<String> = ["record", "-q", "-e", "cycles:u", "-F", "499"]
+        .iter()
+        .chain(&CLOCK_ARGS)
+        .map(|a| a.to_string())
+        .collect();
+    args.push("-o".to_string());
+    args.push(perf_data.display().to_string());
+    args
 }
+
+/// Sample times on CLOCK_MONOTONIC instead of perf's own clock, which nothing else
+/// shares: the wrapper anchors the frametime CSV on the same clock, so a spike frame can
+/// be found in perf.data (measured to about a millisecond, see artifact's spike windows).
+const CLOCK_ARGS: [&str; 2] = ["-k", "CLOCK_MONOTONIC"];
 
 pub struct Recorder {
     perf_data: PathBuf,
@@ -101,7 +104,9 @@ impl Recorder {
             .unwrap_or_else(|_| Stdio::null());
         // Flat, system-wide, ~499 Hz — a good resolution/size trade-off for a whole session.
         let mut cmd = Command::new("perf");
-        cmd.args(["record", "-F", "499", "-a", "-o"])
+        cmd.args(["record", "-F", "499", "-a"])
+            .args(CLOCK_ARGS)
+            .arg("-o")
             .arg(&self.perf_data)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -141,6 +146,7 @@ mod tests {
         assert!(args.contains(&"-q".to_string()));
         assert!(args.windows(2).any(|w| w == ["-e", "cycles:u"]));
         assert!(args.windows(2).any(|w| w == ["-F", "499"]));
+        assert!(args.windows(2).any(|w| w == CLOCK_ARGS));
         assert!(args
             .windows(2)
             .any(|w| w[0] == "-o" && w[1] == path.display().to_string()));

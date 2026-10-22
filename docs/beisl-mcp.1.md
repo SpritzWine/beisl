@@ -35,8 +35,9 @@ deleting traces stay in the app, where a human confirms them.
     list_traces         every run, newest first: id, game, start, duration,
                         analyzed?
     get_setup_status    the preflight checklist (same checks as `beisl --check`)
-    get_artifact        a run's analyzed trace as JSON: frame stats and spikes,
-                        the per-layer CPU split, hottest functions, diagnostics
+    get_artifact        a run's analyzed trace as JSON: frame stats and spikes
+                        (each against the second before it), the per-layer CPU
+                        split, hottest functions, diagnostics
     get_report          the same analysis as human-readable prose
     get_log             the tail of a run's beisl, game, perf, or proton log
     get_crash_summary   pre-chewed crash forensics for a run that "just died"

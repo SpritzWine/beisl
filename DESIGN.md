@@ -113,9 +113,22 @@ measurement gap. They are not shown as a peer bucket and never redistributed:
 shares are normalized over the attributed samples, and the gap is stated
 separately as `attributed_pct`.
 
-**What it does not do yet:** spikes and hot symbols are shown side by side, not
-correlated. "Which symbols were hot during this hitch" needs time-bucketed
-samples and MangoHud-to-perf clock alignment.
+**Each spike against the second before it.** perf records on
+`CLOCK_MONOTONIC`, and when the game exits the wrapper anchors the frametime
+CSV's last row on the same clock (its mtime, converted with a realtime/monotonic
+pair read at that moment). MangoHud's `elapsed` column places every earlier row.
+Each worst spike then carries its own layer split and the game process's sample
+count, next to the second before it. A frame where the game's samples collapse
+was spent waiting (GPU, IO, a lock, or a CPU taken by something else); one where
+they hold but the split moves was spent differently. Measured on vkcube frozen at
+logged instants (2026-10-22): the frame and the perf gap both land within about
+a millisecond of the freeze. Counts, not rates, are stored, and the report
+compares only what the counts support: no split under 20 samples in the frame,
+no rate unless 20 were seen or expected. Runs recorded before this carry no
+anchor and get no windows; re-analysis does not invent one.
+
+**What it does not do yet:** hot *symbols* per spike, and anything finer than the
+frame (no call graphs).
 
 ## Symbols
 
@@ -432,7 +445,15 @@ data that work needs - and a trace nobody can read is a trace nobody fixes.
   *Symbols*.
 - **Tighter perf scoping**: the game's process tree in its own cgroup instead of
   system-wide sampling plus filtering. Call graphs are not recorded either.
-- **Spike correlation**: which symbols were hot during a given hitch.
+- **Spike correlation, the rest of it**: which symbols were hot during a given
+  hitch (the layer split per spike is done), and a named, likely cause per spike
+  on top of it. Design in the vault: "Stutter-Cause Hypothesis - Fault Harness
+  and Feature Vector".
+- **In degraded mode a stop signal to the game ends the recording**: perf, as the
+  game's parent, takes the SIGCHLD that a SIGSTOP raises as its workload exiting
+  and stops sampling, then waits for the real exit. Ctrl+Z on a terminal launch
+  or a debugger stopping the process would do it. Found 2026-10-22, not
+  addressed.
 - **A/B compare**: two traces side by side, tiers and outcomes labeled.
 - **In degraded mode perf alters the game's environment**: it prepends its own
   directory to `PATH`, sets `PREFIX` and `PERF_BUILDID_DIR`, and blanks

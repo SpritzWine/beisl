@@ -901,10 +901,11 @@ impl SessionApp {
             if !a.spikes.is_empty() {
                 frametimes = frametimes.push(widget::text::caption("Worst hitches:"));
                 for s in &a.spikes {
-                    frametimes = frametimes.push(widget::text::caption(format!(
-                        "   {:.0} ms at {:.1}s",
-                        s.frametime_ms, s.t_seconds
-                    )));
+                    let mut line = format!("   {:.0} ms at {:.1}s", s.frametime_ms, s.t_seconds);
+                    if let Some(w) = s.window_summary() {
+                        line = format!("{line}: {w}");
+                    }
+                    frametimes = frametimes.push(widget::text::caption(line));
                 }
             }
         } else {

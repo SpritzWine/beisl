@@ -118,8 +118,8 @@ It exposes six read-only tools:
 
 - `list_traces` — every run, newest first: id, game, start time, duration, analyzed?
 - `get_setup_status` — the preflight checklist (the same checks as `beisl --check`)
-- `get_artifact` — a run's analyzed trace as JSON: frame stats and spikes, the
-  per-layer CPU split (who ate the frame: kernel/driver/dxvk/wine/game), hottest
+- `get_artifact` - a run's analyzed trace as JSON: frame stats and spikes (each
+  against the second before it), the per-layer CPU split (who ate the frame: kernel/driver/dxvk/wine/game), hottest
   functions, diagnostics
 - `get_report` — the same analysis, human-readable prose
 - `get_log` — the tail of a run's `beisl`, `game`, or `perf` log

@@ -95,6 +95,23 @@ pub struct Session {
     /// existed.
     #[serde(default)]
     pub wrapper: Option<WrapperProc>,
+    /// Where the frametime CSV ends on the clock perf records with: what lets an artifact
+    /// place a spike frame inside perf.data. Captured by the wrapper when the game exits,
+    /// because the CSV's mtime alone means nothing after a reboot or a copy. `None` on
+    /// legacy runs and runs without a CSV.
+    #[serde(default)]
+    pub frametime_clock: Option<FrametimeClock>,
+}
+
+/// The frametime CSV's end on CLOCK_MONOTONIC, which beisl records perf with
+/// (`-k CLOCK_MONOTONIC`). Rows before it follow from MangoHud's own `elapsed` column.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct FrametimeClock {
+    /// The CSV's file name: MangoHud starts a new file each time logging starts, and
+    /// this end belongs to one of them.
+    pub csv: String,
+    /// CLOCK_MONOTONIC seconds when the CSV's last row was written.
+    pub end_monotonic_s: f64,
 }
 
 /// The wrapper process's identity, recorded once at launch so a later reader -

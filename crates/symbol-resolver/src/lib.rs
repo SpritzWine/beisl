@@ -252,6 +252,30 @@ pub struct Resolution {
     /// vendor-colored UI (Intel blue, AMD red, Nvidia green, …). `None` if no driver sample
     /// identified a vendor.
     pub gpu_vendor: Option<String>,
+    /// One tally per requested [`Window`], in request order.
+    pub windows: Vec<WindowTally>,
+    /// Times of the first and last sample on perf's clock; `None` when perf.data
+    /// carried no timestamps.
+    pub sample_span: Option<(f64, f64)>,
+}
+
+/// A time range on perf's sample clock, in seconds, whose samples are also tallied on
+/// their own. Only meaningful when the clock is one the caller knows (beisl records
+/// with `-k CLOCK_MONOTONIC`); the resolver does not interpret it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Window {
+    pub start: f64,
+    pub end: f64,
+}
+
+/// The samples one [`Window`] holds: its own layer split, and how many of them belong to
+/// the dominant pid (the game, by the same rule [`decide_wine_flavor`] uses).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WindowTally {
+    pub samples: u64,
+    pub dominant_pid_samples: u64,
+    /// Biggest first, ties in layer order, like [`Resolution::layers`].
+    pub layers: Vec<LayerTally>,
 }
 
 /// Best-effort GPU vendor from a driver DSO basename — the Mesa ICDs/DRI and the vendor
@@ -284,7 +308,7 @@ pub fn gpu_vendor(dso: &str) -> Option<&'static str> {
 /// unchanged). New callers that want reliable driver-symbol fetch should call that
 /// function directly.
 pub fn resolve_perf_data(perf_data: &Path) -> io::Result<Resolution> {
-    resolve_perf_data_with_debuginfod(perf_data, None)
+    resolve_perf_data_with_debuginfod(perf_data, None, &[])
 }
 
 /// Resolve every sample in `perf_data` to a wine symbol, via `perf script`, optionally
@@ -302,16 +326,20 @@ pub fn resolve_perf_data(perf_data: &Path) -> io::Result<Resolution> {
 /// `debuginfod_urls` is the same space-separated URL list `DEBUGINFOD_URLS` takes.
 /// `None` leaves the var unset, so the child inherits the ambient environment exactly as
 /// [`resolve_perf_data`] always has.
+///
+/// `windows` are tallied in the same pass, so a spike's split costs no second
+/// `perf script` run.
 pub fn resolve_perf_data_with_debuginfod(
     perf_data: &Path,
     debuginfod_urls: Option<&str>,
+    windows: &[Window],
 ) -> io::Result<Resolution> {
     let mut cmd = Command::new("perf");
     cmd.args([
         "script",
         "--show-mmap-events",
         "-F",
-        "comm,pid,ip,sym,dso",
+        "comm,pid,time,ip,sym,dso",
         "-i",
     ])
     .arg(perf_data)
@@ -341,6 +369,11 @@ pub fn resolve_perf_data_with_debuginfod(
     // guards against).
     let mut pid_samples: HashMap<i32, u64> = HashMap::new();
     let mut pid_pe_paths: HashMap<i32, Vec<String>> = HashMap::new();
+    // Per window: layer -> (samples, named), and samples per pid (the dominant pid is
+    // only known once every sample is in).
+    let mut win_layers: Vec<HashMap<Layer, (u64, u64)>> = vec![HashMap::new(); windows.len()];
+    let mut win_pids: Vec<HashMap<i32, u64>> = vec![HashMap::new(); windows.len()];
+    let mut span: Option<(f64, f64)> = None;
 
     use io::BufRead as _;
     for line in reader.lines() {
@@ -405,6 +438,17 @@ pub fn resolve_perf_data_with_debuginfod(
 
         let tally = layers.entry(layer).or_insert((0, 0));
         tally.0 += 1;
+        if let Some(t) = sample.time {
+            span = Some(span.map_or((t, t), |(lo, hi)| (lo.min(t), hi.max(t))));
+            for (i, w) in windows.iter().enumerate() {
+                if t >= w.start && t < w.end {
+                    let wt = win_layers[i].entry(layer).or_insert((0, 0));
+                    wt.0 += 1;
+                    wt.1 += named.is_some() as u64;
+                    *win_pids[i].entry(sample.pid).or_insert(0) += 1;
+                }
+            }
+        }
         match named {
             Some(sym) => {
                 tally.1 += 1;
@@ -445,20 +489,7 @@ pub fn resolve_perf_data_with_debuginfod(
     anonymous_modules.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
     anonymous_modules.truncate(8);
 
-    // Descending by share; ties broken by the layer's stable order so the bar is deterministic.
-    let mut layers: Vec<LayerTally> = layers
-        .into_iter()
-        .map(|(layer, (samples, named))| LayerTally {
-            layer,
-            samples,
-            named,
-        })
-        .collect();
-    layers.sort_by(|a, b| {
-        b.samples
-            .cmp(&a.samples)
-            .then((a.layer as u8).cmp(&(b.layer as u8)))
-    });
+    let layers = sorted_tallies(layers);
 
     let gpu_vendor = gpu_vendors
         .into_iter()
@@ -466,6 +497,16 @@ pub fn resolve_perf_data_with_debuginfod(
         .map(|(v, _)| v.to_string());
 
     let (flavor, game_maps_pe) = decide_wine_flavor(&pid_samples, &pid_pe_paths);
+    let dominant = dominant_pid(&pid_samples);
+    let windows = win_layers
+        .into_iter()
+        .zip(win_pids)
+        .map(|(layers, pids)| WindowTally {
+            samples: pids.values().sum(),
+            dominant_pid_samples: dominant.and_then(|p| pids.get(&p).copied()).unwrap_or(0),
+            layers: sorted_tallies(layers),
+        })
+        .collect();
 
     Ok(Resolution {
         diagnostics: Diagnostics {
@@ -483,7 +524,27 @@ pub fn resolve_perf_data_with_debuginfod(
         game_maps_pe,
         gpu_vendor,
         symbols,
+        windows,
+        sample_span: span,
     })
+}
+
+/// Descending by share; ties broken by the layer's stable order so the bar is deterministic.
+fn sorted_tallies(by_layer: HashMap<Layer, (u64, u64)>) -> Vec<LayerTally> {
+    let mut v: Vec<LayerTally> = by_layer
+        .into_iter()
+        .map(|(layer, (samples, named))| LayerTally {
+            layer,
+            samples,
+            named,
+        })
+        .collect();
+    v.sort_by(|a, b| {
+        b.samples
+            .cmp(&a.samples)
+            .then((a.layer as u8).cmp(&(b.layer as u8)))
+    });
+    v
 }
 
 /// Decide the wine flavor — or honest nativeness — from per-pid sample counts and the PE
@@ -508,13 +569,7 @@ fn decide_wine_flavor(
     pid_samples: &HashMap<i32, u64>,
     pid_pe_paths: &HashMap<i32, Vec<String>>,
 ) -> (Option<String>, bool) {
-    // `max_by_key` over a HashMap would otherwise pick nondeterministically among tied
-    // sample counts (iteration order isn't stable), so the same perf.data could flip
-    // verdicts between runs; break ties by lowest pid — arbitrary, but fixed and repeatable.
-    let Some((&dominant, _)) = pid_samples
-        .iter()
-        .max_by_key(|&(&pid, &n)| (n, std::cmp::Reverse(pid)))
-    else {
+    let Some(dominant) = dominant_pid(pid_samples) else {
         return (None, false);
     };
     let paths = pid_pe_paths
@@ -522,6 +577,17 @@ fn decide_wine_flavor(
         .map(Vec::as_slice)
         .unwrap_or(&[]);
     (paths.iter().find_map(|p| wine_flavor(p)), !paths.is_empty())
+}
+
+/// The pid with the most samples: the game, in a gaming trace. `max_by_key` over a
+/// HashMap would otherwise pick nondeterministically among tied sample counts (iteration
+/// order isn't stable), so the same perf.data could flip verdicts between runs; break ties
+/// by lowest pid: arbitrary, but fixed and repeatable.
+fn dominant_pid(pid_samples: &HashMap<i32, u64>) -> Option<i32> {
+    pid_samples
+        .iter()
+        .max_by_key(|&(&pid, &n)| (n, std::cmp::Reverse(pid)))
+        .map(|(&pid, _)| pid)
 }
 
 /// Best-effort wine build name from a PE module path. A wine tree is `<build>/lib/wine/
@@ -563,14 +629,16 @@ pub fn detect_tier(pe_paths: &[String]) -> FidelityTier {
 
 struct Sample {
     pid: i32,
+    /// perf's sample time in seconds; `None` for a line printed without `time`.
+    time: Option<f64>,
     ip: u64,
     sym: String,
     dso: String,
 }
 
-/// Parse a `perf script` sample line: `<comm…> <pid> <ip> <sym> (<dso>)`. The comm can
-/// carry spaces, so we anchor on the trailing `(<dso>)` and take the last three tokens
-/// before it as `sym`, `ip`, then `pid` (all single tokens, in that reverse order).
+/// Parse a `perf script` sample line: `<comm...> <pid> [<time>:] <ip> <sym> (<dso>)`. The
+/// comm can carry spaces, so we anchor on the trailing `(<dso>)` and take the tokens
+/// before it in reverse: `sym`, `ip`, the optional `time:`, then `pid`.
 fn parse_sample(line: &str) -> Option<Sample> {
     let open = line.rfind('(')?;
     let close = line[open..].find(')')? + open;
@@ -581,8 +649,23 @@ fn parse_sample(line: &str) -> Option<Sample> {
     let mut toks = line[..open].split_whitespace().rev();
     let sym = toks.next()?.to_string();
     let ip = u64::from_str_radix(toks.next()?.trim_start_matches("0x"), 16).ok()?;
-    let pid = toks.next()?.parse().ok()?;
-    Some(Sample { pid, ip, sym, dso })
+    let mut tok = toks.next()?;
+    let time = match tok.strip_suffix(':') {
+        Some(t) => {
+            let t = t.parse().ok()?;
+            tok = toks.next()?;
+            Some(t)
+        }
+        None => None,
+    };
+    let pid = tok.parse().ok()?;
+    Some(Sample {
+        pid,
+        time,
+        ip,
+        sym,
+        dso,
+    })
 }
 
 /// Parse a `PERF_RECORD_MMAP2` line into a [`Mapping`]:
@@ -679,6 +762,23 @@ mod tests {
         assert_eq!(s.pid, 123);
         assert_eq!(s.sym, "__memcpy_avx+0x2a");
         assert_eq!(basename(&s.dso), "libc.so.6");
+    }
+
+    #[test]
+    fn parses_a_timed_sample_line() {
+        // Real `-F comm,pid,time,ip,sym,dso` output (vkcube, 2026-10-22).
+        let s = parse_sample(
+            "          vkcube   93767  2389.770379:      7f6eaa51547a util_set_thread_affinity \
+             (/usr/lib64/libvulkan_intel.so)",
+        )
+        .unwrap();
+        assert_eq!(s.pid, 93767);
+        assert_eq!(s.time, Some(2389.770379));
+        assert_eq!(s.ip, 0x7f6eaa51547a);
+        assert_eq!(s.sym, "util_set_thread_affinity");
+        // Without the field nothing else moves.
+        let untimed = parse_sample("game 123 7f0011 foo (/usr/lib/libc.so.6)").unwrap();
+        assert_eq!((untimed.pid, untimed.time), (123, None));
     }
 
     #[test]

@@ -17,7 +17,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use symbol_resolver::{FidelityTier, Layer, Resolution};
+use symbol_resolver::{FidelityTier, Layer, Resolution, Window, WindowTally};
 
 /// Bump when the on-disk shape changes incompatibly; consumers check it before trusting.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -29,7 +29,89 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub struct Spike {
     pub t_seconds: f64,
     pub frametime_ms: f32,
+    /// What the CPU did during this frame; see [`SpikeWindow`]. `None` on runs recorded
+    /// before perf and the CSV shared a clock, and wherever perf wasn't recording.
+    #[serde(default)]
+    pub window: Option<SpikeWindow>,
+    /// Where the frame ended, in seconds before the CSV's last row (MangoHud's `elapsed`
+    /// column). Only the build uses it, to find the frame in perf.data.
+    #[serde(skip)]
+    before_csv_end_s: Option<f64>,
 }
+
+/// One spike frame's CPU picture next to the second before it: the per-spike half of
+/// "who ate the frame". The whole-run [`TraceArtifact::layers`] can't say what changed
+/// when a frame went long; this can.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SpikeWindow {
+    /// Samples inside the frame and in the second before it, every recorded process.
+    pub samples: u64,
+    pub baseline_samples: u64,
+    /// The game process's share of those. Its rate falling in the frame means its
+    /// threads weren't running: waiting on the GPU, IO, a lock, or for a CPU. Counts, not
+    /// rates, because a handful of samples says nothing and a reader has to see that.
+    pub game_samples: u64,
+    pub baseline_game_samples: u64,
+    /// Layer shares inside the frame next to the second before, over attributed samples
+    /// like [`TraceArtifact::layers`], biggest in the frame first. Empty when the frame
+    /// holds fewer than [`MIN_SPLIT_SAMPLES`]: a split of a handful of samples is noise.
+    pub layers: Vec<WindowShare>,
+}
+
+impl Spike {
+    /// The frame against the second before it, in one line ("game ran 2/s (was 250/s),
+    /// driver 61% (was 22%)"), saying only what the sample counts support. `None` when
+    /// the spike has no window.
+    pub fn window_summary(&self) -> Option<String> {
+        let w = self.window.as_ref()?;
+        let mut parts: Vec<String> = Vec::new();
+        if let Some((now, was)) = w.game_rates(self.frametime_ms as f64 / 1000.0) {
+            parts.push(format!("game ran {now:.0}/s (was {was:.0}/s)"));
+        }
+        for l in w.layers.iter().take(3) {
+            parts.push(format!(
+                "{} {:.0}% (was {:.0}%)",
+                l.layer, l.pct, l.baseline_pct
+            ));
+        }
+        if parts.is_empty() {
+            parts.push("too few samples to compare".to_string());
+        } else if w.layers.is_empty() {
+            parts.push("too few samples to split".to_string());
+        }
+        Some(parts.join(", "))
+    }
+}
+
+impl SpikeWindow {
+    /// The game's samples per second in a frame of `frame_s` and in the second before,
+    /// or `None` when neither count reaches [`MIN_SPLIT_SAMPLES`]: 0 seen where 2 were
+    /// expected is chance, 0 where 20 were is not.
+    pub fn game_rates(&self, frame_s: f64) -> Option<(f64, f64)> {
+        let was = self.baseline_game_samples as f64 / BASELINE_S;
+        let expected = was * frame_s;
+        if expected.max(self.game_samples as f64) < MIN_SPLIT_SAMPLES as f64 || frame_s <= 0.0 {
+            return None;
+        }
+        Some((self.game_samples as f64 / frame_s, was))
+    }
+}
+
+/// One layer's share inside a spike frame and in the second before it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WindowShare {
+    pub layer: String,
+    pub pct: f32,
+    pub baseline_pct: f32,
+}
+
+/// Fewer attributed samples than this in a spike frame and its layer split is not shown;
+/// fewer game samples than this both seen and expected, and its rate is not compared.
+/// One busy thread at 499 Hz puts about 25 in a 50 ms frame.
+pub const MIN_SPLIT_SAMPLES: u64 = 20;
+
+/// How far before a spike frame its baseline reaches.
+const BASELINE_S: f64 = 1.0;
 
 /// Session-wide frametime health, from the CSV.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -313,14 +395,29 @@ impl TraceArtifact {
         record_mode: &str,
         debuginfod_urls: Option<&str>,
     ) -> io::Result<Self> {
-        let res = symbol_resolver::resolve_perf_data_with_debuginfod(
-            &run_dir.join("perf.data"),
-            debuginfod_urls,
-        )?;
-        let (frame_stats, spikes, timeline) = find_csv(run_dir)
+        // The wrapper anchored one CSV on perf's clock; prefer that file, and place
+        // spikes only when it is the one parsed.
+        let clock = session::Session::read(run_dir)
+            .and_then(|s| s.frametime_clock)
+            .filter(|c| run_dir.join(&c.csv).is_file());
+        let csv = match &clock {
+            Some(c) => Some(run_dir.join(&c.csv)),
+            None => find_csv(run_dir),
+        };
+        let (frame_stats, mut spikes, timeline) = csv
             .and_then(|csv| frames_from_csv(&csv))
             .map(|(stats, spikes, timeline)| (Some(stats), spikes, timeline))
             .unwrap_or((None, Vec::new(), Vec::new()));
+        let placed = clock.map_or_else(Vec::new, |c| spike_windows(c.end_monotonic_s, &spikes));
+        let requests: Vec<Window> = placed.iter().flat_map(|&(_, f, b)| [f, b]).collect();
+        let res = symbol_resolver::resolve_perf_data_with_debuginfod(
+            &run_dir.join("perf.data"),
+            debuginfod_urls,
+            &requests,
+        )?;
+        for (n, &(i, frame, base)) in placed.iter().enumerate() {
+            spikes[i].window = spike_window(&res, frame, base, n);
+        }
         let mut art = Self::from_parts(
             game,
             duration_s,
@@ -581,7 +678,18 @@ impl TraceArtifact {
             if !self.spikes.is_empty() {
                 let _ = writeln!(o, "  worst spikes:");
                 for s in &self.spikes {
-                    let _ = writeln!(o, "    {:6.1} ms at {:.1}s", s.frametime_ms, s.t_seconds);
+                    let _ = write!(o, "    {:6.1} ms at {:.1}s", s.frametime_ms, s.t_seconds);
+                    if let Some(w) = s.window_summary() {
+                        let _ = write!(o, "   {w}");
+                    }
+                    let _ = writeln!(o);
+                }
+                if self.spikes.iter().any(|s| s.window.is_some()) {
+                    let _ = writeln!(
+                        o,
+                        "  (each spike against the second before it: \"game ran\" counts \
+                         the game process's CPU samples, so a drop means it was waiting)"
+                    );
                 }
             }
         } else {
@@ -675,6 +783,89 @@ fn write_staged(files: &[(&Path, &[u8])]) -> io::Result<()> {
         }
     }
     result
+}
+
+/// Each spike's frame and baseline on perf's clock, given the CSV's end on it. Spikes
+/// from a CSV without an `elapsed` column can't be placed and are left out.
+fn spike_windows(csv_end: f64, spikes: &[Spike]) -> Vec<(usize, Window, Window)> {
+    spikes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| {
+            let end = csv_end - s.before_csv_end_s?;
+            let start = end - s.frametime_ms as f64 / 1000.0;
+            let base = Window {
+                start: start - BASELINE_S,
+                end: start,
+            };
+            Some((i, Window { start, end }, base))
+        })
+        .collect()
+}
+
+/// The [`SpikeWindow`] for the `n`th placed spike, whose two tallies are `res.windows`
+/// `2n` and `2n + 1`. `None` unless perf was recording across both, so a recorder stopped
+/// early (or started late) can't pass off its silence as the game's.
+fn spike_window(res: &Resolution, frame: Window, base: Window, n: usize) -> Option<SpikeWindow> {
+    let (first, last) = res.sample_span?;
+    if base.start < first || frame.end > last {
+        return None;
+    }
+    let (f, b) = (res.windows.get(2 * n)?, res.windows.get(2 * n + 1)?);
+    let layers = if attributed(f) < MIN_SPLIT_SAMPLES {
+        Vec::new()
+    } else {
+        // Every layer either window saw, so one that vanished in the frame still shows.
+        let mut v: Vec<(Layer, WindowShare)> = Vec::new();
+        for l in f.layers.iter().chain(&b.layers) {
+            if l.layer == Layer::Other || v.iter().any(|(seen, _)| *seen == l.layer) {
+                continue;
+            }
+            let w = WindowShare {
+                layer: l.layer.as_str().to_string(),
+                pct: share(f, l.layer),
+                baseline_pct: share(b, l.layer),
+            };
+            v.push((l.layer, w));
+        }
+        v.sort_by(|x, y| {
+            y.1.pct
+                .total_cmp(&x.1.pct)
+                .then((x.0 as u8).cmp(&(y.0 as u8)))
+        });
+        v.into_iter().map(|(_, w)| w).collect()
+    };
+    Some(SpikeWindow {
+        samples: f.samples,
+        baseline_samples: b.samples,
+        game_samples: f.dominant_pid_samples,
+        baseline_game_samples: b.dominant_pid_samples,
+        layers,
+    })
+}
+
+/// A window's samples that landed in some layer, i.e. not the unmapped `[unknown]` gap.
+fn attributed(t: &WindowTally) -> u64 {
+    t.layers
+        .iter()
+        .filter(|l| l.layer != Layer::Other)
+        .map(|l| l.samples)
+        .sum()
+}
+
+/// `layer`'s share of a window's attributed samples: the normalization
+/// [`TraceArtifact::layers`] uses.
+fn share(t: &WindowTally, layer: Layer) -> f32 {
+    let of = attributed(t);
+    if of == 0 {
+        return 0.0;
+    }
+    let n = t
+        .layers
+        .iter()
+        .find(|l| l.layer == layer)
+        .map_or(0, |l| l.samples);
+    100.0 * n as f32 / of as f32
 }
 
 /// The MangoHud CSV in a run dir (named after the game), if any.
@@ -790,13 +981,22 @@ fn frames_from_csv_gated(path: &Path, uptime_end_s: Option<f64>) -> Option<CsvFr
     let mut lines = text.lines();
     // Skip the two system-info lines; the third line is the data header.
     let header = lines.by_ref().nth(2)?;
-    let ft_col = header.split(',').position(|c| c.trim() == "frametime")?;
+    let col = |name: &str| header.split(',').position(|c| c.trim() == name);
+    let ft_col = col("frametime")?;
+    // Nanoseconds since logging started, at the row's write: what places a frame on the
+    // clock the wrapper anchored the CSV's last row to. Older MangoHud may lack it.
+    let el_col = col("elapsed");
 
-    let raw: Vec<f32> = lines
-        .filter_map(|row| row.split(',').nth(ft_col))
-        .filter_map(|field| field.trim().parse::<f32>().ok())
-        .filter(|ms| *ms > 0.0 && ms.is_finite())
+    let raw: Vec<(f32, Option<f64>)> = lines
+        .filter_map(|row| {
+            let fields: Vec<&str> = row.split(',').collect();
+            let ms = fields.get(ft_col)?.trim().parse::<f32>().ok()?;
+            let el = el_col.and_then(|c| fields.get(c)?.trim().parse::<f64>().ok());
+            Some((ms, el))
+        })
+        .filter(|(ms, _)| *ms > 0.0 && ms.is_finite())
         .collect();
+    let last_elapsed = raw.last().and_then(|&(_, el)| el);
 
     // The leak window needs the session's logged duration, which needs the rows —
     // so: provisional duration over ceiling-passing rows first (leaks are rare and
@@ -804,16 +1004,18 @@ fn frames_from_csv_gated(path: &Path, uptime_end_s: Option<f64>) -> Option<CsvFr
     // real classification pass.
     let provisional_dur_s: f64 = raw
         .iter()
-        .filter(|ms| **ms <= MAX_PLAUSIBLE_FRAMETIME_MS)
-        .map(|ms| *ms as f64 / 1000.0)
+        .filter(|(ms, _)| *ms <= MAX_PLAUSIBLE_FRAMETIME_MS)
+        .map(|(ms, _)| *ms as f64 / 1000.0)
         .sum();
     let window = uptime_end_s.map(|ue| leak_window(ue, provisional_dur_s));
 
     let mut fts: Vec<f32> = Vec::new();
     let mut timeline: Vec<(f64, f32)> = Vec::new();
+    // Per kept row: seconds from its end to the CSV's last row.
+    let mut before_end: Vec<Option<f64>> = Vec::new();
     let mut dropped: u64 = 0;
     let mut t = 0.0f64;
-    for ms in raw {
+    for (ms, el) in raw {
         // Implausible rows are dropped from *everything* — stats, spikes, and the
         // timeline clock: one hours-long value would otherwise shift every later
         // bookmark by hours and flatten the chart to a spike at nothing.
@@ -822,6 +1024,7 @@ fn frames_from_csv_gated(path: &Path, uptime_end_s: Option<f64>) -> Option<CsvFr
             continue;
         }
         timeline.push((t, ms));
+        before_end.push(last_elapsed.zip(el).map(|(last, el)| (last - el) / 1e9));
         t += ms as f64 / 1000.0;
         fts.push(ms);
     }
@@ -847,10 +1050,13 @@ fn frames_from_csv_gated(path: &Path, uptime_end_s: Option<f64>) -> Option<CsvFr
     let threshold = (median * 2.0).max(33.0);
     let mut spikes: Vec<Spike> = timeline
         .iter()
-        .filter(|&&(_, ms)| ms >= threshold)
-        .map(|&(t_seconds, frametime_ms)| Spike {
+        .zip(&before_end)
+        .filter(|&(&(_, ms), _)| ms >= threshold)
+        .map(|(&(t_seconds, frametime_ms), &before_csv_end_s)| Spike {
             t_seconds,
             frametime_ms,
+            window: None,
+            before_csv_end_s,
         })
         .collect();
     spikes.sort_by(|a, b| b.frametime_ms.partial_cmp(&a.frametime_ms).unwrap());
@@ -920,6 +1126,129 @@ mod tests {
             "t={}",
             spikes[0].t_seconds
         );
+    }
+
+    #[test]
+    fn a_spike_knows_how_long_before_the_csv_end_it_ended() {
+        // `elapsed` is nanoseconds since logging started, at each row's write.
+        let csv = "os,cpu\nSteam,Ryzen\nfps,frametime,elapsed\n\
+                   60,16.0,16000000\n60,16.0,32000000\n60,16.0,48000000\n\
+                   20,50.0,98000000\n60,16.0,114000000\n60,16.0,130000000\n";
+        let (_, spikes, _) = frames_from_csv(&write_csv("placed", csv)).unwrap();
+        assert_eq!(spikes.len(), 1);
+        let before = spikes[0].before_csv_end_s.unwrap();
+        assert!((before - 0.032).abs() < 1e-9, "{before}");
+        // Not serialized: it means nothing outside this build.
+        assert!(!serde_json::to_string(&spikes[0])
+            .unwrap()
+            .contains("before_csv_end"));
+
+        let no_elapsed = "os,cpu\nSteam,Ryzen\nfps,frametime\n60,16.0\n60,16.0\n20,50.0\n";
+        let (_, spikes, _) = frames_from_csv(&write_csv("unplaced", no_elapsed)).unwrap();
+        assert_eq!(spikes[0].before_csv_end_s, None);
+        assert!(spike_windows(100.0, &spikes).is_empty());
+    }
+
+    fn windowed(windows: Vec<WindowTally>, span: (f64, f64)) -> Resolution {
+        Resolution {
+            symbols: vec![],
+            diagnostics: symbol_resolver::Diagnostics {
+                tier: FidelityTier::Exports,
+                total_samples: 0,
+                unresolved_samples: 0,
+                anonymous_modules: vec![],
+            },
+            layers: vec![],
+            wine_flavor: None,
+            game_maps_pe: false,
+            gpu_vendor: None,
+            windows,
+            sample_span: Some(span),
+        }
+    }
+
+    fn wtally(dominant: u64, layers: &[(Layer, u64)]) -> WindowTally {
+        WindowTally {
+            samples: layers.iter().map(|&(_, n)| n).sum(),
+            dominant_pid_samples: dominant,
+            layers: layers
+                .iter()
+                .map(|&(layer, samples)| symbol_resolver::LayerTally {
+                    layer,
+                    samples,
+                    named: 0,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_spike_window_compares_the_frame_with_the_second_before() {
+        let spike = Spike {
+            t_seconds: 12.0,
+            frametime_ms: 50.0,
+            window: None,
+            before_csv_end_s: Some(0.032),
+        };
+        let placed = spike_windows(100.0, &[spike]);
+        let (_, frame, base) = placed[0];
+        assert!((frame.end - 99.968).abs() < 1e-9 && (frame.start - 99.918).abs() < 1e-9);
+        assert!((base.start - 98.918).abs() < 1e-9 && base.end == frame.start);
+
+        let res = windowed(
+            vec![
+                wtally(
+                    5,
+                    &[(Layer::Driver, 20), (Layer::Game, 10), (Layer::Other, 4)],
+                ),
+                wtally(
+                    480,
+                    &[
+                        (Layer::Game, 400),
+                        (Layer::Driver, 100),
+                        (Layer::Other, 100),
+                    ],
+                ),
+            ],
+            (90.0, 110.0),
+        );
+        let w = spike_window(&res, frame, base, 0).unwrap();
+        assert_eq!((w.samples, w.baseline_samples), (34, 600));
+        assert_eq!((w.game_samples, w.baseline_game_samples), (5, 480));
+        // 24 expected in 50 ms at 480/s, 5 seen: a real drop, so it is compared.
+        let (now, was) = w.game_rates(0.05).unwrap();
+        assert!((now - 100.0).abs() < 0.1 && (was - 480.0).abs() < 0.1);
+        // Over attributed samples only, biggest in the frame first: driver 20/30 against
+        // 100/500 before it.
+        let names: Vec<&str> = w.layers.iter().map(|l| l.layer.as_str()).collect();
+        assert_eq!(names, ["driver", "game"]);
+        assert!((w.layers[0].pct - 66.67).abs() < 0.01);
+        assert!((w.layers[0].baseline_pct - 20.0).abs() < 0.01);
+
+        // Too few samples in the frame: the rates stand, the split does not.
+        let thin = windowed(
+            vec![
+                wtally(2, &[(Layer::Game, 3)]),
+                wtally(480, &[(Layer::Game, 480)]),
+            ],
+            (90.0, 110.0),
+        );
+        let w = spike_window(&thin, frame, base, 0).unwrap();
+        assert!(w.layers.is_empty());
+        assert!(w.game_rates(0.05).is_some());
+        // A game that barely runs anyway: 0 seen where 2 were expected is chance.
+        let idle = windowed(
+            vec![wtally(0, &[]), wtally(40, &[(Layer::Game, 40)])],
+            (90.0, 110.0),
+        );
+        let w = spike_window(&idle, frame, base, 0).unwrap();
+        assert_eq!(w.game_rates(0.05), None);
+
+        // perf not recording across the baseline: its silence is not the game's.
+        let late = windowed(res.windows.clone(), (99.5, 110.0));
+        assert!(spike_window(&late, frame, base, 0).is_none());
+        let early_stop = windowed(res.windows.clone(), (90.0, 99.95));
+        assert!(spike_window(&early_stop, frame, base, 0).is_none());
     }
 
     #[test]
@@ -1184,6 +1513,62 @@ mod tests {
     }
 
     #[test]
+    fn the_report_shows_a_spike_against_the_second_before_it() {
+        // A pre-window artifact still loads: its spikes simply carry no window.
+        let mut a: TraceArtifact = serde_json::from_str(
+            r#"{"schema_version":1,"game":"T","wine_flavor":"unknown","duration_s":1.0,
+                "frame_stats":null,"spikes":[{"t_seconds":1.0,"frametime_ms":40.0}],
+                "hot_symbols":[],"diagnostics":{"fidelity":"Exports","total_samples":0,
+                "unresolved_pct":0.0,"anonymous_modules":[]}}"#,
+        )
+        .unwrap();
+        assert!(a.spikes[0].window.is_none());
+        a.frame_stats = Some(FrameStats {
+            frames: 3,
+            avg_fps: 60.0,
+            median_frametime_ms: 16.0,
+            time_weighted_median_ms: 16.0,
+            p99_frametime_ms: 84.0,
+            worst_frametime_ms: 84.0,
+            logged_seconds: 1.0,
+            dropped_rows: 0,
+        });
+        let window = SpikeWindow {
+            samples: 34,
+            baseline_samples: 600,
+            game_samples: 4,
+            baseline_game_samples: 480,
+            layers: vec![WindowShare {
+                layer: "driver".into(),
+                pct: 61.0,
+                baseline_pct: 22.0,
+            }],
+        };
+        a.spikes = vec![
+            Spike {
+                t_seconds: 312.4,
+                frametime_ms: 84.0,
+                window: Some(window),
+                before_csv_end_s: None,
+            },
+            Spike {
+                t_seconds: 20.0,
+                frametime_ms: 40.0,
+                window: None,
+                before_csv_end_s: None,
+            },
+        ];
+        let r = a.render_report();
+        assert!(
+            r.contains("84.0 ms at 312.4s   game ran 48/s (was 480/s), driver 61% (was 22%)"),
+            "{r}"
+        );
+        // An unplaced spike keeps the old line.
+        assert!(r.contains("  40.0 ms at 20.0s\n"), "{r}");
+        assert!(r.contains("a drop means it was waiting"));
+    }
+
+    #[test]
     fn layer_shares_normalize_over_attributed_samples_not_the_gap() {
         use symbol_resolver::{Diagnostics, FidelityTier, Layer, LayerTally, Resolution};
         let tally = |layer, samples, named| LayerTally {
@@ -1209,6 +1594,8 @@ mod tests {
             wine_flavor: None,
             game_maps_pe: false,
             gpu_vendor: None,
+            windows: vec![],
+            sample_span: None,
         };
         let a = TraceArtifact::from_parts("G", 1.0, "full", res, None, vec![], vec![]);
         // The gap is disclosed as coverage, never as a peer layer.

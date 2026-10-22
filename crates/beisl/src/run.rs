@@ -251,6 +251,10 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
                 recorder.stop();
                 cue::play(cue::Cue::RecordStop);
             }
+            // Now, while the CSV's mtime and this boot's clocks still describe the same
+            // moment; written before the analysis below, which reads it from disk.
+            sess.frametime_clock = mangohud::frametime_clock(&run_dir);
+            let _ = sess.write(&run_dir);
             // A hang often coincides with the game dying — one last look.
             drain_gpu_events(&mut gpuwatch, &mut log, &mut sess, &run_dir);
             note_walls(walls.poll(), &mut log, &mut sess, &mut walls_seen);
