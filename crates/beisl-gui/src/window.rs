@@ -30,7 +30,8 @@ use cosmic::{Application, Element};
 use artifact::{FrameAnalysis, TimelineSpan, TraceArtifact, SCHEMA_VERSION};
 use hypothesis::learn::Score;
 use hypothesis::{
-    Candidate, Cause, Features, Gate, Judge, Label, LabelSource, LabelStore, Review, Verdict,
+    Candidate, Cause, Features, Gate, Judge, Label, LabelSource, LabelStore, ModelStore, Review,
+    Verdict,
 };
 use preflight::debuginfo::{debuginfo_role_for_module, fetch_urls};
 use preflight::{detect_distro, detect_system_kind, fix_command, Config, DumpAccessPolicy, Fix};
@@ -62,6 +63,8 @@ pub enum Msg {
     OpenChecklist(i64),
     /// "Don't know": put the checklist away, storing nothing.
     DontKnow(i64),
+    /// Train on every label, in the background: the one slow part, only when asked.
+    Retrain,
     /// The ask: throw the trace away — a two-step, since it deletes the run dir.
     Discard,
     ConfirmDiscard,
@@ -118,13 +121,19 @@ pub struct SessionApp {
     frame_job: Option<(usize, FrameJob)>,
     /// The picked point's finished analysis, or why there is none.
     frame_result: Option<Result<FrameAnalysis, String>>,
-    /// The user's label store, and the judge trained on it: rebuilt after every label
-    /// stored here, and when the file changes under us (an assistant labelling over MCP).
+    /// The user's labels and their last training, and the judge loaded from both:
+    /// reloaded after every label stored here and whenever either file changes under us
+    /// (an assistant labelling over MCP, `beisl label --retrain` in a terminal). Loading
+    /// never trains, so this stays fast however many labels there are.
     labels_at: LabelStore,
+    model_at: ModelStore,
     judge: Judge,
     /// Every spike's newest label, any run's.
     labels: Vec<Label>,
-    labels_seen: Option<SystemTime>,
+    labels_seen: (Option<SystemTime>, Option<SystemTime>),
+    /// A retrain running in the background, and what the last one said.
+    retraining: Option<RetrainJob>,
+    retrain_note: Option<String>,
     /// What the user did to a checklist this session, by label key. Never stored.
     choices: HashMap<i64, Choice>,
     /// Why the last label could not be saved.
@@ -231,9 +240,12 @@ impl Application for SessionApp {
             frame_job: None,
             frame_result: None,
             labels_at: LabelStore::default_path(),
+            model_at: ModelStore::default_path(),
             judge: Judge::rules_only(),
             labels: Vec::new(),
-            labels_seen: None,
+            labels_seen: (None, None),
+            retraining: None,
+            retrain_note: None,
             choices: HashMap::new(),
             label_note: None,
             installing: None,
@@ -293,7 +305,8 @@ impl Application for SessionApp {
                 self.poll_analyze();
                 self.poll_install();
                 self.poll_frame();
-                if self.artifact.is_some() && mtime(self.labels_at.path()) != self.labels_seen {
+                self.poll_retrain();
+                if self.artifact.is_some() && self.stores_seen() != self.labels_seen {
                     self.reload_labels();
                 }
             }
@@ -303,6 +316,12 @@ impl Application for SessionApp {
             }
             Msg::DontKnow(key) => {
                 self.choices.insert(key, Choice::Closed);
+            }
+            Msg::Retrain => {
+                if self.retraining.is_none() {
+                    self.retrain_note = None;
+                    self.retraining = Some(spawn_retrain());
+                }
             }
             Msg::PickFrame(i) => {
                 self.picked = Some(i);
@@ -655,11 +674,59 @@ impl SessionApp {
         }
     }
 
-    /// Re-read the label store and retrain the judge on it: tens of labels, milliseconds.
+    /// Re-read the labels and the last training. No training here: that is `Retrain`.
     fn reload_labels(&mut self) {
-        self.labels_seen = mtime(self.labels_at.path());
+        self.labels_seen = self.stores_seen();
         self.labels = self.labels_at.load().labels;
-        self.judge = Judge::new(self.labels.clone());
+        self.judge = Judge::load(&self.labels_at, &self.model_at);
+    }
+
+    fn stores_seen(&self) -> (Option<SystemTime>, Option<SystemTime>) {
+        (mtime(self.labels_at.path()), mtime(self.model_at.path()))
+    }
+
+    fn poll_retrain(&mut self) {
+        let Some(job) = &self.retraining else {
+            return;
+        };
+        let Some(result) = job.lock().unwrap().take() else {
+            return;
+        };
+        self.retraining = None;
+        self.retrain_note = Some(result.unwrap_or_else(|e| e));
+        self.reload_labels();
+    }
+
+    /// What the last training missed, and the button that trains on it. Silent when the
+    /// training is current and nothing was just said about it.
+    fn retrain_row(&self) -> Option<Element<'_, Msg>> {
+        let new = self.judge.untrained_labels();
+        let says = if self.retraining.is_some() {
+            Some("Retraining in the background...".to_string())
+        } else if new == 0 {
+            self.retrain_note.clone()
+        } else if self.judge.trained_at().is_none() {
+            Some(format!(
+                "{new} label(s), never trained on: the learned layers wait for a retrain."
+            ))
+        } else {
+            Some(format!(
+                "{new} label(s) since the last training: they vote as neighbours already, \
+                 and count for everything after a retrain."
+            ))
+        }?;
+        let mut row = widget::Row::new()
+            .spacing(8)
+            .align_y(cosmic::iced::Alignment::Center)
+            .push(widget::text::caption(says));
+        if new > 0 {
+            let mut b = widget::button::text("Retrain");
+            if self.retraining.is_none() {
+                b = b.on_press(Msg::Retrain);
+            }
+            row = row.push(b);
+        }
+        Some(row.into())
     }
 
     /// The run's name as labels key it: the run dir's name, as `beisl label` and beisl-mcp
@@ -1101,6 +1168,9 @@ impl SessionApp {
                 matches!(&self.frame_result, Some(Ok(f)) if !f.features.is_empty());
             if picked_measured || a.spikes.iter().any(|s| !s.features.is_empty()) {
                 frametimes = frametimes.push(widget::text::caption(gate_line(self.judge.gate())));
+                if let Some(row) = self.retrain_row() {
+                    frametimes = frametimes.push(row);
+                }
             }
             // The timeline chart (plotters, drawn on Canvas) with the worst spikes marked.
             if !a.timeline.is_empty() {
@@ -1728,6 +1798,36 @@ fn checklist<'a>(key: i64, candidates: &[Candidate]) -> Element<'a, Msg> {
     )
     .push(widget::button::text("Don't know").on_press(Msg::DontKnow(key)))
     .into()
+}
+
+/// A background retrain's slot: what it said once it is done.
+type RetrainJob = Arc<Mutex<Option<Result<String, String>>>>;
+
+/// Train on the user's labels and save the result, off the UI thread: seconds once
+/// there are thousands of labels.
+fn spawn_retrain() -> RetrainJob {
+    let slot = Arc::new(Mutex::new(None));
+    let s2 = slot.clone();
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let model = ModelStore::default_path();
+        let result = Judge::retrain(&LabelStore::default_path(), &model)
+            .map(|j| {
+                format!(
+                    "Trained on {} label(s) in {:.1} s.",
+                    j.gate().labels,
+                    started.elapsed().as_secs_f32()
+                )
+            })
+            .map_err(|e| {
+                format!(
+                    "Could not save the training to {} ({e}).",
+                    model.path().display()
+                )
+            });
+        *s2.lock().unwrap() = Some(result);
+    });
+    slot
 }
 
 fn mtime(path: &Path) -> Option<SystemTime> {
