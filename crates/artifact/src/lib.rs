@@ -445,6 +445,11 @@ impl TraceArtifact {
             .and_then(|csv| frames_from_csv(&csv))
             .map(|(stats, spikes, timeline)| (Some(stats), spikes, timeline))
             .unwrap_or((None, Vec::new(), Vec::new()));
+        if clock.is_none() {
+            for s in &mut spikes {
+                drop_unanchored_gpu_readings(&mut s.features);
+            }
+        }
         let placed = clock.map_or_else(Vec::new, |c| spike_windows(c.end_monotonic_s, &spikes));
         let requests: Vec<Window> = placed.iter().flat_map(|&(_, f, b)| [f, b]).collect();
         let res = symbol_resolver::resolve_perf_data_with_debuginfod(
@@ -992,6 +997,15 @@ fn worst_in(frames: &[Frame], span: TimelineSpan) -> Option<usize> {
     })
 }
 
+/// A run without a clock anchor was recorded before beisl escaped MangoHud's config
+/// values, when the GPU pin never reached MangoHud and its GPU columns read whichever
+/// card it fell back to (on a dGPU + iGPU box, the idle iGPU). Its other sensors are the
+/// machine's own; the GPU ones may describe the wrong card, so they are left out rather
+/// than taught to the classifier as the game's.
+fn drop_unanchored_gpu_readings(features: &mut Features) {
+    features.retain(|k, _| !(k.starts_with("gpu_") && k.ends_with("_delta")));
+}
+
 /// The CSV the wrapper anchored on perf's clock, when it is still in the run dir.
 fn frametime_clock(run_dir: &Path) -> Option<session::FrametimeClock> {
     session::Session::read(run_dir)
@@ -1492,6 +1506,22 @@ mod tests {
             "t={}",
             spikes[0].t_seconds
         );
+    }
+
+    #[test]
+    fn an_unanchored_run_keeps_its_cpu_readings_and_loses_its_gpu_ones() {
+        let mut f: Features = [
+            ("cpu_mhz_delta", -0.2),
+            ("gpu_power_delta", 0.3),
+            ("gpu_temp_delta", 2.0),
+            ("burst_1s", 1.0),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        drop_unanchored_gpu_readings(&mut f);
+        let kept: Vec<&str> = f.keys().map(String::as_str).collect();
+        assert_eq!(kept, ["burst_1s", "cpu_mhz_delta"]);
     }
 
     #[test]

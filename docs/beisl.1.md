@@ -61,7 +61,7 @@ and, when the run dir is writable, save artifact.json + report.txt into it
 (fetches GPU-driver debug symbols on demand via debuginfod when the local
 perf supports it).
 
-**label <run> [<n> <cause> [--note TEXT] | <n> --confirm]**, **label --stats** -
+**label <run> [<n> <cause> [--note TEXT] | <n> --confirm] [--as-agent]**, **label --stats** -
 every worst spike of an analyzed run comes with a likely cause, from readable
 rules at first and from what you labelled later; this is where you say what it
 really was. Without a spike number it lists the run's spikes: a sure verdict
@@ -73,9 +73,11 @@ Wine: what it says about the machine counts for every game, what it says about
 the game counts little for others, and Wine's layers are never compared with a
 native game's. Labels stay on this machine, in
 ~/.local/share/beisl/labels.jsonl, the newest per spike winning. Learned
-answers appear only once they beat the rules on your own labels; `--stats`
-says which layers speak, on what record, and how many labels came since the
-last training. Training is never automatic, so judging stays fast however many
+answers appear only once they beat the rules on your own labels. An assistant
+driving this command passes `--as-agent`: its label then counts a third of yours
+and never grades a layer until you confirm it, like one from beisl-mcp's
+label_spike. `--stats` says which layers speak, on what record, and how many
+labels came since the last training. Training is never automatic, so judging stays fast however many
 labels pile up: `--retrain` trains on all of them and saves the result
 (~/.local/share/beisl/label-model.json), and a new label already votes as a
 neighbour before that.

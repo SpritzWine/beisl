@@ -2,7 +2,9 @@
 //!
 //! The headless door to the same label store the session window and beisl-mcp write.
 //! A label from here is the user's own: full weight, and ground truth for the gate that
-//! decides which learned layer may speak.
+//! decides which learned layer may speak. An agent driving this command passes
+//! `--as-agent` and gets what beisl-mcp's `label_spike` gives it: a third of the weight,
+//! and never ground truth, until the user confirms.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -49,7 +51,7 @@ pub fn run(args: &[String]) -> ExitCode {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "beisl: usage: beisl label <run> [<n> <cause> [--note TEXT] | <n> --confirm]\n       \
+        "beisl: usage: beisl label <run> [<n> <cause> [--note TEXT] | <n> --confirm] [--as-agent]\n       \
          beisl label --stats | --retrain\n\ncauses: {}",
         causes()
     );
@@ -162,6 +164,7 @@ fn record(dir: &Path, art: &TraceArtifact, i: usize, rest: &[String]) -> ExitCod
         .and_then(|k| rest.get(k + 1))
         .cloned()
         .unwrap_or_default();
+    let agent = rest.iter().any(|a| a == "--as-agent");
     let cause = match rest.first().map(String::as_str) {
         Some("--confirm") => match Judge::load_default()
             .judge(&spike.features, &art.context())
@@ -195,8 +198,12 @@ fn record(dir: &Path, art: &TraceArtifact, i: usize, rest: &[String]) -> ExitCod
         features: spike.features.clone(),
         context: art.context(),
         cause,
-        source: LabelSource::User,
-        confirmed: true,
+        source: if agent {
+            LabelSource::Agent
+        } else {
+            LabelSource::User
+        },
+        confirmed: !agent,
         note,
         at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -211,11 +218,16 @@ fn record(dir: &Path, art: &TraceArtifact, i: usize, rest: &[String]) -> ExitCod
         return ExitCode::FAILURE;
     }
     out!(
-        "Spike {} of {} labelled {} ({}).",
+        "Spike {} of {} labelled {} ({}){}.",
         i + 1,
         run_name(dir),
         cause.as_str(),
-        cause.describe()
+        cause.describe(),
+        if agent {
+            ", as an agent's label: a third of the weight until the user confirms it"
+        } else {
+            ""
+        }
     );
     stats()
 }
