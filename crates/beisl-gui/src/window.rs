@@ -10,14 +10,17 @@
 //!    user hit Analyze): the layer split + frametime health + issues, plus a modest
 //!    "Re-analyze" to re-run the pipeline in place (a resolver fix landing is the only
 //!    other way an old artifact would ever improve, short of hand-deleting the file).
+//!    Each measured hitch carries its likely cause, which the user confirms or corrects
+//!    in place: the labels the hypothesis crate learns from.
 //!
 //! The window does *no* analysis itself: surfaces 2→3 run and render `artifact::Trace-
 //! Artifact`, the same code path `beisl symbols` and the crash teardown use. It only
 //! binds to the result, exactly as the setup page binds to `preflight`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use cosmic::app::{ApplicationExt, Core, Task};
 use cosmic::iced::{Length, Subscription};
@@ -25,6 +28,10 @@ use cosmic::widget;
 use cosmic::{Application, Element};
 
 use artifact::{FrameAnalysis, TimelineSpan, TraceArtifact, SCHEMA_VERSION};
+use hypothesis::learn::Score;
+use hypothesis::{
+    Candidate, Cause, Features, Gate, Judge, Label, LabelSource, LabelStore, Review, Verdict,
+};
 use preflight::debuginfo::{debuginfo_role_for_module, fetch_urls};
 use preflight::{detect_distro, detect_system_kind, fix_command, Config, DumpAccessPolicy, Fix};
 use session::{Session, State};
@@ -48,6 +55,13 @@ pub enum Msg {
     /// Results view: a point on the frametime chart was clicked (its timeline index). Look
     /// inside the worst frame behind it, in the background like Analyze.
     PickFrame(usize),
+    /// Store the user's label for the hitch or picked frame at this label key (see
+    /// `key_ms`): "Right", a checklist pick, or confirming an assistant's.
+    Label(i64, Cause),
+    /// Lay out a hitch's checklist: "Not quite", "Change", "No".
+    OpenChecklist(i64),
+    /// "Don't know": put the checklist away, storing nothing.
+    DontKnow(i64),
     /// The ask: throw the trace away — a two-step, since it deletes the run dir.
     Discard,
     ConfirmDiscard,
@@ -104,6 +118,17 @@ pub struct SessionApp {
     frame_job: Option<(usize, FrameJob)>,
     /// The picked point's finished analysis, or why there is none.
     frame_result: Option<Result<FrameAnalysis, String>>,
+    /// The user's label store, and the judge trained on it: rebuilt after every label
+    /// stored here, and when the file changes under us (an assistant labelling over MCP).
+    labels_at: LabelStore,
+    judge: Judge,
+    /// Every spike's newest label, any run's.
+    labels: Vec<Label>,
+    labels_seen: Option<SystemTime>,
+    /// What the user did to a checklist this session, by label key. Never stored.
+    choices: HashMap<i64, Choice>,
+    /// Why the last label could not be saved.
+    label_note: Option<String>,
     /// Tracks the background debuginfo-install `pkexec` run(s), one row's or "install
     /// all"'s worth — same worker shape as `enabling` (a role's install is just another
     /// sequential pkexec argv list, see the generalized `spawn_enable`).
@@ -190,32 +215,37 @@ impl Application for SessionApp {
         // builds its own `Core` (a separate `cosmic::app::run` call), so it needs the same
         // application the setup page does at init (see `main::auto_blur_mask`).
         core.set_auto_blur(crate::auto_blur_mask(config.frosted_background));
-        (
-            Self {
-                core,
-                dir,
-                session,
-                have,
-                config,
-                enabling: None,
-                enable_note: None,
-                artifact,
-                raw_present,
-                analyzing: None,
-                analyze_note: None,
-                picked: None,
-                frame_job: None,
-                frame_result: None,
-                installing: None,
-                install_note: None,
-                confirm_discard: false,
-                title,
-                title_pushed: false,
-                gone: !dir_exists,
-                invalid_marker,
-            },
-            Task::none(),
-        )
+        let mut app = Self {
+            core,
+            dir,
+            session,
+            have,
+            config,
+            enabling: None,
+            enable_note: None,
+            artifact,
+            raw_present,
+            analyzing: None,
+            analyze_note: None,
+            picked: None,
+            frame_job: None,
+            frame_result: None,
+            labels_at: LabelStore::default_path(),
+            judge: Judge::rules_only(),
+            labels: Vec::new(),
+            labels_seen: None,
+            choices: HashMap::new(),
+            label_note: None,
+            installing: None,
+            install_note: None,
+            confirm_discard: false,
+            title,
+            title_pushed: false,
+            gone: !dir_exists,
+            invalid_marker,
+        };
+        app.reload_labels();
+        (app, Task::none())
     }
 
     fn update(&mut self, message: Self::Message) -> Task<Self::Message> {
@@ -263,6 +293,16 @@ impl Application for SessionApp {
                 self.poll_analyze();
                 self.poll_install();
                 self.poll_frame();
+                if self.artifact.is_some() && mtime(self.labels_at.path()) != self.labels_seen {
+                    self.reload_labels();
+                }
+            }
+            Msg::Label(key, cause) => self.store_label(key, cause),
+            Msg::OpenChecklist(key) => {
+                self.choices.insert(key, Choice::Open);
+            }
+            Msg::DontKnow(key) => {
+                self.choices.insert(key, Choice::Closed);
             }
             Msg::PickFrame(i) => {
                 self.picked = Some(i);
@@ -615,6 +655,120 @@ impl SessionApp {
         }
     }
 
+    /// Re-read the label store and retrain the judge on it: tens of labels, milliseconds.
+    fn reload_labels(&mut self) {
+        self.labels_seen = mtime(self.labels_at.path());
+        self.labels = self.labels_at.load().labels;
+        self.judge = Judge::new(self.labels.clone());
+    }
+
+    /// The run's name as labels key it: the run dir's name, as `beisl label` and beisl-mcp
+    /// write it.
+    fn run_name(&self) -> String {
+        self.dir.file_name().map_or_else(
+            || self.dir.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        )
+    }
+
+    /// The measured hitch or picked frame at a label key: where it sits, how long it took,
+    /// and its features. Looked up at click time, so a re-analyze in between can't make a
+    /// label land on another spike.
+    fn subject(&self, key: i64) -> Option<(f64, f32, &Features)> {
+        let spikes = self
+            .artifact
+            .iter()
+            .flat_map(|a| &a.spikes)
+            .map(|s| (s.t_seconds, s.frametime_ms, &s.features));
+        let picked = match &self.frame_result {
+            Some(Ok(f)) => Some((f.t_seconds, f.frametime_ms, &f.features)),
+            _ => None,
+        };
+        spikes
+            .chain(picked)
+            .find(|(t, _, f)| key_ms(*t) == key && !f.is_empty())
+    }
+
+    fn store_label(&mut self, key: i64, cause: Cause) {
+        let Some((t, ms, features)) = self.subject(key) else {
+            return;
+        };
+        let label = user_label(&self.run_name(), t, ms, features, cause, now_unix());
+        match self.labels_at.append(&label) {
+            Ok(()) => {
+                self.choices.remove(&key);
+                self.label_note = None;
+                self.reload_labels();
+            }
+            Err(e) => {
+                self.label_note = Some(format!(
+                    "Couldn't save the label in {}: {e}",
+                    self.labels_at.path().display()
+                ))
+            }
+        }
+    }
+
+    /// Under a hitch or the picked frame: its verdict and evidence as the report words
+    /// them, then what the user can say about it (see `ask_of`). `None` when unmeasured.
+    fn review(&self, t_seconds: f64, features: &Features) -> Option<Element<'_, Msg>> {
+        let key = key_ms(t_seconds);
+        let verdict = (!features.is_empty()).then(|| self.judge.judge(features));
+        let newest = newest_label(&self.labels, &self.run_name(), key);
+        let ask = ask_of(verdict.as_ref(), newest, self.choices.get(&key).copied());
+        let v = verdict?;
+        let mut col = widget::Column::new()
+            .spacing(2)
+            .push(widget::text::caption(v.line()));
+        if let Some(h) = &v.hypothesis {
+            for e in h.evidence.iter().take(2) {
+                col = col.push(widget::text::caption(format!("  - {e}")));
+            }
+        }
+        let small = |label: &'static str, msg: Msg| widget::button::text(label).on_press(msg);
+        let row = || {
+            widget::Row::new()
+                .spacing(8)
+                .align_y(cosmic::iced::Alignment::Center)
+        };
+        col = match ask {
+            Ask::Unmeasured => return None,
+            Ask::Said(cause) => col.push(
+                row()
+                    .push(widget::text::caption(format!(
+                        "You said: {}",
+                        cause.as_str()
+                    )))
+                    .push(small("Change", Msg::OpenChecklist(key))),
+            ),
+            Ask::Proposed { cause, note } => {
+                let said = if note.is_empty() {
+                    format!("An assistant said: {}", cause.as_str())
+                } else {
+                    format!("An assistant said: {} ({note})", cause.as_str())
+                };
+                // On its own line: a note can be long, and the buttons must stay in reach.
+                col.push(widget::text::caption(said)).push(
+                    row()
+                        .push(small("Confirm", Msg::Label(key, cause)))
+                        .push(small("No", Msg::OpenChecklist(key))),
+                )
+            }
+            Ask::Confirm(cause) => col.push(
+                row()
+                    .push(small("Right", Msg::Label(key, cause)))
+                    .push(small("Not quite", Msg::OpenChecklist(key))),
+            ),
+            Ask::Checklist => col.push(checklist(key, &v.candidates)),
+            Ask::Closed => col.push(small("Say what it was", Msg::OpenChecklist(key))),
+        };
+        Some(
+            widget::container(col)
+                .padding(cosmic::iced::Padding::from([0, 0, 0, 24]))
+                .into(),
+        )
+    }
+
     // -- Surface 1: live -----------------------------------------------------------------
 
     fn live_content(&self) -> Element<'_, Msg> {
@@ -942,6 +1096,12 @@ impl SessionApp {
                 )));
             }
             frametimes = frametimes.push(stats_row);
+            // Who names the likely causes below, so a reader knows how far to trust them.
+            let picked_measured =
+                matches!(&self.frame_result, Some(Ok(f)) if !f.features.is_empty());
+            if picked_measured || a.spikes.iter().any(|s| !s.features.is_empty()) {
+                frametimes = frametimes.push(widget::text::caption(gate_line(self.judge.gate())));
+            }
             // The timeline chart (plotters, drawn on Canvas) with the worst spikes marked.
             if !a.timeline.is_empty() {
                 let points = a.timeline.iter().map(|&(t, ms)| (t, ms as f64)).collect();
@@ -971,7 +1131,13 @@ impl SessionApp {
                         line = format!("{line}: {w}");
                     }
                     frametimes = frametimes.push(widget::text::caption(line));
+                    if let Some(review) = self.review(s.t_seconds, &s.features) {
+                        frametimes = frametimes.push(review);
+                    }
                 }
+            }
+            if let Some(note) = &self.label_note {
+                frametimes = frametimes.push(widget::text::caption(note.clone()));
             }
         } else {
             frametimes = frametimes.push(widget::text::caption(
@@ -1236,6 +1402,9 @@ impl SessionApp {
                 h.samples, h.module, h.symbol
             )));
         }
+        if let Some(review) = self.review(f.t_seconds, &f.features) {
+            col = col.push(review);
+        }
         Some(col.into())
     }
 
@@ -1384,5 +1553,385 @@ fn human_bytes(b: u64) -> String {
         format!("{:.0} KB", b as f64 / KB as f64)
     } else {
         format!("{b} B")
+    }
+}
+
+/// What the user did to a hitch's checklist this session; none of it is stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Choice {
+    /// "Not quite", "Change" or "No": lay the checklist out whatever else is known.
+    Open,
+    /// "Don't know": put it away.
+    Closed,
+}
+
+/// Where a hitch's review stands, which decides what sits under its verdict.
+#[derive(Clone, Debug, PartialEq)]
+enum Ask {
+    /// No features: nothing to judge, nothing to learn from.
+    Unmeasured,
+    /// The user's own cause, or one they confirmed.
+    Said(Cause),
+    /// An assistant's label the user has not stood behind yet.
+    Proposed {
+        cause: Cause,
+        note: String,
+    },
+    /// Sure enough that a yes will do.
+    Confirm(Cause),
+    Checklist,
+    /// Unsure, and the user put the checklist away without an answer.
+    Closed,
+}
+
+/// `verdict` is `None` for an unmeasured hitch; `newest` is the label that stands for it.
+/// An opened checklist outranks everything, since the user asked for it; what someone
+/// said outranks what the judge thinks; "Don't know" only quiets an unsure verdict, so a
+/// sure one goes back to asking for a yes.
+fn ask_of(verdict: Option<&Verdict>, newest: Option<&Label>, choice: Option<Choice>) -> Ask {
+    let Some(v) = verdict else {
+        return Ask::Unmeasured;
+    };
+    if choice == Some(Choice::Open) {
+        return Ask::Checklist;
+    }
+    match newest {
+        Some(l) if l.source == LabelSource::User || l.confirmed => return Ask::Said(l.cause),
+        Some(l) if l.source == LabelSource::Agent => {
+            return Ask::Proposed {
+                cause: l.cause,
+                note: l.note.clone(),
+            }
+        }
+        // An unconfirmed harness label is for synthetic games; the verdict still asks.
+        _ => {}
+    }
+    match (&v.hypothesis, v.review) {
+        (Some(h), Review::Confirm) => Ask::Confirm(h.cause),
+        _ if choice == Some(Choice::Closed) => Ask::Closed,
+        _ => Ask::Checklist,
+    }
+}
+
+/// A spike's place on the timeline as `Label::key` rounds it, so a hitch finds its label.
+fn key_ms(t_seconds: f64) -> i64 {
+    (t_seconds * 1000.0).round() as i64
+}
+
+/// The label that stands for a hitch: the store already keeps only the newest per key.
+fn newest_label<'a>(labels: &'a [Label], run: &str, key: i64) -> Option<&'a Label> {
+    labels
+        .iter()
+        .rev()
+        .find(|l| l.run == run && key_ms(l.t_seconds) == key)
+}
+
+/// The user's own label, built as `beisl label` builds it: full weight, ground truth.
+fn user_label(
+    run: &str,
+    t_seconds: f64,
+    frametime_ms: f32,
+    features: &Features,
+    cause: Cause,
+    at: u64,
+) -> Label {
+    Label {
+        run: run.to_string(),
+        t_seconds,
+        frametime_ms,
+        features: features.clone(),
+        cause,
+        source: LabelSource::User,
+        confirmed: true,
+        note: String::new(),
+        at,
+    }
+}
+
+/// Every cause the rules did not put forward, for the checklist's plain picks.
+fn remaining_causes(candidates: &[Candidate]) -> Vec<Cause> {
+    Cause::ALL
+        .into_iter()
+        .filter(|c| !candidates.iter().any(|k| k.cause == *c))
+        .collect()
+}
+
+/// Who names the likely causes, in `beisl label --stats`'s words.
+fn gate_line(g: &Gate) -> String {
+    let record = |s: &Score| {
+        format!(
+            "{} of {} right on your labels, the rules {} on the same",
+            s.right, s.answered, s.rules_right
+        )
+    };
+    let mut speak = Vec::new();
+    if g.neighbours_on {
+        speak.push(format!("neighbours ({})", record(&g.neighbours)));
+    }
+    if g.model_on {
+        speak.push(format!("model ({})", record(&g.model)));
+    }
+    if speak.is_empty() {
+        format!(
+            "Likely causes: the rules only, {} label(s) so far.",
+            g.labels
+        )
+    } else {
+        format!("Likely causes: {}, then the rules.", speak.join(", "))
+    }
+}
+
+/// The rules' candidates with their evidence, every other cause as a plain pick, and a
+/// way out that stores nothing.
+fn checklist<'a>(key: i64, candidates: &[Candidate]) -> Element<'a, Msg> {
+    let pick = |c: Cause| widget::button::text(c.as_str()).on_press(Msg::Label(key, c));
+    let ask = if candidates.is_empty() {
+        "The rules see no candidate here. What was it?"
+    } else {
+        "Which was it?"
+    };
+    let mut col = widget::Column::new()
+        .spacing(2)
+        .push(widget::text::caption(ask));
+    for c in candidates {
+        col = col.push(
+            widget::Row::new()
+                .spacing(8)
+                .align_y(cosmic::iced::Alignment::Center)
+                .push(pick(c.cause))
+                .push(widget::text::caption(format!(
+                    "{:.0}%: {}",
+                    c.score * 100.0,
+                    c.cause.describe()
+                ))),
+        );
+        for e in &c.evidence {
+            col = col.push(
+                widget::container(widget::text::caption(e.clone()))
+                    .padding(cosmic::iced::Padding::from([0, 0, 0, 16])),
+            );
+        }
+    }
+    let mut others: Vec<Element<'a, Msg>> = Vec::new();
+    if !candidates.is_empty() {
+        others.push(widget::text::caption("Or:").into());
+    }
+    others.extend(
+        remaining_causes(candidates)
+            .into_iter()
+            .map(|c| pick(c).into()),
+    );
+    col.push(
+        widget::flex_row(others)
+            .spacing(4)
+            .align_items(cosmic::iced::Alignment::Center),
+    )
+    .push(widget::button::text("Don't know").on_press(Msg::DontKnow(key)))
+    .into()
+}
+
+fn mtime(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hypothesis::{Hypothesis, Source};
+
+    fn feats() -> Features {
+        [
+            ("burst_1s".to_string(), 0.0),
+            ("game_rate_ratio".to_string(), 0.1),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    fn verdict(said: Option<(Cause, f32)>) -> Verdict {
+        let hypothesis = said.map(|(cause, confidence)| Hypothesis {
+            cause,
+            confidence,
+            source: Source::Rules,
+            evidence: Vec::new(),
+        });
+        let review = match &hypothesis {
+            Some(h) if h.confidence >= hypothesis::CONFIRM_CONFIDENCE => Review::Confirm,
+            _ => Review::Checklist,
+        };
+        Verdict {
+            hypothesis,
+            candidates: Vec::new(),
+            review,
+        }
+    }
+
+    fn agent(cause: Cause, confirmed: bool) -> Label {
+        Label {
+            source: LabelSource::Agent,
+            confirmed,
+            note: "stalls on load".into(),
+            ..user_label("run-1", 12.0, 80.0, &feats(), cause, 1)
+        }
+    }
+
+    #[test]
+    fn a_hitch_asks_by_what_is_known_about_it() {
+        let sure = verdict(Some((Cause::ShaderCompile, 0.9)));
+        let unsure = verdict(Some((Cause::Blocked, 0.6)));
+        let none = verdict(None);
+        let mine = user_label("run-1", 12.0, 80.0, &feats(), Cause::Throttle, 1);
+        let open = Some(Choice::Open);
+        let closed = Some(Choice::Closed);
+
+        assert_eq!(ask_of(None, Some(&mine), open), Ask::Unmeasured);
+        assert_eq!(
+            ask_of(Some(&sure), None, None),
+            Ask::Confirm(Cause::ShaderCompile)
+        );
+        assert_eq!(ask_of(Some(&unsure), None, None), Ask::Checklist);
+        assert_eq!(ask_of(Some(&none), None, None), Ask::Checklist);
+        // "Not quite" on a sure one; "Don't know" takes it back to the yes.
+        assert_eq!(ask_of(Some(&sure), None, open), Ask::Checklist);
+        assert_eq!(
+            ask_of(Some(&sure), None, closed),
+            Ask::Confirm(Cause::ShaderCompile)
+        );
+        assert_eq!(ask_of(Some(&unsure), None, closed), Ask::Closed);
+
+        // What someone said outranks the judge, and "Change" reopens it.
+        assert_eq!(
+            ask_of(Some(&sure), Some(&mine), None),
+            Ask::Said(Cause::Throttle)
+        );
+        assert_eq!(
+            ask_of(Some(&sure), Some(&mine), closed),
+            Ask::Said(Cause::Throttle)
+        );
+        assert_eq!(ask_of(Some(&sure), Some(&mine), open), Ask::Checklist);
+        let guess = agent(Cause::Blocked, false);
+        assert_eq!(
+            ask_of(Some(&sure), Some(&guess), None),
+            Ask::Proposed {
+                cause: Cause::Blocked,
+                note: "stalls on load".into()
+            }
+        );
+        assert_eq!(ask_of(Some(&sure), Some(&guess), open), Ask::Checklist);
+        let stood_behind = agent(Cause::Blocked, true);
+        assert_eq!(
+            ask_of(Some(&unsure), Some(&stood_behind), None),
+            Ask::Said(Cause::Blocked)
+        );
+        let harness = Label {
+            source: LabelSource::Harness,
+            confirmed: false,
+            ..mine.clone()
+        };
+        assert_eq!(ask_of(Some(&unsure), Some(&harness), None), Ask::Checklist);
+    }
+
+    #[test]
+    fn confirming_an_assistant_supersedes_it_at_the_same_spike() {
+        let mine = user_label("run-7", 12.3456, 90.5, &feats(), Cause::Blocked, 42);
+        assert_eq!(mine.source, LabelSource::User);
+        assert!(mine.confirmed && mine.trusted() && mine.note.is_empty());
+        assert_eq!(
+            (mine.frametime_ms, mine.at, &mine.features),
+            (90.5, 42, &feats())
+        );
+        for t in [12.3456, 0.0005, 3.9995, 1234.5674] {
+            let l = user_label("run-7", t, 1.0, &feats(), Cause::Blocked, 0);
+            assert_eq!(l.key(), ("run-7".to_string(), key_ms(t)), "{t}");
+        }
+
+        // A temp store, never the user's own.
+        let dir = std::env::temp_dir().join(format!("beisl-gui-labels-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = LabelStore::at(dir.join("labels.jsonl"));
+        let mut guess = agent(Cause::CpuContention, false);
+        guess.run = "run-7".into();
+        guess.t_seconds = 12.3457;
+        store.append(&guess).unwrap();
+        store
+            .append(&user_label(
+                "run-8",
+                12.3456,
+                1.0,
+                &feats(),
+                Cause::Throttle,
+                0,
+            ))
+            .unwrap();
+        let labels = store.load().labels;
+        let key = key_ms(12.3456);
+        let sure = verdict(Some((Cause::ShaderCompile, 0.9)));
+        let ask = |labels: &[Label]| ask_of(Some(&sure), newest_label(labels, "run-7", key), None);
+        assert!(matches!(
+            ask(&labels),
+            Ask::Proposed {
+                cause: Cause::CpuContention,
+                ..
+            }
+        ));
+
+        // "Confirm": the user's label with the assistant's cause, at the same spike.
+        store
+            .append(&user_label(
+                "run-7",
+                12.3456,
+                90.5,
+                &feats(),
+                Cause::CpuContention,
+                43,
+            ))
+            .unwrap();
+        assert_eq!(ask(&store.load().labels), Ask::Said(Cause::CpuContention));
+        assert_eq!(newest_label(&labels, "run-9", key), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_checklist_offers_every_cause_once() {
+        let cand = |cause| Candidate {
+            cause,
+            score: 0.5,
+            evidence: Vec::new(),
+        };
+        let rest = remaining_causes(&[cand(Cause::Blocked), cand(Cause::GpuBound)]);
+        assert_eq!(rest.len(), Cause::ALL.len() - 2);
+        assert!(!rest.contains(&Cause::Blocked) && !rest.contains(&Cause::GpuBound));
+        assert_eq!(remaining_causes(&[]), Cause::ALL);
+    }
+
+    #[test]
+    fn the_gate_line_says_who_speaks_and_on_what_record() {
+        let mut g = Gate {
+            labels: 3,
+            ..Gate::default()
+        };
+        assert_eq!(
+            gate_line(&g),
+            "Likely causes: the rules only, 3 label(s) so far."
+        );
+        g.neighbours_on = true;
+        g.neighbours = Score {
+            answered: 9,
+            right: 8,
+            rules_right: 6,
+        };
+        assert_eq!(
+            gate_line(&g),
+            "Likely causes: neighbours (8 of 9 right on your labels, the rules 6 on the \
+             same), then the rules."
+        );
+        g.model_on = true;
+        assert!(gate_line(&g).contains("), model (0 of 0 right"));
     }
 }
