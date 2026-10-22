@@ -50,9 +50,12 @@ unless there is a reason in writing not to.
 |---|---|---|
 | `arch/PKGBUILD` | Arch Linux / AUR | online (`make fetch`) |
 | `fedora/beisl.spec`, `/.copr/Makefile` | Fedora, via COPR | airgapped |
+| `fedora/build-in-container.sh` | COPR's rebuild, reproduced in a clean local container | airgapped |
+| `debian/` | Debian 12+ and Ubuntu 22.04+, as a third-party .deb | airgapped, in a container (`debian/build-in-container.sh`) |
 | `opensuse/beisl.spec` | openSUSE, via OBS | airgapped |
 | `nix/package.nix` | Nix / NixOS | airgapped; built in the Nix sandbox, not yet run on a NixOS desktop |
 | `appimage/` | one runnable file, any distro | airgapped, in a container |
+| `smoke-test.sh` | installs a built rpm or .deb into a fresh container and checks it | |
 | `vendor.sh`, `cache-coupler-data.sh` | what `make vendor` runs | |
 | `*.desktop` | **generated** by `make generate`, not committed | |
 
@@ -69,7 +72,9 @@ therefore needs no vendoring knowledge of its own:
     make install DESTDIR=... PREFIX=/usr
 
 Verified with the network actually gone, not merely unused: the Fedora source
-rpm rebuilds inside `unshare -n`, a namespace with no interfaces.
+rpm rebuilds inside `unshare -n`, a namespace with no interfaces, and every
+build under "What was built where" ran in a container started with
+`--network none`.
 
 - **COPR** uses its "make srpm" method. `/.copr/Makefile` runs `make srpm`
   where COPR allows network, and the rpm is then built where it does not.
@@ -91,6 +96,147 @@ in one: libcosmic's git dependencies cannot be satisfied from crates.io
 packages. A submission to Fedora proper would need `bundled(crate(...))`
 provides and the combined licence of everything vendored, which the spec does
 not claim.
+
+## Fedora
+
+Every current Fedora ships a new enough rust (looked up
+2026-10-22: 1.99.0 on 43 and 44, 1.99.1 on 45 in updates-testing and on
+rawhide; the spec needs 1.93, libcosmic's rust-version). So the COPR chroots
+are `fedora-43-x86_64` and `fedora-44-x86_64`, then `fedora-45-x86_64` once it
+is released, and `fedora-rawhide-x86_64` if wanted. 43 and 44 are built below;
+45 and rawhide are not.
+
+Fedora's `%build` exports its own `RUSTFLAGS` (opt-level 3, full debuginfo,
+no strip, frame pointers), and they win over the cargo profile. So rpm splits
+a `beisl-debuginfo` and `beisl-debugsource` as it does for C, and the rpm's
+binaries are built differently from the release tarball's and the .deb's,
+which follow the profile (size-optimised, stripped). The spec used to disable
+debuginfo on the belief that cargo had stripped already; it had not, and the
+debug info was thrown away while the symbol table shipped.
+
+The GUI loads its display and GPU libraries with `dlopen`, which rpm's
+dependency generator cannot see: Wayland or X11 to open a window, and Vulkan
+or EGL to render, falling back to software without them. Found by reading the
+binaries (some names are assembled from two immediates and do not show up in
+`strings`). The spec recommends them by soname, weakly, because the CLI needs
+none of them and a desktop has them all.
+
+## Debian and Ubuntu: a third-party .deb
+
+**This is not Debian-policy packaging.** Both workspaces build from the
+vendored crates, not from Debian's `librust-*-dev` packages, which have no
+counterpart for libcosmic's rev-pinned git dependencies; `debian/copyright`
+names beisl's licence, not those of the hundreds of crates linked into it.
+What does come from the distribution's archive is everything else: the
+toolchain, debhelper, and every library and tool the build touches. No
+rustup, no upstream toolchain.
+
+The obstacle is the GUI's rustc >= 1.93. What each archive offers, looked up
+in containers on 2026-10-22:
+
+| release | default rustc | newer, still from the archive | builds? |
+|---|---|---|---|
+| Debian 12 | 1.63 | `rustc-web` 1.96.0 (bookworm-security) | yes |
+| Debian 13 | 1.85.1 | `rustc-web` 1.96.0 (trixie); `rustc` 1.96.1 in trixie-backports | yes |
+| Debian testing | 1.97.1 | | yes |
+| Ubuntu 24.04 | 1.75 | `rustc-1.91` at most | **no** |
+| Ubuntu 26.04 | 1.93.1 | | yes |
+
+`rustc-web` and `cargo-web` are the toolchain Debian keeps current in its
+stable releases for building Firefox and Chromium. They provide `rustc` and
+`cargo` at their own version, so the plain `rustc (>= 1.93)` Build-Depends
+selects them on Debian 12 and 13 with no extra repository or pinning.
+
+**Where a .deb installs is decided by where it was built**, as for the
+AppImage. Built on Debian 12 it depends on `libc6 (>= 2.35)`, `libgcc-s1` and
+`libxkbcommon0` only, and passes the smoke test on Debian 12, 13 and testing
+and Ubuntu 22.04, 24.04 and 26.04. That is how Ubuntu 24.04 (and 22.04) get
+beisl at all: they cannot build it, and what they install is the Debian 12
+build, which is a Debian package on Ubuntu rather than Ubuntu packaging.
+
+Mechanics, all in `debian/rules`: it builds through the Makefile like every
+other recipe, installs straight into the package so the file list is
+upstream's install list, keeps `CARGO_HOME` inside the tree, and stops
+`dh_clean` from deleting the vendored crates' `Cargo.toml.orig` files, which
+cargo checksums (found by the first container build). The recommendations
+mirror the rpm's: `linux-perf | linux-tools-generic` (Ubuntu 24.04 has no
+`linux-perf`), `mangohud`, and the libraries the GUI loads at runtime.
+
+Not done: there is no source package, only binary builds
+(`dpkg-buildpackage -b`). A `.dsc` for Launchpad or OBS would need the vendor
+tarball as a second orig component, whose layout does not match what
+dpkg-source expects of one. Every build is versioned `0.4.0-1` whatever its
+base, which is fine for downloading one file and not for an apt repository
+carrying builds for several releases side by side.
+
+## What was built where
+
+On 2026-10-22, x86_64 only. Each build started from `make sdist vendor`'s two
+tarballs in a fresh container holding only the recipe's build dependencies
+(plus zstd for the .deb, to unpack the vendor tarball), ran with
+`--network none`, tests included, and as an unprivileged user. Each
+package was then installed into a fresh container of every release listed,
+with hard dependencies only, and `smoke-test.sh` checked: `beisl --version`,
+`beisl --check` exiting 0 or 1, `beisl-mcp` answering `initialize`,
+`beisl-setup --version` and `beisl-compat --version` with no display, `ldd`
+resolving all four binaries, the shipped desktop entries, metainfo, icon and
+man page, and that installing the Recommends makes every library the GUI loads
+at runtime resolvable.
+
+| recipe, build base | toolchain | installed and smoke-tested on | linter |
+|---|---|---|---|
+| `fedora/beisl.spec`, fedora:44 | rust 1.99.0 | fedora:44 | rpmlint 2.8.0: clean with `beisl.rpmlintrc` |
+| `fedora/beisl.spec`, fedora:43 | rust 1.99.0 | fedora:43 | rpmlint 2.8.0: two duplicate-file findings, below |
+| `debian/`, debian:12 | rustc-web 1.96.0 | debian:12, debian:13, debian:testing, ubuntu:22.04, ubuntu:24.04, ubuntu:26.04 | lintian 2.116.3 (bookworm) and 2.142.0 (testing): one W, below |
+| `debian/`, debian:13 | rustc-web 1.96.0 | debian:13 | lintian 2.122.0: the same W |
+| `debian/`, debian:testing | rustc 1.97.1 | debian:testing | lintian 2.142.0: the same W |
+| `debian/`, ubuntu:26.04 | rustc 1.93.1 | ubuntu:26.04 | lintian 2.129.0ubuntu2.1: the same W |
+| `debian/`, ubuntu:24.04 | none new enough | stops at Build-Depends | |
+
+The native builds depend on their own base's glibc, which is the argument for
+shipping the oldest one: `libc6 (>= 2.39)` built on Debian 13, `(>= 2.43)` on
+testing and Ubuntu 26.04, against `(>= 2.35)` on Debian 12. On Ubuntu the
+script names the base's series in the changelog instead of `unstable`, which
+Ubuntu's lintian rejects as an error.
+
+To reproduce, from the repository root:
+
+    packaging/fedora/build-in-container.sh 44      # or 43; dist/rpm/fc44/
+    packaging/debian/build-in-container.sh debian:12   # or debian:13,
+                                                   # debian:testing, ubuntu:26.04
+    packaging/smoke-test.sh fedora:44 dist/rpm/fc44/RPMS/x86_64/beisl-*.fc44.x86_64.rpm
+    packaging/smoke-test.sh ubuntu:24.04 dist/deb/debian-12/beisl_*_amd64.deb
+
+What the linters still report, and why it stays:
+
+- rpmlint `incorrect-fsf-address` (E): `LICENSE` carries the FSF's postal
+  address from before its 2024 move. A licence text is upstream's to update;
+  filtered in `fedora/beisl.rpmlintrc` so that anything new fails the build.
+- rpmlint `inconsistent-file-extension` on the vendor tarball (W): rpmlint
+  expects libmagic to say "ZSTD compressed", and it says "Zstandard". Filtered.
+- Fedora 43 only, rpmlint `files-duplicated-waste` (E, in debugsource) and
+  `files-duplicate` (W, the two identical icons): 43's rpm-build does not
+  hardlink identical files, 44's does. The debugsource duplicates are crates
+  vendored by both workspaces. Cosmetic, and gone with 43.
+- lintian `initial-upload-closes-no-bugs` (W): a first changelog entry for
+  Debian's archive closes an ITP bug, and this package is not in Debian. Gone
+  with the next changelog entry.
+- lintian, info only: `desktop-entry-lacks-keywords-entry` for two desktop
+  entries (upstream metadata, generated by docs-gen, not added here); the
+  bookworm lintian also lists `hardening-no-fortify-functions` (Rust code has
+  no `_FORTIFY_SOURCE` calls) and `spelling-error-in-binary` false positives.
+
+Not verified:
+
+- **COPR itself.** No COPR project exists yet. The container reproduces its
+  split (source rpm first, then BuildRequires only, offline, unprivileged),
+  not its infrastructure.
+- Fedora 45 and rawhide, and the openSUSE spec: not built here.
+- **A window.** No GUI was opened anywhere. The runtime-loaded libraries were
+  found by reading the binaries and checked to be installable, not watched
+  being loaded.
+- **A trace.** The test containers have no perf, so `beisl --check` reports
+  the record tier as none there; nothing recorded a game on these packages.
 
 ## The AppImage
 
