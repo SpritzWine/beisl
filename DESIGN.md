@@ -127,8 +127,15 @@ compares only what the counts support: no split under 20 samples in the frame,
 no rate unless 20 were seen or expected. Runs recorded before this carry no
 anchor and get no windows; re-analysis does not invent one.
 
-**What it does not do yet:** hot *symbols* per spike, and anything finer than the
-frame (no call graphs).
+**Any frame, on demand.** A click on the session window's frametime chart looks
+inside the worst frame behind that point (a point is its bucket's maximum): the
+same comparison, plus the functions hottest in the frame by sample count, from
+one `perf script` pass in the background. Counts, not shares: a frame holds a
+handful of samples. On vkcube under CPU hogs the starved frames held 0 or 1, and
+that is the answer: the game was not running.
+
+**What it does not do yet:** hot symbols stored per spike in the artifact, and
+anything finer than the frame (no call graphs).
 
 ## Symbols
 
@@ -189,7 +196,8 @@ while the game runs: state, elapsed time, warnings as they happen, including a
 compatibility wall. Afterwards it shows either **the ask** - "clean run, not
 analyzed yet", with Analyze and Discard, also for a trace stopped and saved
 mid-game - or **the results**: game, Wine flavor and tier with its caveat;
-frametime health and the worst spikes; the layer split and hot symbols; then
+frametime health and the worst spikes, any point on the chart clickable to look
+inside its frame; the layer split and hot symbols; then
 issues, each tied to its remedy, and the compatibility section when the logs
 showed a wall.
 
@@ -446,8 +454,9 @@ data that work needs - and a trace nobody can read is a trace nobody fixes.
 - **Tighter perf scoping**: the game's process tree in its own cgroup instead of
   system-wide sampling plus filtering. Call graphs are not recorded either.
 - **Spike correlation, the rest of it**: which symbols were hot during a given
-  hitch (the layer split per spike is done), and a named, likely cause per spike
-  on top of it. Design in the vault: "Stutter-Cause Hypothesis - Fault Harness
+  hitch in the artifact, report and MCP (the layer split per spike is done, and
+  the session window looks up any frame's hot symbols on demand), and a named,
+  likely cause per spike on top of it. Design in the vault: "Stutter-Cause Hypothesis - Fault Harness
   and Feature Vector".
 - **In degraded mode a stop signal to the game ends the recording**: perf, as the
   game's parent, takes the SIGCHLD that a SIGSTOP raises as its workload exiting

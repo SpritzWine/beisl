@@ -24,7 +24,7 @@ use cosmic::iced::{Length, Subscription};
 use cosmic::widget;
 use cosmic::{Application, Element};
 
-use artifact::{TraceArtifact, SCHEMA_VERSION};
+use artifact::{FrameAnalysis, TimelineSpan, TraceArtifact, SCHEMA_VERSION};
 use preflight::debuginfo::{debuginfo_role_for_module, fetch_urls};
 use preflight::{detect_distro, detect_system_kind, fix_command, Config, DumpAccessPolicy, Fix};
 use session::{Session, State};
@@ -45,6 +45,9 @@ pub enum Msg {
     /// `Analyze`; a failed retry leaves the artifact already on screen untouched (see
     /// `poll_analyze`'s error arm — it never clears `self.artifact`).
     Reanalyze,
+    /// Results view: a point on the frametime chart was clicked (its timeline index). Look
+    /// inside the worst frame behind it, in the background like Analyze.
+    PickFrame(usize),
     /// The ask: throw the trace away — a two-step, since it deletes the run dir.
     Discard,
     ConfirmDiscard,
@@ -76,6 +79,9 @@ struct Analyze {
     error: Option<String>,
 }
 
+/// A background `artifact::analyze_frame`: one `perf script` pass, like `Analyze`.
+type FrameJob = Arc<Mutex<Option<Result<FrameAnalysis, String>>>>;
+
 pub struct SessionApp {
     core: Core,
     dir: PathBuf,
@@ -91,6 +97,13 @@ pub struct SessionApp {
     raw_present: bool,
     analyzing: Option<Arc<Mutex<Analyze>>>,
     analyze_note: Option<String>,
+    /// The chart point the user picked (a timeline index), ringed on the chart.
+    picked: Option<usize>,
+    /// The frame analysis running, for the point it was started for. One at a time: a
+    /// click while it runs only moves `picked`, which starts once this one is done.
+    frame_job: Option<(usize, FrameJob)>,
+    /// The picked point's finished analysis, or why there is none.
+    frame_result: Option<Result<FrameAnalysis, String>>,
     /// Tracks the background debuginfo-install `pkexec` run(s), one row's or "install
     /// all"'s worth — same worker shape as `enabling` (a role's install is just another
     /// sequential pkexec argv list, see the generalized `spawn_enable`).
@@ -190,6 +203,9 @@ impl Application for SessionApp {
                 raw_present,
                 analyzing: None,
                 analyze_note: None,
+                picked: None,
+                frame_job: None,
+                frame_result: None,
                 installing: None,
                 install_note: None,
                 confirm_discard: false,
@@ -246,6 +262,14 @@ impl Application for SessionApp {
                 self.poll_enable();
                 self.poll_analyze();
                 self.poll_install();
+                self.poll_frame();
+            }
+            Msg::PickFrame(i) => {
+                self.picked = Some(i);
+                self.frame_result = None;
+                if self.frame_job.is_none() {
+                    self.start_frame(i);
+                }
             }
             Msg::EnableDumpCapture => {
                 if self.enabling.is_none() {
@@ -501,6 +525,10 @@ impl SessionApp {
                     }
                     None => {
                         self.artifact = load_artifact(&self.dir);
+                        // A picked frame's names predate this run's (say, debuginfo just
+                        // installed); drop it rather than show it beside the new ones.
+                        self.picked = None;
+                        self.frame_result = None;
                         self.analyze_note = None;
                         // A post-install re-analyze just delivered its result; a lingering
                         // "re-analyzing…" note would contradict the refreshed view.
@@ -558,6 +586,33 @@ impl SessionApp {
             self.session.record_mode.clone(),
             fetch_urls(&self.config),
         )
+    }
+
+    /// Start looking inside timeline point `i`, with the same debuginfod policy as
+    /// `start_analyze` so the frame's names match the artifact's.
+    fn start_frame(&mut self, i: usize) {
+        if let Some(span) = self.artifact.as_ref().and_then(|a| a.timeline_span(i)) {
+            let job = spawn_frame(self.dir.clone(), span, fetch_urls(&self.config));
+            self.frame_job = Some((i, job));
+        }
+    }
+
+    /// Poll the frame analysis. A result for a point no longer picked is dropped, and the
+    /// point picked meanwhile starts now.
+    fn poll_frame(&mut self) {
+        let Some((i, job)) = &self.frame_job else {
+            return;
+        };
+        let i = *i;
+        let Some(result) = job.lock().unwrap().take() else {
+            return;
+        };
+        self.frame_job = None;
+        match self.picked {
+            Some(p) if p == i => self.frame_result = Some(result),
+            Some(p) => self.start_frame(p),
+            None => {}
+        }
     }
 
     // -- Surface 1: live -----------------------------------------------------------------
@@ -895,8 +950,18 @@ impl SessionApp {
                     .iter()
                     .map(|s| (s.t_seconds, s.frametime_ms as f64))
                     .collect();
-                frametimes = frametimes
-                    .push(crate::chart::FrametimeChart::new(points, spikes).view::<Msg>());
+                let mut chart =
+                    crate::chart::FrametimeChart::new(points, spikes).selected(self.picked);
+                // Picking needs perf.data, and waits out a re-analyze, which would drop
+                // the pick when it lands anyway.
+                let pickable = self.raw_present && self.analyzing.is_none();
+                if pickable {
+                    chart = chart.on_pick(Msg::PickFrame);
+                }
+                frametimes = frametimes.push(chart.view());
+                if let Some(picked) = self.picked_frame(a, pickable) {
+                    frametimes = frametimes.push(picked);
+                }
             }
             if !a.spikes.is_empty() {
                 frametimes = frametimes.push(widget::text::caption("Worst hitches:"));
@@ -1120,6 +1185,60 @@ impl SessionApp {
         col.into()
     }
 
+    /// Below the chart: the picked frame against the second before it, worded like the
+    /// worst hitches, then the functions hottest inside it. Until something is picked, a
+    /// hint that the line can be clicked.
+    fn picked_frame(&self, a: &TraceArtifact, pickable: bool) -> Option<Element<'_, Msg>> {
+        let caption = |s: String| Some(widget::text::caption(s).into());
+        let Some(i) = self.picked else {
+            return pickable.then(|| {
+                widget::text::caption(
+                    "Click the line to look inside a frame: what the CPU did in it, \
+                     against the second before.",
+                )
+                .into()
+            });
+        };
+        let f = match &self.frame_result {
+            None => {
+                let t = a.timeline.get(i).map_or(0.0, |p| p.0);
+                return caption(format!(
+                    "Looking inside the worst frame from {t:.1}s... (a few seconds)"
+                ));
+            }
+            Some(Err(e)) => return caption(format!("Can't look inside this frame: {e}")),
+            Some(Ok(f)) => f,
+        };
+        let mut col = widget::Column::new()
+            .spacing(4)
+            .push(widget::text::caption(format!(
+                "Picked frame: {:.1} ms at {:.1}s: {}",
+                f.frametime_ms,
+                f.t_seconds,
+                f.summary()
+            )));
+        col = if f.window.samples == 0 {
+            col.push(widget::text::caption("perf caught no samples inside it."))
+        } else if f.hot_symbols.is_empty() {
+            col.push(widget::text::caption(format!(
+                "None of its {} samples could be named.",
+                f.window.samples
+            )))
+        } else {
+            col.push(widget::text::caption(format!(
+                "Hottest functions in it, by samples (of {}):",
+                f.window.samples
+            )))
+        };
+        for h in &f.hot_symbols {
+            col = col.push(widget::text::monotext(format!(
+                "{:>5}  {:<26}  {}",
+                h.samples, h.module, h.symbol
+            )));
+        }
+        Some(col.into())
+    }
+
     fn results_buttons(&self) -> Element<'_, Msg> {
         // The confirm pair replaces the normal buttons so the destructive action is a
         // deliberate second click — the same idiom as the ask and the library rows.
@@ -1203,6 +1322,18 @@ fn spawn_analyze(
         a.finished = true;
     });
     state
+}
+
+/// Run `artifact::analyze_frame` on a background thread; the UI polls the slot each Tick.
+fn spawn_frame(dir: PathBuf, span: TimelineSpan, debuginfod_urls: Option<String>) -> FrameJob {
+    let slot: FrameJob = Arc::new(Mutex::new(None));
+    let s2 = slot.clone();
+    std::thread::spawn(move || {
+        let result = artifact::analyze_frame(&dir, span, debuginfod_urls.as_deref())
+            .map_err(|e| e.to_string());
+        *s2.lock().unwrap() = Some(result);
+    });
+    slot
 }
 
 /// Run each `pkexec …` argv in `cmds` in turn on a background thread, so the polkit

@@ -137,25 +137,42 @@ impl<M> canvas::Program<M, Theme, Renderer> for Swatch {
 }
 
 /// The frametime timeline: one line series over session time, with the worst spikes marked.
-pub struct FrametimeChart {
+pub struct FrametimeChart<M> {
     cache: Cache,
     /// (t_seconds, frametime_ms), in order.
     points: Vec<(f64, f64)>,
     /// The flagged spikes as (t_seconds, frametime_ms) — drawn as markers on the line.
     spikes: Vec<(f64, f64)>,
+    /// The point the user picked, ringed on the line.
+    selected: Option<usize>,
+    /// What a click on the plot publishes, given the nearest point's index. Without it the
+    /// chart is read-only.
+    on_pick: Option<fn(usize) -> M>,
 }
 
-impl FrametimeChart {
+impl<M: 'static> FrametimeChart<M> {
     pub fn new(points: Vec<(f64, f64)>, spikes: Vec<(f64, f64)>) -> Self {
         Self {
             cache: Cache::new(),
             points,
             spikes,
+            selected: None,
+            on_pick: None,
         }
     }
 
+    pub fn selected(mut self, i: Option<usize>) -> Self {
+        self.selected = i;
+        self
+    }
+
+    pub fn on_pick(mut self, f: fn(usize) -> M) -> Self {
+        self.on_pick = Some(f);
+        self
+    }
+
     /// Wrap the chart in a fixed-height Canvas for the results column.
-    pub fn view<M: 'static>(self) -> Element<'static, M> {
+    pub fn view(self) -> Element<'static, M> {
         Canvas::new(self)
             .width(Length::Fill)
             .height(Length::Fixed(150.0))
@@ -170,7 +187,7 @@ pub struct HoverState {
     over: bool,
 }
 
-impl<M> canvas::Program<M, Theme, Renderer> for FrametimeChart {
+impl<M> canvas::Program<M, Theme, Renderer> for FrametimeChart<M> {
     type State = HoverState;
 
     fn update(
@@ -188,6 +205,12 @@ impl<M> canvas::Program<M, Theme, Renderer> for FrametimeChart {
                 state.over = over;
                 return Some(Action::request_redraw());
             }
+        }
+        // A click picks the point the hover readout is showing.
+        if let Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) = event {
+            let pick = self.on_pick?;
+            let i = nearest(&self.points, bounds.size(), cursor.position_in(bounds)?)?;
+            return Some(Action::publish(pick(i)).and_capture());
         }
         None
     }
@@ -208,6 +231,9 @@ impl<M> canvas::Program<M, Theme, Renderer> for FrametimeChart {
             let _ = render_timeline(backend, &self.points, &self.spikes);
         });
         let mut layers = vec![geometry];
+        if let Some(sel) = self.selection_overlay(renderer, bounds.size()) {
+            layers.push(sel);
+        }
         if let Some(pos) = cursor.position_in(bounds) {
             if let Some(overlay) = self.hover_overlay(renderer, bounds.size(), pos) {
                 layers.push(overlay);
@@ -223,31 +249,52 @@ impl<M> canvas::Program<M, Theme, Renderer> for FrametimeChart {
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
         match cursor.position_in(bounds) {
-            Some(pos) if plot_rect(bounds.size()).contains(pos) => mouse::Interaction::Crosshair,
+            Some(pos) if plot_rect(bounds.size()).contains(pos) => {
+                if self.on_pick.is_some() {
+                    mouse::Interaction::Pointer
+                } else {
+                    mouse::Interaction::Crosshair
+                }
+            }
             _ => mouse::Interaction::default(),
         }
     }
 }
 
-impl FrametimeChart {
+impl<M> FrametimeChart<M> {
+    /// The picked point: a ring around its dot and a faint line down to the axis, in the
+    /// game layer's amber so it reads apart from the blue hover dot and the red spikes.
+    fn selection_overlay(&self, renderer: &Renderer, size: Size) -> Option<Geometry> {
+        let &pt = self.points.get(self.selected?)?;
+        let plot = plot_rect(size);
+        let p = to_px(plot, axis_ranges(&self.points), pt);
+        let amber = Color::from_rgb8(0xe0, 0xa0, 0x30);
+        let mut frame = Frame::new(renderer, size);
+        frame.stroke(
+            &Path::line(Point::new(p.x, p.y), Point::new(p.x, plot.y + plot.height)),
+            Stroke {
+                style: stroke::Style::Solid(Color { a: 0.45, ..amber }),
+                width: 1.5,
+                ..Stroke::default()
+            },
+        );
+        frame.stroke(
+            &Path::circle(p, 6.0),
+            Stroke {
+                style: stroke::Style::Solid(amber),
+                width: 2.0,
+                ..Stroke::default()
+            },
+        );
+        Some(frame.into_geometry())
+    }
+
     /// The hover readout: a hairline through the nearest sample, a dot on the line, and a
     /// small card with the value — "38.2 ms / at 12.6 s", the project page's tooltip.
     fn hover_overlay(&self, renderer: &Renderer, size: Size, pos: Point) -> Option<Geometry> {
         let plot = plot_rect(size);
-        if self.points.is_empty() || !plot.contains(pos) {
-            return None;
-        }
-        let (x_max, y_max) = axis_ranges(&self.points);
-
-        // Cursor x → time, then snap to the nearest sample (the timeline is pre-downsampled
-        // to ~240 points, so a linear scan is nothing).
-        let t = ((pos.x - plot.x) / plot.width) as f64 * x_max;
-        let &(pt, pms) = self
-            .points
-            .iter()
-            .min_by(|a, b| (a.0 - t).abs().total_cmp(&(b.0 - t).abs()))?;
-        let px = plot.x + ((pt / x_max) as f32) * plot.width;
-        let py = plot.y + plot.height - ((pms / y_max) as f32) * plot.height;
+        let (pt, pms) = self.points[nearest(&self.points, size, pos)?];
+        let Point { x: px, y: py } = to_px(plot, axis_ranges(&self.points), (pt, pms));
 
         let mut frame = Frame::new(renderer, size);
 
@@ -328,6 +375,26 @@ fn axis_ranges(points: &[(f64, f64)]) -> (f64, f64) {
     let x_max = points.last().map(|p| p.0).unwrap_or(1.0).max(1.0);
     let y_max = points.iter().map(|p| p.1).fold(1.0_f64, f64::max).max(1.0) * 1.15;
     (x_max, y_max)
+}
+
+/// Where a data point lands in the canvas, by the mapping plotters draws with.
+fn to_px(plot: Rectangle, (x_max, y_max): (f64, f64), (t, ms): (f64, f64)) -> Point {
+    Point::new(
+        plot.x + ((t / x_max) as f32) * plot.width,
+        plot.y + plot.height - ((ms / y_max) as f32) * plot.height,
+    )
+}
+
+/// The point nearest the cursor's time, when the cursor is over the plot: the one the
+/// hover readout shows and a click picks. The timeline is pre-downsampled to ~240 points,
+/// so a linear scan is nothing.
+fn nearest(points: &[(f64, f64)], size: Size, pos: Point) -> Option<usize> {
+    let plot = plot_rect(size);
+    if !plot.contains(pos) {
+        return None;
+    }
+    let t = ((pos.x - plot.x) / plot.width) as f64 * axis_ranges(points).0;
+    (0..points.len()).min_by(|&a, &b| (points[a].0 - t).abs().total_cmp(&(points[b].0 - t).abs()))
 }
 
 /// Build the timeline into a plotters drawing area over our Frame backend.
@@ -565,5 +632,29 @@ impl DrawingBackend for FrameBackend<'_> {
         // size. Good enough for axis-label layout, which only needs rough extents.
         let s = style.size();
         Ok(((text.len() as f64 * s * 0.6).ceil() as u32, s.ceil() as u32))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_click_picks_the_nearest_point_inside_the_plot() {
+        let points = [(0.0, 16.0), (1.0, 16.0), (2.0, 90.0), (4.0, 16.0)];
+        let size = Size::new(440.0, 150.0);
+        let plot = plot_rect(size);
+        let at = |t: f64| Point::new(plot.x + (t / 4.0) as f32 * plot.width, plot.y + 10.0);
+        assert_eq!(nearest(&points, size, at(0.0)), Some(0));
+        assert_eq!(nearest(&points, size, at(2.4)), Some(2));
+        assert_eq!(nearest(&points, size, at(3.2)), Some(3));
+        assert_eq!(nearest(&points, size, at(3.99)), Some(3));
+        // The axis labels and margins pick nothing, and neither does an empty chart.
+        let left_of_plot = Point::new(plot.x - 5.0, plot.y + 10.0);
+        assert_eq!(nearest(&points, size, left_of_plot), None);
+        assert_eq!(nearest(&[], size, at(1.0)), None);
+        // The ring goes where the line put the dot.
+        let p = to_px(plot, axis_ranges(&points), points[2]);
+        assert!((p.x - at(2.0).x).abs() < 0.01, "{p:?}");
     }
 }
