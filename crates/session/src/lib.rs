@@ -234,6 +234,8 @@ impl Session {
 /// wrapper and the GUI — the library is the same bridge, across time instead of live.
 pub mod library {
     use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
 
     use serde::{Deserialize, Serialize};
 
@@ -452,7 +454,38 @@ pub mod library {
     /// Linux-only, which is fine — beisl only runs on Linux. `None` on any failure
     /// (missing/unreadable file, no `btime` line, unparseable value): the caller's
     /// fallback is "boot time unknown", never a guess.
+    ///
+    /// Cached for [`BOOT_TIME_TTL`]: the Traces page asks per row on every render, each
+    /// read a procfs walk over every CPU. Not for the whole process: btime is derived on
+    /// each read (wall clock minus uptime) and moves when the wall clock is stepped, say
+    /// NTP correcting a local-time hardware clock after boot, and a long-lived reader
+    /// (beisl-mcp, the Traces page) that cached it before the step would date this boot's
+    /// runs before it and call them dead.
     fn boot_time() -> Option<u64> {
+        static CACHE: Mutex<Option<(Instant, Option<u64>)>> = Mutex::new(None);
+        cached_boot_time(&CACHE, Instant::now(), read_btime)
+    }
+
+    const BOOT_TIME_TTL: Duration = Duration::from_secs(1);
+
+    /// [`boot_time`]'s cache, with the clock and the read injectable for tests.
+    pub(crate) fn cached_boot_time(
+        cache: &Mutex<Option<(Instant, Option<u64>)>>,
+        now: Instant,
+        read: impl FnOnce() -> Option<u64>,
+    ) -> Option<u64> {
+        let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+        match *c {
+            Some((at, v)) if now.saturating_duration_since(at) < BOOT_TIME_TTL => v,
+            _ => {
+                let v = read();
+                *c = Some((now, v));
+                v
+            }
+        }
+    }
+
+    pub(crate) fn read_btime() -> Option<u64> {
         std::fs::read_to_string("/proc/stat")
             .ok()?
             .lines()
@@ -623,6 +656,57 @@ pub mod library {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn btime_reads_this_boots_start() {
+        let boot = library::read_btime().expect("/proc/stat carries btime on Linux");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(boot > 0 && boot <= now, "btime {boot} vs now {now}");
+    }
+
+    #[test]
+    fn boot_time_is_reread_once_its_second_is_up() {
+        use std::cell::Cell;
+        use std::sync::Mutex;
+        use std::time::{Duration, Instant};
+        let cache = Mutex::new(None);
+        let reads = Cell::new(0);
+        let read = |v| {
+            reads.set(reads.get() + 1);
+            v
+        };
+        let t0 = Instant::now();
+        let at = |ms| t0 + Duration::from_millis(ms);
+        assert_eq!(
+            library::cached_boot_time(&cache, at(0), || read(Some(100))),
+            Some(100)
+        );
+        // Within the second: the cached value, not a fresh read (even a changed one).
+        assert_eq!(
+            library::cached_boot_time(&cache, at(900), || read(Some(200))),
+            Some(100)
+        );
+        assert_eq!(reads.get(), 1);
+        // Past it: a clock step since is picked up.
+        assert_eq!(
+            library::cached_boot_time(&cache, at(1000), || read(Some(200))),
+            Some(200)
+        );
+        assert_eq!(reads.get(), 2);
+        // A failed read is cached as briefly as a good one.
+        assert_eq!(
+            library::cached_boot_time(&cache, at(2500), || read(None)),
+            None
+        );
+        assert_eq!(
+            library::cached_boot_time(&cache, at(3600), || read(Some(300))),
+            Some(300)
+        );
+        assert_eq!(reads.get(), 4);
+    }
 
     #[test]
     fn round_trips_through_the_file() {
