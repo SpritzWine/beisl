@@ -1,0 +1,5 @@
+beisl (0.4.0-1) unstable; urgency=medium
+
+  * Initial package, built from upstream's make install.
+
+ -- fschaupp <spritzwine.absently488@passinbox.com>  Thu, 22 Oct 2026 10:44:25 +0200

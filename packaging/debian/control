@@ -1,0 +1,49 @@
+Source: beisl
+Section: devel
+Priority: optional
+Maintainer: fschaupp <spritzwine.absently488@passinbox.com>
+# rustc/cargo >= 1.93 (libcosmic's rust-version) is met by rustc-web and
+# cargo-web on Debian 12 and 13, which provide rustc and cargo at their version.
+Build-Depends: debhelper-compat (= 13),
+               cargo (>= 1.93),
+               rustc (>= 1.93),
+               pkgconf,
+               libxkbcommon-dev,
+               appstream,
+               desktop-file-utils,
+Standards-Version: 4.7.2
+Homepage: https://codeberg.org/SpritzWine/beisl
+Vcs-Browser: https://codeberg.org/SpritzWine/beisl
+Vcs-Git: https://codeberg.org/SpritzWine/beisl.git
+Rules-Requires-Root: no
+
+Package: beisl
+# The only architecture upstream builds and tests.
+Architecture: amd64
+Depends: ${misc:Depends},
+         ${shlibs:Depends},
+# perf does the CPU sampling; without it beisl still records frame times and
+# says so. The rest the GUI loads at runtime, invisible to dpkg-shlibdeps: a
+# display connection (Wayland, or X11) and the GPU renderer, which falls back
+# to software without Vulkan or EGL. All weak: the CLI needs none of them.
+Recommends: linux-perf | linux-tools-generic,
+            mangohud,
+            libwayland-client0,
+            libwayland-egl1,
+            libx11-6,
+            libx11-xcb1,
+            libxi6,
+            libxcb1,
+            libxkbcommon-x11-0,
+            libvulkan1,
+            libegl1,
+Description: find out what made a game stutter
+ Beisl records what a game was actually doing when it stuttered. It wraps a
+ launch, captures frame times alongside CPU samples, and attributes each slow
+ frame to a layer: the game itself, Wine, DXVK or vkd3d, the graphics driver,
+ or the kernel.
+ .
+ It is wine-agnostic - the same wrapper works under Steam with Proton, under
+ Lutris or Heroic, or on a bare wine prefix - and it reads the environment
+ rather than changing it. It also notices when a game cannot run at all, and
+ hands the evidence to you to review and file upstream yourself.

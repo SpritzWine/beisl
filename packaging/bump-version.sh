@@ -4,10 +4,10 @@
 #   packaging/bump-version.sh <version> "<one sentence for the software centre>"
 #
 # The version is written in more syntaxes than cargo's: Cargo.toml and both
-# lockfiles, the AppStream release list, the Arch PKGBUILD, the two rpm specs
-# and the Nix recipe. Tests fail on any of them left behind (assets and
-# docs-gen), but only after the tag is cut is too late to find out, so this
-# runs them at the end.
+# lockfiles, the AppStream release list, the Arch PKGBUILD, the two rpm specs,
+# the Debian changelog and the Nix recipe. Tests fail on any of them left
+# behind (assets and docs-gen), but only after the tag is cut is too late to
+# find out, so this runs them at the end.
 #
 # What it cannot do is listed when it finishes: the checksums that exist only
 # once the release is published, and the pages branch.
@@ -102,6 +102,17 @@ if ! grep -q " - $new-1\$" "$spec"; then
         { print }
         /^%changelog$/ { print h; print l; print "" }
     ' "$spec" > "$spec.new" && mv "$spec.new" "$spec"
+fi
+
+# dpkg reads the version from the top entry of the Debian changelog.
+log=packaging/debian/changelog
+if ! head -n1 "$log" | grep -qF "beisl ($new-1)"; then
+    who=$(sed -n 's/^# Maintainer: //p' packaging/arch/PKGBUILD)
+    {
+        printf 'beisl (%s-1) unstable; urgency=medium\n\n  * Update to %s.\n\n' "$new" "$new"
+        printf ' -- %s  %s\n\n' "$who" "$(LC_ALL=C date -R)"
+        cat "$log"
+    } > "$log.new" && mv "$log.new" "$log"
 fi
 
 # Both hashes are of artifacts this version has not published yet.

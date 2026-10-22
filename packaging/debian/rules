@@ -1,0 +1,42 @@
+#!/usr/bin/make -f
+# beisl as a .deb, built through upstream's Makefile like every other recipe
+# (see packaging/README.md); this file only maps debhelper's steps onto it.
+#
+# Not Debian-policy packaging: both cargo workspaces build from the crates
+# vendored over the source (the vendor tarball), not from Debian's
+# librust-*-dev packages, which have no counterpart for libcosmic's rev-pinned
+# git dependencies. The toolchain is the archive's own.
+
+export CARGO_NET_OFFLINE = true
+# A package build must not write to $HOME.
+export CARGO_HOME = $(CURDIR)/debian/cargo-home
+
+%:
+	dh $@
+
+override_dh_auto_clean:
+	$(MAKE) clean
+	rm -rf target crates/beisl-gui/target debian/cargo-home
+
+# dh_clean sweeps *.orig, and every vendored crate has a Cargo.toml.orig that
+# cargo checksums: without it the offline build refuses the crate.
+override_dh_clean:
+	dh_clean -X.orig
+
+override_dh_auto_build:
+	$(MAKE) build generate
+
+# Straight into the package, so its contents are upstream's install list, as
+# the rpm's %files -f is. debian/copyright carries the licence instead.
+override_dh_auto_install:
+	$(MAKE) install DESTDIR=$(CURDIR)/debian/beisl PREFIX=/usr
+	rm -r debian/beisl/usr/share/licenses
+
+override_dh_auto_test:
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	cargo test --workspace --locked
+	$(MAKE) check-packaging
+endif
+
+override_dh_installchangelogs:
+	dh_installchangelogs RELEASENOTES.md

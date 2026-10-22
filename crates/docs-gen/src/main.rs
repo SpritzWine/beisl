@@ -140,5 +140,11 @@ mod tests {
                 "{name} spec Version is not {v}"
             );
         }
+        // dpkg takes the version from the top entry only.
+        let debian = include_str!("../../../packaging/debian/changelog");
+        assert!(
+            debian.starts_with(&format!("beisl ({v}-")),
+            "debian/changelog's top entry is not {v}"
+        );
     }
 }
