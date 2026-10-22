@@ -179,6 +179,17 @@ counts a third until the user confirms it and never grades a layer, so a
 confident wrong assistant cannot teach the model. A sure verdict asks the user
 only to confirm; an unsure one lays out the candidates and their evidence.
 
+**Features have a provenance** (`hypothesis::groups`), and a comparison between two
+spikes is conditioned on it. The spike's own shape is the symptom and compares
+anywhere. The machine's sensors transfer across games, so a hardware cause
+learned on one game helps on the next; they are also the one group that never
+leaves the machine, should labels ever be shared. The game's own threads and
+rhythm are its habits: a labelled spike from another game counts a quarter on
+them, and the model shrinks them ten times harder. The environment (Wine, the
+translation layer, driver and kernel, their threads) is left out entirely
+between a native game and a Wine one. Every label stores its game and whether it
+ran through Wine; a training from before this is ignored until the next one.
+
 Measured on three synthetic runs labelled by what was injected (2026-10-22):
 with 13 labels both learned layers stay silent; with 20 the model is graded 14
 of 15 right against the rules' 6 and judges all five held-out spikes right,

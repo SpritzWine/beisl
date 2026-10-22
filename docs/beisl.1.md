@@ -68,7 +68,10 @@ really was. Without a spike number it lists the run's spikes: a sure verdict
 asks only for `--confirm`, an unsure one lays out its candidates and the
 measurements behind each. `<run>` is a run directory or its `run-<n>` name.
 Causes: shader-compile, cpu-contention, throttle, blocked, gpu-bound,
-memory-pressure, cpu-work. Labels stay on this machine, in
+memory-pressure, cpu-work. A label remembers its game and whether it ran through
+Wine: what it says about the machine counts for every game, what it says about
+the game counts little for others, and Wine's layers are never compared with a
+native game's. Labels stay on this machine, in
 ~/.local/share/beisl/labels.jsonl, the newest per spike winning. Learned
 answers appear only once they beat the rules on your own labels; `--stats`
 says which layers speak, on what record, and how many labels came since the

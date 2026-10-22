@@ -30,8 +30,8 @@ use cosmic::{Application, Element};
 use artifact::{FrameAnalysis, TimelineSpan, TraceArtifact, SCHEMA_VERSION};
 use hypothesis::learn::Score;
 use hypothesis::{
-    Candidate, Cause, Features, Gate, Judge, Label, LabelSource, LabelStore, ModelStore, Review,
-    Verdict,
+    Candidate, Cause, Context, Features, Gate, Judge, Label, LabelSource, LabelStore, ModelStore,
+    Review, Verdict,
 };
 use preflight::debuginfo::{debuginfo_role_for_module, fetch_urls};
 use preflight::{detect_distro, detect_system_kind, fix_command, Config, DumpAccessPolicy, Fix};
@@ -729,6 +729,14 @@ impl SessionApp {
         Some(row.into())
     }
 
+    /// The run's game and stack, which the judge compares spikes in.
+    fn context(&self) -> Context {
+        self.artifact
+            .as_ref()
+            .map(TraceArtifact::context)
+            .unwrap_or_default()
+    }
+
     /// The run's name as labels key it: the run dir's name, as `beisl label` and beisl-mcp
     /// write it.
     fn run_name(&self) -> String {
@@ -760,7 +768,8 @@ impl SessionApp {
         let Some((t, ms, features)) = self.subject(key) else {
             return;
         };
-        let label = user_label(&self.run_name(), t, ms, features, cause, now_unix());
+        let mut label = user_label(&self.run_name(), t, ms, features, cause, now_unix());
+        label.context = self.context();
         match self.labels_at.append(&label) {
             Ok(()) => {
                 self.choices.remove(&key);
@@ -780,7 +789,7 @@ impl SessionApp {
     /// them, then what the user can say about it (see `ask_of`). `None` when unmeasured.
     fn review(&self, t_seconds: f64, features: &Features) -> Option<Element<'_, Msg>> {
         let key = key_ms(t_seconds);
-        let verdict = (!features.is_empty()).then(|| self.judge.judge(features));
+        let verdict = (!features.is_empty()).then(|| self.judge.judge(features, &self.context()));
         let newest = newest_label(&self.labels, &self.run_name(), key);
         let ask = ask_of(verdict.as_ref(), newest, self.choices.get(&key).copied());
         let v = verdict?;
@@ -1710,6 +1719,7 @@ fn user_label(
         t_seconds,
         frametime_ms,
         features: features.clone(),
+        context: Context::default(),
         cause,
         source: LabelSource::User,
         confirmed: true,

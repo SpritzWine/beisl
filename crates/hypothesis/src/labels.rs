@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Cause, Features};
+use crate::{Cause, Context, Features};
 
 /// Who said what a spike was.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,6 +33,10 @@ pub struct Label {
     pub frametime_ms: f32,
     /// The spike's features when it was labelled, so a label outlives its trace.
     pub features: Features,
+    /// Its game and environment, which decide how it compares with other spikes.
+    /// Defaulted (unknown) on labels from before it existed.
+    #[serde(default)]
+    pub context: Context,
     pub cause: Cause,
     pub source: LabelSource,
     /// The user stood behind it: always true for their own, set for an agent's or the
@@ -141,6 +145,7 @@ pub(crate) mod tests {
             t_seconds: t,
             frametime_ms: 100.0,
             features: feats(&[("burst_1s", 0.0)]),
+            context: Context::default(),
             cause,
             source,
             confirmed: source == LabelSource::User,

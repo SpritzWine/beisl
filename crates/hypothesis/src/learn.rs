@@ -8,8 +8,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::groups::{self, FeatureGroup};
 use crate::rules;
-use crate::{Candidate, Cause, Features, Hypothesis, Label, Source, MIN_CONFIDENCE};
+use crate::{Candidate, Cause, Context, Features, Hypothesis, Label, Source, MIN_CONFIDENCE};
 
 /// Neighbours considered per vote.
 const K: usize = 5;
@@ -19,7 +20,8 @@ const NEAR: f32 = 1.5;
 const CLOSE: f32 = 0.75;
 /// Share of the weighted vote the winner needs.
 const AGREE: f32 = 0.8;
-/// Fewer shared features than this and two spikes are not comparable.
+/// Less shared feature weight than this (a feature at full weight counts 1) and two
+/// spikes are not comparable.
 const MIN_SHARED: usize = 3;
 /// The model's answer needs at least this probability.
 const MODEL_P: f32 = 0.6;
@@ -91,7 +93,7 @@ pub struct Snapshot {
 
 /// Bump when [`Snapshot`]'s shape changes: an older one is ignored, and the learned
 /// layers stay silent until the next training rather than misreading it.
-pub const SNAPSHOT_VERSION: u32 = 1;
+pub const SNAPSHOT_VERSION: u32 = 2;
 
 impl Learned {
     /// Labels known, nothing trained: the learned layers stay silent.
@@ -149,7 +151,8 @@ impl Learned {
                 gate.rules.answered += 1;
                 gate.rules.right += (ruled == Some(truth)) as usize;
             }
-            if let Some((cause, _, _)) = knn(&labels[i].features, &labels, &scaler, Some(i)) {
+            let (f, ctx) = (&labels[i].features, &labels[i].context);
+            if let Some((cause, _, _)) = knn(f, ctx, &labels, &scaler, Some(i)) {
                 gate.neighbours.answered += 1;
                 gate.neighbours.right += (cause == truth) as usize;
                 gate.neighbours.rules_right += (ruled == Some(truth)) as usize;
@@ -201,7 +204,12 @@ impl Learned {
 
     /// A learned answer, when a layer has earned the right and is sure; the rules'
     /// candidates lend their evidence for the same cause.
-    pub(crate) fn answer(&self, f: &Features, candidates: &[Candidate]) -> Option<Hypothesis> {
+    pub(crate) fn answer(
+        &self,
+        f: &Features,
+        ctx: &Context,
+        candidates: &[Candidate],
+    ) -> Option<Hypothesis> {
         let evidence_for = |cause: Cause| -> Vec<String> {
             candidates
                 .iter()
@@ -210,7 +218,7 @@ impl Learned {
                 .unwrap_or_default()
         };
         if self.gate.neighbours_on {
-            if let Some((cause, confidence, like)) = knn(f, &self.labels, &self.scaler, None) {
+            if let Some((cause, confidence, like)) = knn(f, ctx, &self.labels, &self.scaler, None) {
                 let mut evidence = vec![format!(
                     "close to {} spike(s) you labelled {}",
                     like.len(),
@@ -286,18 +294,24 @@ impl Scaler {
         Some(((v - mean) / sd).clamp(-5.0, 5.0))
     }
 
-    /// Root-mean-square standardised difference over the features both spikes have.
-    fn distance(&self, a: &Features, b: &Features) -> Option<f32> {
-        let (mut sum, mut n) = (0.0f32, 0usize);
+    /// Root-mean-square standardised difference over the features both spikes have,
+    /// each weighted by what its group means between their two contexts (a game's
+    /// habits count little across games, Wine's layers not at all against a native game).
+    fn distance(&self, a: &Features, ca: &Context, b: &Features, cb: &Context) -> Option<f32> {
+        let (mut sum, mut weight) = (0.0f32, 0.0f32);
         for (k, &va) in a {
+            let w = groups::group_of(k).map_or(1.0, |g| groups::weight(g, ca, cb));
+            if w == 0.0 {
+                continue;
+            }
             let (Some(&vb), Some(za)) = (b.get(k), self.z(k, va)) else {
                 continue;
             };
             let zb = self.z(k, vb)?;
-            sum += (za - zb).powi(2);
-            n += 1;
+            sum += w * (za - zb).powi(2);
+            weight += w;
         }
-        (n >= MIN_SHARED).then(|| (sum / n as f32).sqrt())
+        (weight >= MIN_SHARED as f32).then(|| (sum / weight).sqrt())
     }
 }
 
@@ -305,6 +319,7 @@ impl Scaler {
 /// enough of them, and agreeing. `skip` leaves one label out (for grading).
 fn knn(
     f: &Features,
+    ctx: &Context,
     labels: &[Label],
     scaler: &Scaler,
     skip: Option<usize>,
@@ -313,7 +328,7 @@ fn knn(
         .iter()
         .enumerate()
         .filter(|&(i, _)| Some(i) != skip)
-        .filter_map(|(_, l)| Some((scaler.distance(f, &l.features)?, l)))
+        .filter_map(|(_, l)| Some((scaler.distance(f, ctx, &l.features, &l.context)?, l)))
         .filter(|&(d, _)| d <= NEAR)
         .collect();
     near.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -387,6 +402,16 @@ impl Logistic {
         const EPOCHS: usize = 300;
         const RATE: f32 = 0.5;
         const L2: f32 = 1e-2;
+        // A game's habits get ten times the shrinkage: the model is shared by every game
+        // labelled, and should not hang a cause on one game's thread mix.
+        let l2: Vec<f32> = m
+            .keys
+            .iter()
+            .map(|k| match groups::group_of(k) {
+                Some(FeatureGroup::Game) => L2 * 10.0,
+                _ => L2,
+            })
+            .collect();
         for _ in 0..EPOCHS {
             let mut gw = vec![vec![0.0f32; m.keys.len()]; m.classes.len()];
             let mut gb = vec![0.0f32; m.classes.len()];
@@ -402,8 +427,8 @@ impl Logistic {
             }
             for c in 0..m.classes.len() {
                 m.b[c] -= RATE * gb[c] / total;
-                for (w, g) in m.w[c].iter_mut().zip(&gw[c]) {
-                    *w -= RATE * (g / total + L2 * *w);
+                for ((w, g), l2) in m.w[c].iter_mut().zip(&gw[c]).zip(&l2) {
+                    *w -= RATE * (g / total + l2 * *w);
                 }
             }
         }
@@ -452,7 +477,7 @@ mod tests {
                     ("ft_ratio_log", f[0]),
                     ("burst_1s", f[1]),
                     ("t_log_s", f[2]),
-                    ("thread_render_share", f[3]),
+                    ("cpu_mhz_delta", f[3]),
                 ]);
                 l
             })
@@ -472,9 +497,9 @@ mod tests {
             ("ft_ratio_log", 6.0),
             ("burst_1s", 3.0),
             ("t_log_s", 1.0),
-            ("thread_render_share", 0.9),
+            ("cpu_mhz_delta", 0.9),
         ]);
-        let v = judge.judge(&probe);
+        let v = judge.judge(&probe, &Context::default());
         let h = v.hypothesis.unwrap();
         assert_eq!(h.cause, Cause::Blocked);
         let Source::Neighbours { like } = &h.source else {
@@ -504,11 +529,12 @@ mod tests {
             ("ft_ratio_log", 4.0),
             ("burst_1s", 1.5),
             ("t_log_s", 3.0),
-            ("thread_render_share", 0.95),
+            ("cpu_mhz_delta", 0.95),
         ]);
         let scaler = &judge.learned.scaler;
-        assert!(knn(&between, &judge.learned.labels, scaler, None).is_none());
-        let h = judge.judge(&between).hypothesis.unwrap();
+        let ctx = Context::default();
+        assert!(knn(&between, &ctx, &judge.learned.labels, scaler, None).is_none());
+        let h = judge.judge(&between, &ctx).hypothesis.unwrap();
         assert_eq!((h.cause, h.source), (Cause::Blocked, Source::Model));
     }
 
@@ -537,9 +563,10 @@ mod tests {
             ("ft_ratio_log", 4.0),
             ("burst_1s", 1.5),
             ("t_log_s", 3.0),
-            ("thread_render_share", 0.95),
+            ("cpu_mhz_delta", 0.95),
         ]);
-        assert_eq!(loaded.judge(&probe), trained.judge(&probe));
+        let ctx = Context::default();
+        assert_eq!(loaded.judge(&probe, &ctx), trained.judge(&probe, &ctx));
 
         // A label after the training is counted as new, and already votes.
         let mut late = all.pop().unwrap();
@@ -554,6 +581,55 @@ mod tests {
         model.save(&stale).unwrap();
         assert!(model.load().is_none());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Two labelled spikes, one per cause, identical on the symptom and differing only on
+    /// a game feature and an environment feature: which one a probe resembles must depend
+    /// on whose game and stack it comes from.
+    #[test]
+    fn neighbours_weigh_game_and_environment_by_context() {
+        let feats = |game_thread: f32, wine: f32| {
+            crate::tests::feats(&[
+                ("burst_1s", 1.0),
+                ("ft_ratio_log", 3.0),
+                ("repeat_len_log", 0.5),
+                ("thread_render_share", game_thread),
+                ("layer_wine_delta", wine),
+            ])
+        };
+        let labelled = |cause, game: &str, maps_pe, game_thread, wine| {
+            let mut l = label("run-1", 0.0, cause, LabelSource::User);
+            l.features = feats(game_thread, wine);
+            l.context = Context::new(game, Some(maps_pe));
+            l
+        };
+        // Spread so every feature has a scale.
+        let labels = vec![
+            labelled(Cause::CpuWork, "Icarus", true, 0.9, 0.0),
+            labelled(Cause::Blocked, "Icarus", true, 0.1, 0.8),
+            labelled(Cause::CpuWork, "Icarus", true, 0.8, 0.1),
+            labelled(Cause::Blocked, "Icarus", true, 0.2, 0.9),
+        ];
+        let scaler = Scaler::fit(&labels);
+        let probe = feats(0.9, 0.85);
+        let d = |ctx: &Context, l: &Label| {
+            scaler
+                .distance(&probe, ctx, &l.features, &l.context)
+                .unwrap()
+        };
+        let same_game = Context::new("Icarus", Some(true));
+        let other_game = Context::new("Saints Row", Some(true));
+        let native = Context::new("vkcube", Some(false));
+        let (work, blocked) = (&labels[0], &labels[1]);
+        // The probe has the CpuWork spike's thread mix and the Blocked spike's Wine time.
+        // In its own game the thread mix counts fully: nearest is CpuWork.
+        assert!(d(&same_game, work) < d(&same_game, blocked));
+        // From another game the thread mix fades to a quarter and the Wine layer decides.
+        assert!(d(&other_game, blocked) < d(&other_game, work));
+        // A native game is not compared on Wine's layer at all: against the CpuWork
+        // spike only identical features remain.
+        assert_eq!(d(&native, work), 0.0);
+        assert!(d(&native, blocked) > 0.0);
     }
 
     #[test]

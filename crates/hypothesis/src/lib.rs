@@ -22,10 +22,12 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+pub mod groups;
 pub mod labels;
 pub mod learn;
 mod rules;
 
+pub use groups::{Context, Env, FeatureGroup};
 pub use labels::{Label, LabelSource, LabelStore};
 pub use learn::{Gate, Snapshot};
 
@@ -270,7 +272,9 @@ impl Judge {
         &self.learned.gate
     }
 
-    pub fn judge(&self, f: &Features) -> Verdict {
+    /// `ctx` is the judged spike's game and environment: labelled spikes from another
+    /// game or another kind of stack weigh differently (see [`groups`]).
+    pub fn judge(&self, f: &Features, ctx: &Context) -> Verdict {
         let candidates = rules::candidates(f);
         let ruled = candidates
             .first()
@@ -281,7 +285,7 @@ impl Judge {
                 source: Source::Rules,
                 evidence: c.evidence.clone(),
             });
-        let hypothesis = self.learned.answer(f, &candidates).or(ruled);
+        let hypothesis = self.learned.answer(f, ctx, &candidates).or(ruled);
         let review = match &hypothesis {
             Some(h) if h.confidence >= CONFIRM_CONFIDENCE => Review::Confirm,
             _ => Review::Checklist,
@@ -339,17 +343,20 @@ pub(crate) mod tests {
     #[test]
     fn with_no_labels_the_rules_answer_and_unsure_asks_for_a_checklist() {
         let judge = Judge::rules_only();
-        let v = judge.judge(&feats(&[
-            ("game_rate_ratio", 0.0),
-            ("burst_1s", 0.0),
-            ("repeat_len_log", 0.0),
-        ]));
+        let v = judge.judge(
+            &feats(&[
+                ("game_rate_ratio", 0.0),
+                ("burst_1s", 0.0),
+                ("repeat_len_log", 0.0),
+            ]),
+            &Context::default(),
+        );
         let h = v.hypothesis.as_ref().unwrap();
         assert_eq!((h.cause, h.source.clone()), (Cause::Blocked, Source::Rules));
         assert!(h.confidence < CONFIRM_CONFIDENCE);
         assert_eq!(v.review, Review::Checklist);
         // Nothing measured, nothing said.
-        let v = judge.judge(&Features::new());
+        let v = judge.judge(&Features::new(), &Context::default());
         assert_eq!(v.hypothesis, None);
         assert!(v.line().contains("unsure"));
     }

@@ -109,7 +109,7 @@ fn list(dir: &Path, art: &TraceArtifact) -> ExitCode {
             out!("    not measured");
             continue;
         }
-        let v = judge.judge(&s.features);
+        let v = judge.judge(&s.features, &art.context());
         let ask = match v.review {
             Review::Confirm => "sure: confirm with --confirm",
             Review::Checklist => "unsure: which is it?",
@@ -163,7 +163,10 @@ fn record(dir: &Path, art: &TraceArtifact, i: usize, rest: &[String]) -> ExitCod
         .cloned()
         .unwrap_or_default();
     let cause = match rest.first().map(String::as_str) {
-        Some("--confirm") => match Judge::load_default().judge(&spike.features).hypothesis {
+        Some("--confirm") => match Judge::load_default()
+            .judge(&spike.features, &art.context())
+            .hypothesis
+        {
             Some(h) => h.cause,
             None => {
                 eprintln!(
@@ -190,6 +193,7 @@ fn record(dir: &Path, art: &TraceArtifact, i: usize, rest: &[String]) -> ExitCod
         t_seconds: spike.t_seconds,
         frametime_ms: spike.frametime_ms,
         features: spike.features.clone(),
+        context: art.context(),
         cause,
         source: LabelSource::User,
         confirmed: true,

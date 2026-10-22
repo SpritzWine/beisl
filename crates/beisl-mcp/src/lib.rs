@@ -503,11 +503,12 @@ impl Server {
             return Ok(text);
         };
         let judge = hypothesis::Judge::load(&self.labels(), &self.model());
+        let ctx = context_of(&art);
         let mut judged = false;
         if let Some(spikes) = art.get_mut("spikes").and_then(Value::as_array_mut) {
             for s in spikes {
                 let Some(f) = features_of(s) else { continue };
-                s["verdict"] = serde_json::to_value(judge.judge(&f)).unwrap_or(Value::Null);
+                s["verdict"] = serde_json::to_value(judge.judge(&f, &ctx)).unwrap_or(Value::Null);
                 judged = true;
             }
         }
@@ -550,6 +551,7 @@ impl Server {
             t_seconds: spike["t_seconds"].as_f64().unwrap_or_default(),
             frametime_ms: spike["frametime_ms"].as_f64().unwrap_or_default() as f32,
             features,
+            context: context_of(&art),
             cause,
             source: hypothesis::LabelSource::Agent,
             confirmed: false,
@@ -570,6 +572,14 @@ impl Server {
             cause.as_str()
         ))
     }
+}
+
+/// The run's game and stack, from the artifact's own fields (as `TraceArtifact::context`).
+fn context_of(art: &Value) -> hypothesis::Context {
+    hypothesis::Context::new(
+        art.get("game").and_then(Value::as_str).unwrap_or_default(),
+        art.get("game_maps_pe").and_then(Value::as_bool),
+    )
 }
 
 /// A spike's feature map, when it has one.

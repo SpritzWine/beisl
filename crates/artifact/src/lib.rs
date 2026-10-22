@@ -587,6 +587,12 @@ impl TraceArtifact {
         ])
     }
 
+    /// What the likely causes compare this run's spikes in: its game, and whether the
+    /// game ran through Wine (see `hypothesis::groups`).
+    pub fn context(&self) -> hypothesis::Context {
+        hypothesis::Context::new(&self.game, self.game_maps_pe)
+    }
+
     /// The stretch of the log behind timeline point `i`, to hand to [`analyze_frame`].
     pub fn timeline_span(&self, i: usize) -> Option<TimelineSpan> {
         timeline_span(&self.timeline, i)
@@ -738,7 +744,7 @@ impl TraceArtifact {
                     }
                     let _ = writeln!(o);
                     if !s.features.is_empty() {
-                        let v = judge.judge(&s.features);
+                        let v = judge.judge(&s.features, &self.context());
                         let _ = writeln!(o, "             {}", v.line());
                         if let Some(h) = &v.hypothesis {
                             for e in h.evidence.iter().take(2) {

@@ -268,6 +268,75 @@ mod tests {
         assert!(!f.contains_key("gpu_temp_delta"));
     }
 
+    /// The hypothesis crate weighs each feature by its group; one it cannot place would
+    /// be compared at full weight everywhere and could leave the machine if shared.
+    #[test]
+    fn every_feature_written_has_a_group() {
+        let fr = frames(&vec![16.0; 300]);
+        let mut v = [None; SENSORS.len()];
+        let mut w = [None; SENSORS.len()];
+        for c in 0..SENSORS.len() {
+            v[c] = Some(10.0);
+            w[c] = Some(20.0);
+        }
+        let rows = [
+            SensorRow {
+                frame: 0,
+                values: v,
+            },
+            SensorRow {
+                frame: 151,
+                values: w,
+            },
+        ];
+        let mut f = frame_features(&fr, 150, 33.0, &[], &rows, &[true; SENSORS.len()]);
+        let shares = |names: &[&str]| {
+            names
+                .iter()
+                .map(|n| (n.to_string(), 10.0, 5.0))
+                .collect::<Vec<_>>()
+        };
+        let window = SpikeWindow {
+            samples: 500,
+            baseline_samples: 500,
+            game_samples: 400,
+            baseline_game_samples: 400,
+            layers: shares(&["kernel", "driver", "dxvk/vkd3d", "wine", "game"])
+                .into_iter()
+                .map(|(layer, pct, baseline_pct)| WindowShare {
+                    layer,
+                    pct,
+                    baseline_pct,
+                })
+                .collect(),
+            threads: shares(&[
+                "shader-compile",
+                "render",
+                "cache-io",
+                "worker",
+                "audio",
+                "runtime",
+                "observer",
+                "other",
+            ])
+            .into_iter()
+            .map(|(class, pct, baseline_pct)| ThreadShare {
+                class,
+                pct,
+                baseline_pct,
+            })
+            .collect(),
+        };
+        window_features(&window, 0.1, &mut f);
+        assert!(f.len() > 40, "only {} features written", f.len());
+        for k in f.keys() {
+            assert!(
+                hypothesis::groups::group_of(k).is_some(),
+                "{k} has no group"
+            );
+        }
+    }
+
     #[test]
     fn window_features_follow_the_report_gates() {
         let w = SpikeWindow {
