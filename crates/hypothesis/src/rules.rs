@@ -41,6 +41,10 @@ pub(crate) fn candidates(f: &Features) -> Vec<Candidate> {
         )
     });
     let burst = get("burst_1s");
+    // The machine's CPU load fell: nothing else took the game's time, it waited. Icarus
+    // froze in-world while Steam committed shader caches (2026-10-22): starved in
+    // bursts, as contention would be, but load fell from about 27% to 12%.
+    let idle = get("cpu_load_delta").filter(|&d| d <= -5.0);
     let repeats = get("repeat_len_log").map(|l| l.exp_m1().round());
 
     // By symbol first: it sees compilation on any thread, the game's own included.
@@ -102,7 +106,17 @@ pub(crate) fn candidates(f: &Features) -> Vec<Candidate> {
                 why.push(format!(
                     "{b:.0} more spikes within a second, of varying length"
                 ));
-                add(Cause::CpuContention, 0.55, why);
+                match idle {
+                    Some(d) => {
+                        why.push(format!(
+                            "the machine's CPU load fell {:.0} points: nothing else took \
+                             the time",
+                            -d
+                        ));
+                        add(Cause::Blocked, 0.55, why);
+                    }
+                    None => add(Cause::CpuContention, 0.55, why),
+                }
             }
             (Some(b), _) if b < 2.0 => {
                 why.push(if b < 0.5 {
@@ -285,6 +299,20 @@ mod tests {
         assert_eq!(candidates(&into_load)[0].cause, Cause::Loading);
         let closing = feats(&[("to_end_s", 0.4), ("t_log_s", 300.0)]);
         assert_eq!(candidates(&closing)[0].cause, Cause::Shutdown);
+    }
+
+    #[test]
+    fn starved_while_the_machine_idles_is_waiting_not_contention() {
+        let busy = feats(&[("game_rate_ratio", 0.1), ("burst_1s", 3.0)]);
+        assert_eq!(candidates(&busy)[0].cause, Cause::CpuContention);
+        let idle = feats(&[
+            ("game_rate_ratio", 0.1),
+            ("burst_1s", 3.0),
+            ("cpu_load_delta", -12.0),
+        ]);
+        let c = candidates(&idle);
+        assert_eq!(c[0].cause, Cause::Blocked);
+        assert!(!c.iter().any(|x| x.cause == Cause::CpuContention));
     }
 
     #[test]

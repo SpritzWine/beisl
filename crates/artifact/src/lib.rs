@@ -1524,7 +1524,8 @@ fn kept_frames(path: &Path, uptime_end_s: Option<f64>) -> Option<KeptFrames> {
 /// the new-swapchain row is dropped as uptime, and summing put every later frame 0.17 s
 /// early on a real CarX trace (2026-10-22). Left summed unless every row has `elapsed`,
 /// it never runs backwards, and it spans at least half the frames' own time, so a column
-/// in other units or a placeholder can't move anything.
+/// in other units or a placeholder can't move anything. A label finds its spike by this
+/// position, to the millisecond: change the placement and older labels lose theirs.
 fn place_by_elapsed(frames: &mut [Frame], elapsed: &[Option<f64>]) {
     let Some(el) = elapsed.iter().copied().collect::<Option<Vec<f64>>>() else {
         return;
