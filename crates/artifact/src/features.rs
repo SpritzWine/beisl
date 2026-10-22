@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::{Frame, SensorRow, SpikeWindow, BASELINE_S, MIN_SPLIT_SAMPLES, SENSORS};
+use crate::{Frame, KeptFrames, SensorRow, SpikeWindow, BASELINE_S, MIN_SPLIT_SAMPLES, SENSORS};
 
 pub type Features = BTreeMap<String, f32>;
 
@@ -23,22 +23,39 @@ const SENSOR_LAG_S: f64 = 0.6;
 const SINCE_CAP_S: f32 = 60.0;
 const LOG_TIME_CAP_S: f32 = 600.0;
 
-/// Shape and sensor features of `frames[i]`, from the CSV alone. `spike_lengths` holds
-/// every frame of the run at or over the spike threshold, sorted, for the repetition
-/// count.
-pub(crate) fn frame_features(
-    frames: &[Frame],
-    i: usize,
-    threshold: f32,
-    spike_lengths: &[f32],
-    sensors: &[SensorRow],
-    live: &[bool],
-) -> Features {
+/// Shape, phase and sensor features of frame `i`, from the CSV alone.
+pub(crate) fn frame_features(kept: &KeptFrames, i: usize) -> Features {
+    let (frames, threshold, spike_lengths) = (&kept.frames, kept.threshold, &kept.spike_lengths);
     let mut out = Features::new();
     let f = &frames[i];
     let base_from = first_at_or_after(frames, f.t_s - BASELINE_S);
-    let local = median(frames[base_from..i].iter().map(|x| x.ms)).unwrap_or(f.ms);
-    let local = local.max(0.001);
+    let base = median(frames[base_from..i].iter().map(|x| x.ms));
+    let local = base.unwrap_or(f.ms).max(0.001);
+    // How the second before ran against the whole log: a loading screen runs at a few
+    // frames a second, and a 1.6 s frame there is a load step, not a hitch (Assetto
+    // Corsa, 2026-10-22: 40-350 times the run median). Absent with no second before.
+    if let Some(b) = base.filter(|_| kept.median_ms > 0.0) {
+        out.insert(
+            "base_level_log".into(),
+            (b.max(0.001) / kept.median_ms).ln(),
+        );
+    }
+    // How close to the end: a game's last frames are its shutdown.
+    let end = f.t_s + f.ms as f64 / 1000.0;
+    // And the second after: a load that starts from smooth play shows only there (Space
+    // Engineers 2, 2026-10-22: a 3.3 s frame, a 1.5 s one, then a run at 67 ms).
+    let after_to = first_at_or_after(frames, end + BASELINE_S);
+    let after = median(frames[(i + 1).min(after_to)..after_to].iter().map(|x| x.ms));
+    if let Some(a) = after.filter(|_| kept.median_ms > 0.0) {
+        out.insert(
+            "next_level_log".into(),
+            (a.max(0.001) / kept.median_ms).ln(),
+        );
+    }
+    out.insert(
+        "to_end_s".into(),
+        ((kept.logged_seconds - end).max(0.0) as f32).min(SINCE_CAP_S),
+    );
     // Logs, here and for the neighbours: a fast game's sub-millisecond frames put a
     // spike thousands of times over its baseline, a 60 fps one a few times.
     out.insert("ft_ratio_log".into(), (f.ms / local).ln());
@@ -69,7 +86,7 @@ pub(crate) fn frame_features(
     let same = count_within(spike_lengths, f.ms - tol, f.ms + tol).saturating_sub(1);
     out.insert("repeat_len_log".into(), (same as f32).ln_1p());
 
-    sensor_features(frames, i, base_from, sensors, live, &mut out);
+    sensor_features(frames, i, base_from, &kept.sensors, &kept.live, &mut out);
     out
 }
 
@@ -107,7 +124,12 @@ fn sensor_features(
                 .and_then(|r| r.values[c])
         };
         let base = mean_over(base_from, i).or_else(|| at(base_from));
-        let during = mean_over(i, during_to.max(i + 1)).or_else(|| at(i));
+        // The first reading taken after the spike: the row closing a long frame still
+        // carries the one from before it (CarX Street, 2026-10-22).
+        let during = sensors
+            .iter()
+            .find(|r| r.frame > i && r.frame < during_to.max(i + 2))
+            .and_then(|r| r.values[c]);
         let (Some(base), Some(during)) = (base, during) else {
             continue;
         };
@@ -152,13 +174,9 @@ pub(crate) fn window_features(w: &SpikeWindow, frame_s: f64, out: &mut Features)
             (t.pct - t.baseline_pct) / 100.0,
         );
     }
-    // Present with the thread split, behind the same gate.
-    if !w.threads.is_empty() {
-        out.insert("compile_share".into(), w.compile_pct / 100.0);
-        out.insert(
-            "compile_delta".into(),
-            (w.compile_pct - w.baseline_compile_pct) / 100.0,
-        );
+    if let Some((now, was)) = w.compile_pct.zip(w.baseline_compile_pct) {
+        out.insert("compile_share".into(), now / 100.0);
+        out.insert("compile_delta".into(), (now - was) / 100.0);
     }
 }
 
@@ -217,9 +235,8 @@ mod tests {
         let mut ms = vec![16.0; 100];
         ms.extend([160.0, 40.0]);
         ms.extend(vec![16.0; 20]);
-        let fr = frames(&ms);
-        let lengths = [40.0, 160.0];
-        let f = frame_features(&fr, 100, 33.0, &lengths, &[], &[]);
+        let kept = KeptFrames::new(frames(&ms), 0, vec![]);
+        let f = frame_features(&kept, 100);
         assert!((f["ft_ratio_log"] - 10.0f32.ln()).abs() < 1e-4);
         assert!(f["prev_ratio_log"].abs() < 1e-4);
         assert!((f["next_ratio_log"] - 2.5f32.ln()).abs() < 1e-4);
@@ -228,13 +245,32 @@ mod tests {
         assert_eq!(f["since_prev_spike_s"], SINCE_CAP_S);
         // No other spike of its length.
         assert_eq!(f["repeat_len_log"], 0.0);
+        // The seconds around it ran at the log's pace.
+        assert!(f["base_level_log"].abs() < 1e-4 && f["next_level_log"].abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_load_from_smooth_play_shows_in_the_second_after() {
+        // The SE2 shape: smooth play, a 3.3 s frame, 1.5 s, then 67 ms frames.
+        let mut ms = vec![16.7; 200];
+        ms.extend([3300.0, 1500.0]);
+        ms.extend(vec![67.0; 30]);
+        let kept = KeptFrames::new(frames(&ms), 0, vec![]);
+        let into = frame_features(&kept, 200);
+        assert!(into["base_level_log"].abs() < 1e-4);
+        assert!((into["next_level_log"] - (1500.0f32 / 16.7).ln()).abs() < 1e-3);
+        let during = frame_features(&kept, 201);
+        assert!((during["next_level_log"] - (67.0f32 / 16.7).ln()).abs() < 1e-3);
+        // The last frame has no second after.
+        let last = frame_features(&kept, ms.len() - 1);
+        assert!(!last.contains_key("next_level_log"));
     }
 
     #[test]
     fn a_repeated_length_is_what_throttling_looks_like() {
-        let lengths = [97.5, 97.6, 196.7, 196.9, 207.0, 664.8];
-        let fr = frames(&[16.0, 97.5]);
-        let f = frame_features(&fr, 1, 33.0, &lengths, &[], &[]);
+        let mut kept = KeptFrames::new(frames(&[16.0, 97.5]), 0, vec![]);
+        kept.spike_lengths = vec![97.5, 97.6, 196.7, 196.9, 207.0, 664.8];
+        let f = frame_features(&kept, 1);
         // One of the five other spikes has its length.
         assert!((f["repeat_len_log"] - 1.0f32.ln_1p()).abs() < 1e-6);
     }
@@ -250,9 +286,14 @@ mod tests {
         let mut w = v;
         w[idx("cpu_mhz")] = Some(4000.0);
         w[idx("gpu_load")] = Some(90.0);
-        let rows = [
+        // MangoHud's placeholder row first (zeros before its first read), then real ones.
+        let rows = vec![
             SensorRow {
                 frame: 0,
+                values: [Some(0.0); SENSORS.len()],
+            },
+            SensorRow {
+                frame: 1,
                 values: v,
             },
             SensorRow {
@@ -260,10 +301,8 @@ mod tests {
                 values: w,
             },
         ];
-        let mut live = [false; SENSORS.len()];
-        live[idx("cpu_mhz")] = true;
-        live[idx("gpu_load")] = true;
-        let f = frame_features(&fr, 100, 33.0, &[], &rows, &live);
+        let kept = KeptFrames::new(fr, 0, rows);
+        let f = frame_features(&kept, 100);
         assert!(
             (f["cpu_mhz_delta"] + 0.2).abs() < 1e-6,
             "relative for clocks"
@@ -287,9 +326,13 @@ mod tests {
             v[c] = Some(10.0);
             w[c] = Some(20.0);
         }
-        let rows = [
+        let rows = vec![
             SensorRow {
                 frame: 0,
+                values: [Some(0.0); SENSORS.len()],
+            },
+            SensorRow {
+                frame: 1,
                 values: v,
             },
             SensorRow {
@@ -297,7 +340,8 @@ mod tests {
                 values: w,
             },
         ];
-        let mut f = frame_features(&fr, 150, 33.0, &[], &rows, &[true; SENSORS.len()]);
+        let kept = KeptFrames::new(fr, 0, rows);
+        let mut f = frame_features(&kept, 150);
         let shares = |names: &[&str]| {
             names
                 .iter()
@@ -334,8 +378,8 @@ mod tests {
                 baseline_pct,
             })
             .collect(),
-            compile_pct: 30.0,
-            baseline_compile_pct: 2.0,
+            compile_pct: Some(30.0),
+            baseline_compile_pct: Some(2.0),
         };
         window_features(&window, 0.1, &mut f);
         assert!(f.len() > 40, "only {} features written", f.len());
@@ -364,8 +408,8 @@ mod tests {
                 pct: 70.0,
                 baseline_pct: 5.0,
             }],
-            compile_pct: 0.0,
-            baseline_compile_pct: 0.0,
+            compile_pct: None,
+            baseline_compile_pct: None,
         };
         let mut f = Features::new();
         window_features(&w, 0.05, &mut f);

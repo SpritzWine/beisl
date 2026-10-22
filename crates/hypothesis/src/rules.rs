@@ -104,8 +104,12 @@ pub(crate) fn candidates(f: &Features) -> Vec<Candidate> {
                 ));
                 add(Cause::CpuContention, 0.55, why);
             }
-            (Some(b), _) if b < 0.5 => {
-                why.push("no other spike within a second: one isolated stall".to_string());
+            (Some(b), _) if b < 2.0 => {
+                why.push(if b < 0.5 {
+                    "no other spike within a second: one isolated stall".to_string()
+                } else {
+                    "a silent frame with one neighbouring spike".to_string()
+                });
                 add(Cause::Blocked, 0.55, why);
             }
             _ => {}
@@ -121,19 +125,62 @@ pub(crate) fn candidates(f: &Features) -> Vec<Candidate> {
         }
     }
 
-    let paging = ["swap_used_delta", "ram_used_delta"]
-        .into_iter()
-        .filter_map(|k| get(k).filter(|&d| d >= 0.05).map(|d| (k, d)))
-        .map(|(k, d)| {
-            format!(
-                "{} grew {:.0}%",
-                k.trim_end_matches("_delta").replace('_', " "),
-                d * 100.0
-            )
-        })
-        .collect::<Vec<_>>();
-    if !paging.is_empty() {
-        add(Cause::MemoryPressure, 0.5, paging);
+    // Swap growth, not RAM growth: a game loading its next level fills RAM with nothing
+    // under pressure (two real traces, about 20 GB free, 2026-10-22).
+    if let Some(d) = get("swap_used_delta").filter(|&d| d >= 0.05) {
+        add(
+            Cause::MemoryPressure,
+            0.5,
+            vec![format!("swap use grew {:.0}%", d * 100.0)],
+        );
+    }
+
+    // Not hitches: a loading screen, the first seconds of rendering, the last ones.
+    if let Some(l) = get("base_level_log").filter(|&l| l >= 4.0f32.ln()) {
+        add(
+            Cause::Loading,
+            0.65,
+            vec![format!(
+                "the second before already ran at {:.0} times the log's median frametime: \
+                 a loading screen",
+                l.exp()
+            )],
+        );
+    }
+    if let Some(l) = get("next_level_log").filter(|&l| l >= 4.0f32.ln()) {
+        add(
+            Cause::Loading,
+            0.6,
+            vec![format!(
+                "the second after still ran at {:.0} times the log's median frametime: \
+                 a loading screen",
+                l.exp()
+            )],
+        );
+    }
+    if let Some(t) = get("t_log_s").filter(|&t| t < 2.0) {
+        add(
+            Cause::Loading,
+            0.6,
+            vec![format!("{t:.1} s into the log: the game is still starting")],
+        );
+    }
+    if let Some(s) = get("thread_loading_share").filter(|&s| s >= 0.2) {
+        add(
+            Cause::Loading,
+            0.6,
+            vec![format!(
+                "the engine's loading threads took {:.0}% of the frame's samples",
+                s * 100.0
+            )],
+        );
+    }
+    if let Some(e) = get("to_end_s").filter(|&e| e < 2.0) {
+        add(
+            Cause::Shutdown,
+            0.6,
+            vec![format!("{e:.1} s before the log ends: the game is closing")],
+        );
     }
 
     // The game's own code has to be what grew: extra samples alone can be the driver's
@@ -217,6 +264,27 @@ mod tests {
         assert_eq!(c[0].cause, Cause::ShaderCompile);
         assert!(c[0].evidence[0].contains("94%"));
         assert!(!c.iter().any(|x| x.cause == Cause::CpuWork));
+    }
+
+    /// SE1 and CarX, 2026-10-22: RAM filling during a level load is not pressure, and
+    /// a frame between load steps is not a hitch.
+    #[test]
+    fn loading_is_loading_and_ram_alone_is_not_pressure() {
+        let load = feats(&[
+            ("ram_used_delta", 0.2),
+            ("base_level_log", 100.0f32.ln()),
+            ("t_log_s", 40.0),
+            ("to_end_s", 30.0),
+        ]);
+        let c = candidates(&load);
+        assert_eq!(c[0].cause, Cause::Loading);
+        assert!(!c.iter().any(|x| x.cause == Cause::MemoryPressure));
+        let swapping = feats(&[("swap_used_delta", 0.3)]);
+        assert_eq!(candidates(&swapping)[0].cause, Cause::MemoryPressure);
+        let into_load = feats(&[("base_level_log", 0.0), ("next_level_log", 90.0f32.ln())]);
+        assert_eq!(candidates(&into_load)[0].cause, Cause::Loading);
+        let closing = feats(&[("to_end_s", 0.4), ("t_log_s", 300.0)]);
+        assert_eq!(candidates(&closing)[0].cause, Cause::Shutdown);
     }
 
     #[test]

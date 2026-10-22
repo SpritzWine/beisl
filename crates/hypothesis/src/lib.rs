@@ -53,6 +53,16 @@ pub enum Cause {
     MemoryPressure,
     /// The game kept running and simply had more of its own work in that frame.
     CpuWork,
+    /// A managed runtime's garbage collector stopped the game's threads (.NET, Mono,
+    /// Unity, Java): the cores busy, none of it the game's own work.
+    GcPause,
+    /// A managed runtime compiling the game's code just in time: the CPU-side cousin of
+    /// shader compilation.
+    JitCompile,
+    /// Not a hitch: a loading screen or a scene switch, a frame between load steps.
+    Loading,
+    /// Not a hitch: the game closing down.
+    Shutdown,
     /// Can't tell from what was measured. A real answer: stored so the spike stops
     /// being asked, but never trained on and never grading a layer, because a guess
     /// teaches worse than nothing. Not in [`Cause::ALL`], which lists what a spike can
@@ -61,7 +71,7 @@ pub enum Cause {
 }
 
 impl Cause {
-    pub const ALL: [Cause; 7] = [
+    pub const ALL: [Cause; 11] = [
         Cause::ShaderCompile,
         Cause::CpuContention,
         Cause::Throttle,
@@ -69,6 +79,10 @@ impl Cause {
         Cause::GpuBound,
         Cause::MemoryPressure,
         Cause::CpuWork,
+        Cause::GcPause,
+        Cause::JitCompile,
+        Cause::Loading,
+        Cause::Shutdown,
     ];
 
     /// The stable name, as stored in labels and accepted on the command line.
@@ -81,6 +95,10 @@ impl Cause {
             Cause::GpuBound => "gpu-bound",
             Cause::MemoryPressure => "memory-pressure",
             Cause::CpuWork => "cpu-work",
+            Cause::GcPause => "gc-pause",
+            Cause::JitCompile => "jit-compile",
+            Cause::Loading => "loading",
+            Cause::Shutdown => "shutdown",
             Cause::Unknown => "unknown",
         }
     }
@@ -108,6 +126,10 @@ impl Cause {
             Cause::GpuBound => "the CPU waited on the GPU",
             Cause::MemoryPressure => "paging or swapping",
             Cause::CpuWork => "the game's own extra CPU work",
+            Cause::GcPause => "a garbage-collection pause",
+            Cause::JitCompile => "just-in-time compilation of the game's code",
+            Cause::Loading => "not a hitch: loading",
+            Cause::Shutdown => "not a hitch: the game closing",
             Cause::Unknown => "can't tell from what was measured",
         }
     }

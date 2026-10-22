@@ -69,8 +69,9 @@ really was. Without a spike number it lists the run's spikes: a sure verdict
 asks only for `--confirm`, an unsure one lays out its candidates and the
 measurements behind each. `<run>` is a run directory or its `run-<n>` name.
 Causes: shader-compile, cpu-contention, throttle, blocked, gpu-bound,
-memory-pressure, cpu-work; or `unknown`, an answer in its own right when the
-measurements cannot tell: stored so the spike stops asking, never trained on. A
+memory-pressure, cpu-work, gc-pause, jit-compile, loading, shutdown; or
+`unknown`, an answer in its own right when the measurements cannot tell: stored
+so the spike stops asking, never trained on. A
 label remembers its game, whether it ran through Wine, and the card: what it
 says about the CPU side counts for every game, the GPU's readings only on the
 same card, what it says about the game counts little for others, and Wine's

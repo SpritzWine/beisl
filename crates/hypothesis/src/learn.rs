@@ -93,7 +93,7 @@ pub struct Snapshot {
 
 /// Bump when [`Snapshot`]'s shape changes: an older one is ignored, and the learned
 /// layers stay silent until the next training rather than misreading it.
-pub const SNAPSHOT_VERSION: u32 = 3;
+pub const SNAPSHOT_VERSION: u32 = 4;
 
 impl Learned {
     /// Labels known, nothing trained: the learned layers stay silent.
@@ -484,7 +484,7 @@ mod tests {
                 l.features = crate::tests::feats(&[
                     ("ft_ratio_log", f[0]),
                     ("burst_1s", f[1]),
-                    ("t_log_s", f[2]),
+                    ("since_prev_spike_s", f[2]),
                     ("cpu_mhz_delta", f[3]),
                 ]);
                 l
@@ -504,7 +504,7 @@ mod tests {
         let probe = crate::tests::feats(&[
             ("ft_ratio_log", 6.0),
             ("burst_1s", 3.0),
-            ("t_log_s", 1.0),
+            ("since_prev_spike_s", 1.0),
             ("cpu_mhz_delta", 0.9),
         ]);
         let v = judge.judge(&probe, &Context::default());
@@ -536,7 +536,7 @@ mod tests {
         let between = crate::tests::feats(&[
             ("ft_ratio_log", 4.0),
             ("burst_1s", 1.5),
-            ("t_log_s", 3.0),
+            ("since_prev_spike_s", 3.0),
             ("cpu_mhz_delta", 0.95),
         ]);
         let scaler = &judge.learned.scaler;
@@ -570,7 +570,7 @@ mod tests {
         let probe = crate::tests::feats(&[
             ("ft_ratio_log", 4.0),
             ("burst_1s", 1.5),
-            ("t_log_s", 3.0),
+            ("since_prev_spike_s", 3.0),
             ("cpu_mhz_delta", 0.95),
         ]);
         let ctx = Context::default();
@@ -654,7 +654,7 @@ mod tests {
         let probe = crate::tests::feats(&[
             ("ft_ratio_log", 6.0),
             ("burst_1s", 3.0),
-            ("t_log_s", 1.0),
+            ("since_prev_spike_s", 1.0),
             ("cpu_mhz_delta", 0.9),
         ]);
         let v = judge.judge(&probe, &Context::default());

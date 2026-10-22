@@ -48,7 +48,7 @@ impl FeatureGroup {
 /// the artifact crate tests that every one it writes is.
 pub fn group_of(feature: &str) -> Option<FeatureGroup> {
     use FeatureGroup::*;
-    const SPIKE: [&str; 9] = [
+    const SPIKE: [&str; 12] = [
         "ft_ratio_log",
         "prev_ratio_log",
         "next_ratio_log",
@@ -58,6 +58,9 @@ pub fn group_of(feature: &str) -> Option<FeatureGroup> {
         "game_rate_ratio",
         "sample_rate_ratio",
         "t_log_s",
+        "to_end_s",
+        "base_level_log",
+        "next_level_log",
     ];
     if SPIKE.contains(&feature) {
         // t_log_s is how far into the session: loading at the start is the symptom's
@@ -77,7 +80,7 @@ pub fn group_of(feature: &str) -> Option<FeatureGroup> {
         .map(|(class, _)| class)
     {
         return match class {
-            "render" | "worker" | "audio" | "other" => Some(Game),
+            "render" | "worker" | "audio" | "loading" | "other" => Some(Game),
             "shader_compile" | "cache_io" | "runtime" | "observer" => Some(Environment),
             _ => None,
         };

@@ -162,7 +162,10 @@ in degraded mode: contention comes in bursts of irregular frames, a CPU quota in
 bursts of repeating length, a stopped process as isolated frames.
 
 `crates/hypothesis` turns that into a likely cause (shader-compile,
-cpu-contention, throttle, blocked, gpu-bound, memory-pressure, cpu-work) through
+cpu-contention, throttle, blocked, gpu-bound, memory-pressure, cpu-work, and
+four that labelling real traces asked for: gc-pause, jit-compile, loading,
+shutdown; rules exist for loading and shutdown only, the managed runtime's two
+are learned from labels) through
 three layers in turn: nearest neighbours over the spikes the user labelled, when
 close ones agree, saying which they resemble; a small logistic regression over
 all labels for the cases between; readable rules underneath, the only answer

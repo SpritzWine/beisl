@@ -69,13 +69,15 @@ pub struct SpikeWindow {
     #[serde(default)]
     pub threads: Vec<ThreadShare>,
     /// Share of the samples in a driver's shader compiler, in the frame and in the
-    /// second before, behind the same gate as `threads` (0 below it, and on artifacts
-    /// from before it). Caught by symbol, so compilation on the game's own threads
-    /// counts too.
+    /// second before, behind the same gate as `threads`. Caught by symbol, so
+    /// compilation on the game's own threads counts too. `None` below the gate, on
+    /// artifacts from before it, and when the run's driver resolved no symbols at all
+    /// (a stripped driver without debuginfo): there "no compiler" would only mean "no
+    /// names", and an Intel run read as never compiling (CarX Street, 2026-10-22).
     #[serde(default)]
-    pub compile_pct: f32,
+    pub compile_pct: Option<f32>,
     #[serde(default)]
-    pub baseline_compile_pct: f32,
+    pub baseline_compile_pct: Option<f32>,
 }
 
 impl Spike {
@@ -100,11 +102,9 @@ impl SpikeWindow {
                 l.layer, l.pct, l.baseline_pct
             ));
         }
-        if self.compile_pct - self.baseline_compile_pct >= THREAD_SHIFT_PCT {
-            parts.push(format!(
-                "shader compiler {:.0}% (was {:.0}%)",
-                self.compile_pct, self.baseline_compile_pct
-            ));
+        let compile = self.compile_pct.zip(self.baseline_compile_pct);
+        if let Some((now, was)) = compile.filter(|(n, w)| n - w >= THREAD_SHIFT_PCT) {
+            parts.push(format!("shader compiler {now:.0}% (was {was:.0}%)"));
         } else if let Some(t) = self
             .threads
             .iter()
@@ -1138,10 +1138,15 @@ fn spike_window(res: &Resolution, frame: Window, base: Window, n: usize) -> Opti
         v
     };
     let pct = |t: &WindowTally| 100.0 * t.compile as f32 / t.samples.max(1) as f32;
-    let (compile_pct, baseline_compile_pct) = if f.samples < MIN_SPLIT_SAMPLES {
-        (0.0, 0.0)
+    let driver_named = res
+        .layers
+        .iter()
+        .find(|l| l.layer == Layer::Driver)
+        .is_none_or(|l| l.named > 0);
+    let (compile_pct, baseline_compile_pct) = if f.samples < MIN_SPLIT_SAMPLES || !driver_named {
+        (None, None)
     } else {
-        (pct(f), pct(b))
+        (Some(pct(f)), Some(pct(b)))
     };
     Some(SpikeWindow {
         samples: f.samples,
@@ -1374,29 +1379,55 @@ pub(crate) struct SensorRow {
     pub(crate) values: [Option<f32>; SENSORS.len()],
 }
 
-struct KeptFrames {
-    frames: Vec<Frame>,
-    dropped: u64,
-    logged_seconds: f64,
-    sensors: Vec<SensorRow>,
-    /// Which sensor columns ever change in this CSV. A constant one says nothing about
-    /// any spike (an unread GPU logs its idle values throughout).
-    live: [bool; SENSORS.len()],
-    threshold: f32,
+pub(crate) struct KeptFrames {
+    pub(crate) frames: Vec<Frame>,
+    pub(crate) dropped: u64,
+    pub(crate) logged_seconds: f64,
+    pub(crate) sensors: Vec<SensorRow>,
+    /// Which sensor columns change in this CSV after the first read. A constant one says
+    /// nothing about any spike (an unread GPU logs its idle values throughout).
+    pub(crate) live: [bool; SENSORS.len()],
+    pub(crate) threshold: f32,
     /// Every frame at or over the threshold, sorted, for the repetition feature.
-    spike_lengths: Vec<f32>,
+    pub(crate) spike_lengths: Vec<f32>,
+    pub(crate) median_ms: f32,
 }
 
 impl KeptFrames {
+    /// From the kept frames and every sensor row as read. The first row is dropped:
+    /// MangoHud logs placeholders until its first sensor read (cpu_temp and cpu_power 0,
+    /// cpu_load the since-boot average), and a delta against them is noise, such as the
+    /// +95 C seen on a real startup frame (2026-10-22).
+    pub(crate) fn new(frames: Vec<Frame>, dropped: u64, mut sensors: Vec<SensorRow>) -> Self {
+        if !sensors.is_empty() {
+            sensors.remove(0);
+        }
+        let mut live = [false; SENSORS.len()];
+        for pair in sensors.windows(2) {
+            for (c, l) in live.iter_mut().enumerate() {
+                *l |= pair[0].values[c] != pair[1].values[c];
+            }
+        }
+        let threshold = spike_threshold(&frames);
+        let mut lengths: Vec<f32> = frames.iter().map(|f| f.ms).collect();
+        lengths.sort_by(|a, b| a.total_cmp(b));
+        let median_ms = lengths.get(lengths.len() / 2).copied().unwrap_or(0.0);
+        let spike_lengths = lengths.into_iter().filter(|&ms| ms >= threshold).collect();
+        let logged_seconds = frames.last().map_or(0.0, |f| f.t_s + f.ms as f64 / 1000.0);
+        KeptFrames {
+            frames,
+            dropped,
+            logged_seconds,
+            sensors,
+            live,
+            threshold,
+            spike_lengths,
+            median_ms,
+        }
+    }
+
     fn features_of(&self, i: usize) -> Features {
-        features::frame_features(
-            &self.frames,
-            i,
-            self.threshold,
-            &self.spike_lengths,
-            &self.sensors,
-            &self.live,
-        )
+        features::frame_features(self, i)
     }
 }
 
@@ -1452,19 +1483,14 @@ fn kept_frames(path: &Path, uptime_end_s: Option<f64>) -> Option<KeptFrames> {
 
     let mut frames: Vec<Frame> = Vec::new();
     let mut sensors: Vec<SensorRow> = Vec::new();
-    let mut live = [false; SENSORS.len()];
     let mut dropped: u64 = 0;
     let mut t = 0.0f64;
+    let mut kept_elapsed: Vec<Option<f64>> = Vec::new();
     for (ms, el, readings) in raw {
         // Readings count even on a dropped row: the sensors were still read then.
         match sensors.last() {
             Some(last) if last.values == readings => {}
-            last => {
-                if let Some(last) = last {
-                    for (c, l) in live.iter_mut().enumerate() {
-                        *l |= last.values[c] != readings[c];
-                    }
-                }
+            _ => {
                 sensors.push(SensorRow {
                     frame: frames.len(),
                     values: readings,
@@ -1478,6 +1504,7 @@ fn kept_frames(path: &Path, uptime_end_s: Option<f64>) -> Option<KeptFrames> {
             dropped += 1;
             continue;
         }
+        kept_elapsed.push(el);
         frames.push(Frame {
             t_s: t,
             ms,
@@ -1488,22 +1515,31 @@ fn kept_frames(path: &Path, uptime_end_s: Option<f64>) -> Option<KeptFrames> {
     if frames.is_empty() {
         return None;
     }
-    let threshold = spike_threshold(&frames);
-    let mut spike_lengths: Vec<f32> = frames
-        .iter()
-        .map(|f| f.ms)
-        .filter(|&ms| ms >= threshold)
-        .collect();
-    spike_lengths.sort_by(|a, b| a.total_cmp(b));
-    Some(KeptFrames {
-        frames,
-        dropped,
-        logged_seconds: t,
-        sensors,
-        live,
-        threshold,
-        spike_lengths,
-    })
+    place_by_elapsed(&mut frames, &kept_elapsed);
+    Some(KeptFrames::new(frames, dropped, sensors))
+}
+
+/// Move each frame's start from the running sum of frametimes to MangoHud's `elapsed`,
+/// zero still at the first kept frame. A dropped row's real time then still passes:
+/// the new-swapchain row is dropped as uptime, and summing put every later frame 0.17 s
+/// early on a real CarX trace (2026-10-22). Left summed unless every row has `elapsed`,
+/// it never runs backwards, and it spans at least half the frames' own time, so a column
+/// in other units or a placeholder can't move anything.
+fn place_by_elapsed(frames: &mut [Frame], elapsed: &[Option<f64>]) {
+    let Some(el) = elapsed.iter().copied().collect::<Option<Vec<f64>>>() else {
+        return;
+    };
+    let ordered = el.windows(2).all(|w| w[1] >= w[0]);
+    let span_s = (el[el.len() - 1] - el[0]) / 1e9;
+    let summed_s: f64 = frames[1..].iter().map(|f| f.ms as f64 / 1000.0).sum();
+    if !ordered || span_s < summed_s / 2.0 {
+        return;
+    }
+    // `elapsed` is written when a frame ends.
+    let origin_s = el[0] / 1e9 - frames[0].ms as f64 / 1000.0;
+    for (f, el) in frames.iter_mut().zip(el) {
+        f.t_s = el / 1e9 - origin_s - f.ms as f64 / 1000.0;
+    }
 }
 
 /// Cap the timeline at [`TIMELINE_POINTS`] for the chart. Buckets take the *max* frametime
@@ -1647,6 +1683,49 @@ mod tests {
             symbols: vec![],
             compile: 0,
         }
+    }
+
+    #[test]
+    fn a_dropped_rows_time_still_passes_on_the_timeline() {
+        // 16 ms frames, then MangoHud's new-swapchain row (uptime as its frametime, real
+        // span 159 ms by `elapsed`), then 16 ms again.
+        let csv = "os,cpu\nSteam,Ryzen\nfps,frametime,elapsed\n\
+                   60,16.0,16000000\n60,16.0,32000000\n0,99999999.0,191000000\n\
+                   60,16.0,207000000\n20,50.0,257000000\n";
+        let (stats, spikes, timeline) =
+            frames_from_csv_gated(&write_csv("swapchain", csv), None).unwrap();
+        assert_eq!(stats.dropped_rows, 1);
+        // The frame after the dropped row starts at 191 ms, not at 32 ms.
+        assert!((timeline[2].0 - 0.191).abs() < 1e-9, "{:?}", timeline);
+        assert!((spikes[0].t_seconds - 0.207).abs() < 1e-9);
+        assert!((stats.logged_seconds - 0.257).abs() < 1e-9);
+    }
+
+    #[test]
+    fn no_driver_symbols_means_the_compiler_share_is_unknown() {
+        let frame = Window {
+            start: 99.95,
+            end: 100.0,
+        };
+        let base = Window {
+            start: 98.95,
+            end: 99.95,
+        };
+        let windows = vec![
+            wtally(10, &[(Layer::Driver, 40)]),
+            wtally(400, &[(Layer::Driver, 400)]),
+        ];
+        let mut res = windowed(windows, (90.0, 110.0));
+        res.layers = vec![symbol_resolver::LayerTally {
+            layer: Layer::Driver,
+            samples: 440,
+            named: 0,
+        }];
+        let w = spike_window(&res, frame, base, 0).unwrap();
+        assert_eq!((w.compile_pct, w.baseline_compile_pct), (None, None));
+        res.layers[0].named = 12;
+        let w = spike_window(&res, frame, base, 0).unwrap();
+        assert_eq!(w.compile_pct, Some(0.0));
     }
 
     #[test]
@@ -2235,8 +2314,8 @@ mod tests {
                 baseline_pct: 22.0,
             }],
             threads: vec![],
-            compile_pct: 0.0,
-            baseline_compile_pct: 0.0,
+            compile_pct: None,
+            baseline_compile_pct: None,
         };
         a.spikes = vec![
             Spike {

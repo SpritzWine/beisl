@@ -99,6 +99,9 @@ pub enum ThreadClass {
     CacheIo,
     /// Engine job pools (Unreal, Unity, VRage, .NET).
     Worker,
+    /// An engine's asset loading: Unity's `Loading.Preload`/`Loading.AsyncRead` and
+    /// `AssetGarbageCollector`, Unreal's async loading and purge threads.
+    Loading,
     Audio,
     /// Wine and the runtime around it: wineserver, Wine's helper threads and services,
     /// pressure-vessel, Steam's launch wrapper.
@@ -116,6 +119,7 @@ impl ThreadClass {
             ThreadClass::Render => "render",
             ThreadClass::CacheIo => "cache-io",
             ThreadClass::Worker => "worker",
+            ThreadClass::Loading => "loading",
             ThreadClass::Audio => "audio",
             ThreadClass::Runtime => "runtime",
             ThreadClass::Observer => "observer",
@@ -135,6 +139,14 @@ pub fn thread_class(comm: &str) -> ThreadClass {
         ThreadClass::CacheIo
     } else if starts(&["dxvk-", "vkd3d", "renderthread", "rhithread"]) {
         ThreadClass::Render
+    } else if starts(&[
+        "loading.",
+        "assetgarbage",
+        "fasyncloading",
+        "fasyncpurge",
+        "asyncloading",
+    ]) {
+        ThreadClass::Loading
     } else if starts(&[
         "taskgraph",
         "poolthread",
@@ -168,7 +180,8 @@ pub fn thread_class(comm: &str) -> ThreadClass {
 }
 
 /// Whether a named sample sits in a GPU driver's shader compiler: Mesa's NIR passes and
-/// SPIR-V front end, RADV's ACO, Intel's backend, or LLVM (radeonsi, llvmpipe). Thread
+/// SPIR-V front end, RADV's ACO, Intel's backend and Mesa's register allocator, or LLVM
+/// (radeonsi, llvmpipe). Thread
 /// names cannot see this: vkd3d-proton compiles on the game's own threads, and DXVK's
 /// workers spend part of their time elsewhere. Found on a real Saints Row trace, where
 /// 92-96% of the game's samples in each stalled frame were `nir_*`/`aco::` on unnamed
@@ -183,6 +196,7 @@ pub fn is_shader_compiler(module: &str, symbol: &str) -> bool {
         || symbol.starts_with("aco_")
         || symbol.starts_with("brw_")
         || symbol.starts_with("elk_")
+        || symbol.starts_with("ra_")
 }
 
 /// Bucket a sample's DSO into a [`Layer`]. Ordered most-specific first and wine-agnostic:
@@ -997,6 +1011,7 @@ mod tests {
             ),
             ("libvulkan_radeon.so", "ac_nir_lower_ngg"),
             ("libvulkan_intel.so", "brw_compile_fs"),
+            ("libvulkan_intel.so", "ra_allocate"),
             ("libvulkan_intel.so", "vtn_handle_body_instruction"),
             ("libLLVM.so.19", "llvm::SelectionDAG::Combine"),
         ] {
@@ -1033,6 +1048,9 @@ mod tests {
             ("Job.Worker 3", Worker),
             ("VRageWorker 9", Worker),
             (".NET TP Worker", Worker),
+            ("Loading.AsyncRe", Loading),
+            ("AssetGarbageCol", Loading),
+            ("FAsyncPurge", Loading),
             ("audio_client_ma", Audio),
             ("FMOD stream thr", Audio),
             ("FAudio_AudioCli", Audio),
