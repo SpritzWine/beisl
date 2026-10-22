@@ -276,7 +276,14 @@ pub struct WindowTally {
     pub dominant_pid_samples: u64,
     /// Biggest first, ties in layer order, like [`Resolution::layers`].
     pub layers: Vec<LayerTally>,
+    /// The window's hottest named functions, aggregated and ordered like
+    /// [`Resolution::symbols`], at most [`WINDOW_SYMBOLS`].
+    pub symbols: Vec<SymbolCount>,
 }
+
+/// How many hot symbols a [`WindowTally`] keeps. A frame holds a handful of samples;
+/// past the first few the counts are ones.
+pub const WINDOW_SYMBOLS: usize = 10;
 
 /// Best-effort GPU vendor from a driver DSO basename — the Mesa ICDs/DRI and the vendor
 /// blobs all carry the vendor in their name, wherever the tree puts them. Used only for the
@@ -369,10 +376,7 @@ pub fn resolve_perf_data_with_debuginfod(
     // guards against).
     let mut pid_samples: HashMap<i32, u64> = HashMap::new();
     let mut pid_pe_paths: HashMap<i32, Vec<String>> = HashMap::new();
-    // Per window: layer -> (samples, named), and samples per pid (the dominant pid is
-    // only known once every sample is in).
-    let mut win_layers: Vec<HashMap<Layer, (u64, u64)>> = vec![HashMap::new(); windows.len()];
-    let mut win_pids: Vec<HashMap<i32, u64>> = vec![HashMap::new(); windows.len()];
+    let mut win = WindowTallies::new(windows);
     let mut span: Option<(f64, f64)> = None;
 
     use io::BufRead as _;
@@ -438,21 +442,15 @@ pub fn resolve_perf_data_with_debuginfod(
 
         let tally = layers.entry(layer).or_insert((0, 0));
         tally.0 += 1;
+        let module = basename(&sample.dso);
         if let Some(t) = sample.time {
             span = Some(span.map_or((t, t), |(lo, hi)| (lo.min(t), hi.max(t))));
-            for (i, w) in windows.iter().enumerate() {
-                if t >= w.start && t < w.end {
-                    let wt = win_layers[i].entry(layer).or_insert((0, 0));
-                    wt.0 += 1;
-                    wt.1 += named.is_some() as u64;
-                    *win_pids[i].entry(sample.pid).or_insert(0) += 1;
-                }
-            }
+            win.add(t, sample.pid, layer, named.as_deref().map(|s| (module, s)));
         }
         match named {
             Some(sym) => {
                 tally.1 += 1;
-                *counts.entry((basename(&sample.dso), sym)).or_insert(0) += 1;
+                *counts.entry((module.to_string(), sym)).or_insert(0) += 1;
             }
             None => {
                 unresolved += 1;
@@ -460,7 +458,7 @@ pub fn resolve_perf_data_with_debuginfod(
                 // any export) is an actionable issue; kernel/`[unknown]`/JIT pseudo-DSOs
                 // are not.
                 if is_real_dso(&sample.dso) {
-                    *anon.entry(basename(&sample.dso)).or_insert(0) += 1;
+                    *anon.entry(module.to_string()).or_insert(0) += 1;
                 }
             }
         }
@@ -475,15 +473,7 @@ pub fn resolve_perf_data_with_debuginfod(
         ));
     }
 
-    let mut symbols: Vec<SymbolCount> = counts
-        .into_iter()
-        .map(|((module, symbol), samples)| SymbolCount {
-            module,
-            symbol,
-            samples,
-        })
-        .collect();
-    symbols.sort_by(|a, b| b.samples.cmp(&a.samples).then(a.module.cmp(&b.module)));
+    let symbols = sorted_symbols(counts);
 
     let mut anonymous_modules: Vec<(String, u64)> = anon.into_iter().collect();
     anonymous_modules.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
@@ -497,16 +487,8 @@ pub fn resolve_perf_data_with_debuginfod(
         .map(|(v, _)| v.to_string());
 
     let (flavor, game_maps_pe) = decide_wine_flavor(&pid_samples, &pid_pe_paths);
-    let dominant = dominant_pid(&pid_samples);
-    let windows = win_layers
-        .into_iter()
-        .zip(win_pids)
-        .map(|(layers, pids)| WindowTally {
-            samples: pids.values().sum(),
-            dominant_pid_samples: dominant.and_then(|p| pids.get(&p).copied()).unwrap_or(0),
-            layers: sorted_tallies(layers),
-        })
-        .collect();
+    // The dominant pid is only known once every sample is in.
+    let windows = win.finish(dominant_pid(&pid_samples));
 
     Ok(Resolution {
         diagnostics: Diagnostics {
@@ -527,6 +509,85 @@ pub fn resolve_perf_data_with_debuginfod(
         windows,
         sample_span: span,
     })
+}
+
+/// The requested windows' counts, filled sample by sample in the one `perf script` pass.
+/// A sample counts in every window holding its time. Memory grows with the distinct pids
+/// and functions each window sees, never with its samples.
+struct WindowTallies<'a> {
+    windows: &'a [Window],
+    accs: Vec<WindowAcc>,
+}
+
+#[derive(Default)]
+struct WindowAcc {
+    /// layer -> (samples, named)
+    layers: HashMap<Layer, (u64, u64)>,
+    pids: HashMap<i32, u64>,
+    symbols: HashMap<(String, String), u64>,
+}
+
+impl<'a> WindowTallies<'a> {
+    fn new(windows: &'a [Window]) -> Self {
+        let accs = windows.iter().map(|_| WindowAcc::default()).collect();
+        Self { windows, accs }
+    }
+
+    /// One sample at perf time `t`; `named` is its `(module basename, function)`.
+    fn add(&mut self, t: f64, pid: i32, layer: Layer, named: Option<(&str, &str)>) {
+        for (w, acc) in self.windows.iter().zip(&mut self.accs) {
+            if t < w.start || t >= w.end {
+                continue;
+            }
+            let l = acc.layers.entry(layer).or_insert((0, 0));
+            l.0 += 1;
+            *acc.pids.entry(pid).or_insert(0) += 1;
+            if let Some((module, sym)) = named {
+                l.1 += 1;
+                *acc.symbols
+                    .entry((module.to_string(), sym.to_string()))
+                    .or_insert(0) += 1;
+            }
+        }
+    }
+
+    fn finish(self, dominant: Option<i32>) -> Vec<WindowTally> {
+        self.accs
+            .into_iter()
+            .map(|acc| {
+                let mut symbols = sorted_symbols(acc.symbols);
+                symbols.truncate(WINDOW_SYMBOLS);
+                WindowTally {
+                    samples: acc.pids.values().sum(),
+                    dominant_pid_samples: dominant
+                        .and_then(|p| acc.pids.get(&p).copied())
+                        .unwrap_or(0),
+                    layers: sorted_tallies(acc.layers),
+                    symbols,
+                }
+            })
+            .collect()
+    }
+}
+
+/// Most samples first; ties by module, then name, so equal counts don't come out in hash
+/// order.
+fn sorted_symbols(counts: HashMap<(String, String), u64>) -> Vec<SymbolCount> {
+    let mut v: Vec<SymbolCount> = counts
+        .into_iter()
+        .map(|((module, symbol), samples)| SymbolCount {
+            module,
+            symbol,
+            samples,
+        })
+        .collect();
+    v.sort_by(|a, b| {
+        b.samples
+            .cmp(&a.samples)
+            .then_with(|| a.module.cmp(&b.module))
+            .then_with(|| a.symbol.cmp(&b.symbol))
+    });
+    v
 }
 
 /// Descending by share; ties broken by the layer's stable order so the bar is deterministic.
@@ -725,8 +786,8 @@ fn resolve_pe(
     Some((name.to_string(), off))
 }
 
-fn basename(path: &str) -> String {
-    path.rsplit('/').next().unwrap_or(path).to_string()
+fn basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
 }
 
 fn is_pe(path: &str) -> bool {
@@ -779,6 +840,70 @@ mod tests {
         // Without the field nothing else moves.
         let untimed = parse_sample("game 123 7f0011 foo (/usr/lib/libc.so.6)").unwrap();
         assert_eq!((untimed.pid, untimed.time), (123, None));
+    }
+
+    #[test]
+    fn a_window_tallies_its_own_hot_symbols() {
+        let windows = [
+            Window {
+                start: 1.0,
+                end: 2.0,
+            },
+            Window {
+                start: 1.5,
+                end: 3.0,
+            },
+        ];
+        let mut w = WindowTallies::new(&windows);
+        let blorp = Some(("libvulkan_intel.so", "blorp_exec"));
+        w.add(1.2, 7, Layer::Driver, blorp);
+        w.add(1.2, 7, Layer::Driver, blorp);
+        // Where the windows overlap a sample counts in both.
+        w.add(1.6, 7, Layer::Driver, blorp);
+        let names: Vec<String> = (0..11).map(|i| format!("f{i:02}")).collect();
+        for n in &names {
+            w.add(1.3, 9, Layer::Game, Some(("libc.so.6", n)));
+        }
+        // Unnamed: in the counts and the split, never in the list.
+        w.add(1.4, 7, Layer::Other, None);
+        // Half-open: the first window's end belongs to the second only.
+        w.add(2.0, 7, Layer::Game, Some(("vkcube", "main")));
+        w.add(0.5, 7, Layer::Game, Some(("vkcube", "early")));
+
+        let t = w.finish(Some(7));
+        assert_eq!((t[0].samples, t[0].dominant_pid_samples), (15, 4));
+        assert_eq!(t[0].layers[0].layer, Layer::Game);
+        assert_eq!((t[0].layers[0].samples, t[0].layers[0].named), (11, 11));
+        assert_eq!(
+            t[0].layers
+                .iter()
+                .find(|l| l.layer == Layer::Other)
+                .unwrap()
+                .named,
+            0
+        );
+        // Capped at the ten hottest, ties by module then name.
+        assert_eq!(t[0].symbols.len(), WINDOW_SYMBOLS);
+        assert_eq!(
+            (t[0].symbols[0].symbol.as_str(), t[0].symbols[0].samples),
+            ("blorp_exec", 3)
+        );
+        let rest: Vec<&str> = t[0].symbols[1..]
+            .iter()
+            .map(|s| s.symbol.as_str())
+            .collect();
+        assert_eq!(
+            rest,
+            &names.iter().map(String::as_str).collect::<Vec<_>>()[..9]
+        );
+
+        assert_eq!((t[1].samples, t[1].dominant_pid_samples), (2, 2));
+        let second: Vec<(&str, u64)> = t[1]
+            .symbols
+            .iter()
+            .map(|s| (s.module.as_str(), s.samples))
+            .collect();
+        assert_eq!(second, [("libvulkan_intel.so", 1), ("vkcube", 1)]);
     }
 
     #[test]

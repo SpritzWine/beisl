@@ -17,6 +17,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+pub use symbol_resolver::SymbolCount;
 use symbol_resolver::{FidelityTier, Layer, Resolution, Window, WindowTally};
 
 /// Bump when the on-disk shape changes incompatibly; consumers check it before trusting.
@@ -59,16 +60,22 @@ pub struct SpikeWindow {
 }
 
 impl Spike {
-    /// The frame against the second before it, in one line ("game ran 2/s (was 250/s),
-    /// driver 61% (was 22%)"), saying only what the sample counts support. `None` when
-    /// the spike has no window.
+    /// [`SpikeWindow::summary`] for this spike; `None` when it has no window.
     pub fn window_summary(&self) -> Option<String> {
         let w = self.window.as_ref()?;
+        Some(w.summary(self.frametime_ms as f64 / 1000.0))
+    }
+}
+
+impl SpikeWindow {
+    /// A frame of `frame_s` against the second before it, in one line ("game ran 2/s
+    /// (was 250/s), driver 61% (was 22%)"), saying only what the sample counts support.
+    pub fn summary(&self, frame_s: f64) -> String {
         let mut parts: Vec<String> = Vec::new();
-        if let Some((now, was)) = w.game_rates(self.frametime_ms as f64 / 1000.0) {
+        if let Some((now, was)) = self.game_rates(frame_s) {
             parts.push(format!("game ran {now:.0}/s (was {was:.0}/s)"));
         }
-        for l in w.layers.iter().take(3) {
+        for l in self.layers.iter().take(3) {
             parts.push(format!(
                 "{} {:.0}% (was {:.0}%)",
                 l.layer, l.pct, l.baseline_pct
@@ -76,14 +83,12 @@ impl Spike {
         }
         if parts.is_empty() {
             parts.push("too few samples to compare".to_string());
-        } else if w.layers.is_empty() {
+        } else if self.layers.is_empty() {
             parts.push("too few samples to split".to_string());
         }
-        Some(parts.join(", "))
+        parts.join(", ")
     }
-}
 
-impl SpikeWindow {
     /// The game's samples per second in a frame of `frame_s` and in the second before,
     /// or `None` when neither count reaches [`MIN_SPLIT_SAMPLES`]: 0 seen where 2 were
     /// expected is chance, 0 where 20 were is not.
@@ -397,9 +402,7 @@ impl TraceArtifact {
     ) -> io::Result<Self> {
         // The wrapper anchored one CSV on perf's clock; prefer that file, and place
         // spikes only when it is the one parsed.
-        let clock = session::Session::read(run_dir)
-            .and_then(|s| s.frametime_clock)
-            .filter(|c| run_dir.join(&c.csv).is_file());
+        let clock = frametime_clock(run_dir);
         let csv = match &clock {
             Some(c) => Some(run_dir.join(&c.csv)),
             None => find_csv(run_dir),
@@ -541,6 +544,11 @@ impl TraceArtifact {
             (artifact_path.as_path(), json.as_bytes()),
             (report_path.as_path(), report.as_bytes()),
         ])
+    }
+
+    /// The stretch of the log behind timeline point `i`, to hand to [`analyze_frame`].
+    pub fn timeline_span(&self, i: usize) -> Option<TimelineSpan> {
+        timeline_span(&self.timeline, i)
     }
 
     /// Read a previously written `artifact.json`. Keeps deserialization inside this crate so
@@ -785,6 +793,139 @@ fn write_staged(files: &[(&Path, &[u8])]) -> io::Result<()> {
     result
 }
 
+/// One timeline point's stretch of the log, in timeline seconds: from its bucket's first
+/// frame up to the next point's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TimelineSpan {
+    pub from_s: f64,
+    /// `None` for the last point, whose bucket runs to the end of the log: the timeline
+    /// carries only where each bucket starts.
+    pub until_s: Option<f64>,
+}
+
+fn timeline_span(timeline: &[(f64, f32)], i: usize) -> Option<TimelineSpan> {
+    Some(TimelineSpan {
+        from_s: timeline.get(i)?.0,
+        until_s: timeline.get(i + 1).map(|p| p.0),
+    })
+}
+
+/// One frame picked off the timeline, against the second before it like a worst spike,
+/// with the functions hottest inside it. See [`analyze_frame`].
+#[derive(Clone, Debug)]
+pub struct FrameAnalysis {
+    /// Where the frame starts on the timeline and how long it took, as for a [`Spike`].
+    pub t_seconds: f64,
+    pub frametime_ms: f32,
+    pub window: SpikeWindow,
+    /// The frame's named functions, most samples first, at most
+    /// [`symbol_resolver::WINDOW_SYMBOLS`]. Counts rather than shares: a frame holds a
+    /// handful of samples, and "40%" of five would hide that.
+    pub hot_symbols: Vec<SymbolCount>,
+}
+
+impl FrameAnalysis {
+    /// The same line a worst spike gets ([`SpikeWindow::summary`]).
+    pub fn summary(&self) -> String {
+        self.window.summary(self.frametime_ms as f64 / 1000.0)
+    }
+}
+
+/// Look inside the worst frame behind one timeline point (each point is its bucket's
+/// maximum, so that is the frame the dot drew). Re-reads the CSV through the build's own
+/// gate, so `span` names the same rows, places the frame the way spikes are placed, and
+/// runs one `perf script` pass: seconds on a long trace, so keep it off a UI thread.
+///
+/// Fails with a plain reason when frames can't be found in perf.data: the run predates
+/// the clock anchor, its CSV has no `elapsed` column, or perf wasn't recording across
+/// the frame and the second before it.
+pub fn analyze_frame(
+    run_dir: &Path,
+    span: TimelineSpan,
+    debuginfod_urls: Option<&str>,
+) -> io::Result<FrameAnalysis> {
+    let unplaced = |why: &str| io::Error::new(io::ErrorKind::Unsupported, why.to_string());
+    let clock = frametime_clock(run_dir).ok_or_else(|| {
+        unplaced(
+            "this run was recorded before beisl put frametimes and perf on one clock, \
+             so there is nothing to re-analyze",
+        )
+    })?;
+    let perf_data = run_dir.join("perf.data");
+    if !perf_data.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "perf.data is gone, so there is nothing to re-analyze",
+        ));
+    }
+    let csv = run_dir.join(&clock.csv);
+    let kept = kept_frames(&csv, uptime_at_csv_end(&csv)).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the frametime CSV has no frames",
+        )
+    })?;
+    let f = worst_in(&kept.frames, span)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no frame starts at that point"))?;
+    let spike = Spike {
+        t_seconds: f.t_s,
+        frametime_ms: f.ms,
+        window: None,
+        before_csv_end_s: f.before_csv_end_s,
+    };
+    let Some(&(_, frame, base)) = spike_windows(clock.end_monotonic_s, &[spike]).first() else {
+        return Err(unplaced(
+            "the frametime CSV has no elapsed column (older MangoHud), so its frames \
+             can't be found in perf.data",
+        ));
+    };
+    let res = symbol_resolver::resolve_perf_data_with_debuginfod(
+        &perf_data,
+        debuginfod_urls,
+        &[frame, base],
+    )?;
+    let window = spike_window(&res, frame, base, 0).ok_or_else(|| {
+        unplaced("perf was not recording across this frame and the second before it")
+    })?;
+    let hot_symbols = res
+        .windows
+        .into_iter()
+        .next()
+        .map(|w| w.symbols)
+        .unwrap_or_default();
+    Ok(FrameAnalysis {
+        t_seconds: f.t_s,
+        frametime_ms: f.ms,
+        window,
+        hot_symbols,
+    })
+}
+
+/// The longest frame starting inside `span`, the earliest of equals: the one that drew
+/// the timeline point, since a point is its bucket's maximum.
+fn worst_in(frames: &[Frame], span: TimelineSpan) -> Option<&Frame> {
+    // A span's ends are row starts, but ones read back from artifact.json, and serde_json
+    // parses a float up to an ULP off: exact bounds could slip a row at a bucket's edge.
+    const SLACK_S: f64 = 1e-9;
+    let row = |t: f64| frames.partition_point(|f| f.t_s < t - SLACK_S);
+    let lo = row(span.from_s);
+    let hi = span.until_s.map_or(frames.len(), row);
+    frames
+        .get(lo..hi)?
+        .iter()
+        .fold(None, |worst: Option<&Frame>, f| match worst {
+            Some(w) if w.ms >= f.ms => Some(w),
+            _ => Some(f),
+        })
+}
+
+/// The CSV the wrapper anchored on perf's clock, when it is still in the run dir.
+fn frametime_clock(run_dir: &Path) -> Option<session::FrametimeClock> {
+    session::Session::read(run_dir)
+        .and_then(|s| s.frametime_clock)
+        .filter(|c| run_dir.join(&c.csv).is_file())
+}
+
 /// Each spike's frame and baseline on perf's clock, given the CSV's end on it. Spikes
 /// from a CSV without an `elapsed` column can't be placed and are left out.
 fn spike_windows(csv_end: f64, spikes: &[Spike]) -> Vec<(usize, Window, Window)> {
@@ -977,6 +1118,77 @@ fn frames_from_csv(path: &Path) -> Option<CsvFrames> {
 /// [`frames_from_csv`] with the uptime injectable, so tests exercise the leak window
 /// without depending on the test machine's real boot time.
 fn frames_from_csv_gated(path: &Path, uptime_end_s: Option<f64>) -> Option<CsvFrames> {
+    let KeptFrames {
+        frames,
+        dropped,
+        logged_seconds,
+    } = kept_frames(path, uptime_end_s)?;
+    let timeline: Vec<(f64, f32)> = frames.iter().map(|f| (f.t_s, f.ms)).collect();
+
+    let mut sorted: Vec<f32> = frames.iter().map(|f| f.ms).collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median = sorted[sorted.len() / 2];
+    let time_weighted_median = time_weighted_median_ms(&sorted);
+    let p99 = sorted[(sorted.len() * 99 / 100).min(sorted.len() - 1)];
+    let worst = *sorted.last().unwrap();
+    let avg_fps = if logged_seconds > 0.0 {
+        frames.len() as f32 / logged_seconds as f32
+    } else {
+        0.0
+    };
+
+    // A spike is a frame markedly worse than typical: twice the median, and at least a
+    // visible-stutter 33 ms (below ~30 fps). Report the worst few, worst first.
+    let threshold = (median * 2.0).max(33.0);
+    let mut spikes: Vec<Spike> = frames
+        .iter()
+        .filter(|f| f.ms >= threshold)
+        .map(|f| Spike {
+            t_seconds: f.t_s,
+            frametime_ms: f.ms,
+            window: None,
+            before_csv_end_s: f.before_csv_end_s,
+        })
+        .collect();
+    spikes.sort_by(|a, b| b.frametime_ms.partial_cmp(&a.frametime_ms).unwrap());
+    spikes.truncate(TOP_SPIKES);
+
+    Some((
+        FrameStats {
+            frames: frames.len() as u64,
+            avg_fps,
+            median_frametime_ms: median,
+            time_weighted_median_ms: time_weighted_median,
+            p99_frametime_ms: p99,
+            worst_frametime_ms: worst,
+            logged_seconds,
+            dropped_rows: dropped,
+        },
+        spikes,
+        downsample(&timeline),
+    ))
+}
+
+/// One CSV row that passed the plausibility gate.
+struct Frame {
+    /// Where it starts on the timeline: the kept frametimes before it, summed.
+    t_s: f64,
+    ms: f32,
+    /// Seconds from its end to the CSV's last row (see [`Spike`]); `None` without an
+    /// `elapsed` column.
+    before_csv_end_s: Option<f64>,
+}
+
+struct KeptFrames {
+    frames: Vec<Frame>,
+    dropped: u64,
+    logged_seconds: f64,
+}
+
+/// The CSV's rows through the plausibility gate, in order: what both the stats and
+/// [`analyze_frame`] read, so a timeline second names the same row in each. `None` when
+/// nothing survives.
+fn kept_frames(path: &Path, uptime_end_s: Option<f64>) -> Option<KeptFrames> {
     let text = std::fs::read_to_string(path).ok()?;
     let mut lines = text.lines();
     // Skip the two system-info lines; the third line is the data header.
@@ -1009,10 +1221,7 @@ fn frames_from_csv_gated(path: &Path, uptime_end_s: Option<f64>) -> Option<CsvFr
         .sum();
     let window = uptime_end_s.map(|ue| leak_window(ue, provisional_dur_s));
 
-    let mut fts: Vec<f32> = Vec::new();
-    let mut timeline: Vec<(f64, f32)> = Vec::new();
-    // Per kept row: seconds from its end to the CSV's last row.
-    let mut before_end: Vec<Option<f64>> = Vec::new();
+    let mut frames: Vec<Frame> = Vec::new();
     let mut dropped: u64 = 0;
     let mut t = 0.0f64;
     for (ms, el) in raw {
@@ -1023,59 +1232,21 @@ fn frames_from_csv_gated(path: &Path, uptime_end_s: Option<f64>) -> Option<CsvFr
             dropped += 1;
             continue;
         }
-        timeline.push((t, ms));
-        before_end.push(last_elapsed.zip(el).map(|(last, el)| (last - el) / 1e9));
+        frames.push(Frame {
+            t_s: t,
+            ms,
+            before_csv_end_s: last_elapsed.zip(el).map(|(last, el)| (last - el) / 1e9),
+        });
         t += ms as f64 / 1000.0;
-        fts.push(ms);
     }
-    if fts.is_empty() {
+    if frames.is_empty() {
         return None;
     }
-
-    let mut sorted = fts.clone();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let median = sorted[sorted.len() / 2];
-    let time_weighted_median = time_weighted_median_ms(&sorted);
-    let p99 = sorted[(sorted.len() * 99 / 100).min(sorted.len() - 1)];
-    let worst = *sorted.last().unwrap();
-    let logged_seconds = t;
-    let avg_fps = if logged_seconds > 0.0 {
-        fts.len() as f32 / logged_seconds as f32
-    } else {
-        0.0
-    };
-
-    // A spike is a frame markedly worse than typical: twice the median, and at least a
-    // visible-stutter 33 ms (below ~30 fps). Report the worst few, worst first.
-    let threshold = (median * 2.0).max(33.0);
-    let mut spikes: Vec<Spike> = timeline
-        .iter()
-        .zip(&before_end)
-        .filter(|&(&(_, ms), _)| ms >= threshold)
-        .map(|(&(t_seconds, frametime_ms), &before_csv_end_s)| Spike {
-            t_seconds,
-            frametime_ms,
-            window: None,
-            before_csv_end_s,
-        })
-        .collect();
-    spikes.sort_by(|a, b| b.frametime_ms.partial_cmp(&a.frametime_ms).unwrap());
-    spikes.truncate(TOP_SPIKES);
-
-    Some((
-        FrameStats {
-            frames: fts.len() as u64,
-            avg_fps,
-            median_frametime_ms: median,
-            time_weighted_median_ms: time_weighted_median,
-            p99_frametime_ms: p99,
-            worst_frametime_ms: worst,
-            logged_seconds,
-            dropped_rows: dropped,
-        },
-        spikes,
-        downsample(&timeline),
-    ))
+    Some(KeptFrames {
+        frames,
+        dropped,
+        logged_seconds: t,
+    })
 }
 
 /// Cap the timeline at [`TIMELINE_POINTS`] for the chart. Buckets take the *max* frametime
@@ -1179,6 +1350,7 @@ mod tests {
                     named: 0,
                 })
                 .collect(),
+            symbols: vec![],
         }
     }
 
@@ -1249,6 +1421,186 @@ mod tests {
         assert!(spike_window(&late, frame, base, 0).is_none());
         let early_stop = windowed(res.windows.clone(), (90.0, 99.95));
         assert!(spike_window(&early_stop, frame, base, 0).is_none());
+    }
+
+    #[test]
+    fn a_timeline_point_names_the_frame_it_drew() {
+        // 500 rows past the gate, each bucket of three with its own worst frame, the last
+        // bucket short (two rows) and its worst on the log's very last row. Five
+        // implausible rows in between are off the clock, so a selection that counted them
+        // would land late.
+        let mut csv = String::from("os,cpu\nSteam,Ryzen\nfps,frametime,elapsed\n");
+        let mut el = 0u64;
+        for i in 0..500u32 {
+            let ms = match i {
+                499 => 90.0,
+                _ if i % 7 == 0 => 30.0 + (i % 5) as f32,
+                _ => 16.0,
+            };
+            el += (ms * 1e6) as u64;
+            csv.push_str(&format!("60,{ms},{el}\n"));
+            if i % 100 == 50 {
+                csv.push_str("0,23000000.0,1\n");
+            }
+        }
+        let path = write_csv("buckets", &csv);
+        let (stats, _, timeline) = frames_from_csv_gated(&path, None).unwrap();
+        let kept = kept_frames(&path, None).unwrap();
+        assert_eq!((stats.frames, stats.dropped_rows), (500, 5));
+        assert_eq!(timeline.len(), 167);
+
+        // The seconds a point is picked by went through artifact.json, which can bring a
+        // float back an ULP off either way: each still names its own three rows.
+        let stored: Vec<(f64, f32)> =
+            serde_json::from_str(&serde_json::to_string(&timeline).unwrap()).unwrap();
+        let ulp = |t: f64, up: bool| {
+            let b = t.to_bits();
+            f64::from_bits(if up { b + 1 } else { b.saturating_sub(1) })
+        };
+        for (i, &(_, drawn)) in stored.iter().enumerate() {
+            let span = timeline_span(&stored, i).unwrap();
+            for up in [false, true] {
+                let nudged = TimelineSpan {
+                    from_s: ulp(span.from_s, up),
+                    until_s: span.until_s.map(|u| ulp(u, up)),
+                };
+                for s in [span, nudged] {
+                    let f = worst_in(&kept.frames, s).unwrap();
+                    let row = kept.frames.iter().position(|g| g.t_s == f.t_s).unwrap();
+                    assert_eq!((row / 3, f.ms), (i, drawn), "point {i}");
+                }
+            }
+        }
+        let last = timeline_span(&stored, 166).unwrap();
+        assert_eq!(last.until_s, None);
+        assert_eq!(
+            worst_in(&kept.frames, last).unwrap().t_s,
+            kept.frames[499].t_s
+        );
+        assert!(timeline_span(&stored, 167).is_none());
+
+        // Equals go to the earliest; a stretch holding no frame names none.
+        let frame = |t_s, ms| Frame {
+            t_s,
+            ms,
+            before_csv_end_s: None,
+        };
+        let frames = [
+            frame(0.0, 16.0),
+            frame(0.016, 40.0),
+            frame(0.056, 40.0),
+            frame(0.096, 16.0),
+        ];
+        let all = TimelineSpan {
+            from_s: 0.0,
+            until_s: None,
+        };
+        assert_eq!(worst_in(&frames, all).unwrap().t_s, 0.016);
+        let past = TimelineSpan {
+            from_s: 1.0,
+            until_s: None,
+        };
+        assert!(worst_in(&frames, past).is_none());
+    }
+
+    #[test]
+    fn analyze_frame_says_why_it_cannot_look() {
+        let dir = std::env::temp_dir().join(format!("beisl-frame-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let csv = "os,cpu\nSteam,Ryzen\nfps,frametime\n60,16.0\n20,50.0\n";
+        std::fs::write(dir.join("g.csv"), csv).unwrap();
+        let span = TimelineSpan {
+            from_s: 0.0,
+            until_s: None,
+        };
+
+        // Recorded before the anchor: said plainly, nothing to re-analyze.
+        let e = analyze_frame(&dir, span, None).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::Unsupported);
+        assert!(e.to_string().contains("one clock"), "{e}");
+
+        session::Session {
+            frametime_clock: Some(session::FrametimeClock {
+                csv: "g.csv".into(),
+                end_monotonic_s: 100.0,
+            }),
+            ..Default::default()
+        }
+        .write(&dir)
+        .unwrap();
+        let e = analyze_frame(&dir, span, None).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::NotFound, "{e}");
+
+        // No `elapsed` column: refused before perf would ever run on this empty file.
+        std::fs::write(dir.join("perf.data"), b"").unwrap();
+        let e = analyze_frame(&dir, span, None).unwrap_err();
+        assert!(e.to_string().contains("elapsed column"), "{e}");
+        let past = TimelineSpan {
+            from_s: 5.0,
+            until_s: None,
+        };
+        let e = analyze_frame(&dir, past, None).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::NotFound, "{e}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Opt-in, like the resolver's `BEISL_TEST_PERF`: point `BEISL_TEST_RUN` at an
+    /// analyzed run dir that carries a clock anchor, and each spike's timeline point must
+    /// re-analyze to the window the build stored for the frame that point drew.
+    #[test]
+    fn reanalyzes_a_real_runs_spikes_when_provided() {
+        let Some(dir) = std::env::var_os("BEISL_TEST_RUN") else {
+            return;
+        };
+        let dir = Path::new(&dir);
+        let a = TraceArtifact::read_json(&dir.join(session::library::ARTIFACT_FILE)).unwrap();
+        let mut compared = 0;
+        for s in a.spikes.iter().filter(|s| s.window.is_some()) {
+            let i = a.timeline.partition_point(|p| p.0 <= s.t_seconds) - 1;
+            let f = analyze_frame(dir, a.timeline_span(i).unwrap(), None).unwrap();
+            assert_eq!(f.frametime_ms, a.timeline[i].1);
+            let v = &f.window;
+            eprintln!(
+                "point {i}: {:.1} ms at {:.3}s, samples {}/{} game {}/{}: {} | {:?}",
+                f.frametime_ms,
+                f.t_seconds,
+                v.samples,
+                v.baseline_samples,
+                v.game_samples,
+                v.baseline_game_samples,
+                f.summary(),
+                f.hot_symbols
+                    .iter()
+                    .map(|h| format!("{} {} {}", h.samples, h.module, h.symbol))
+                    .collect::<Vec<_>>()
+            );
+            let Some(w) = a
+                .spikes
+                .iter()
+                .find(|x| x.t_seconds == f.t_seconds)
+                .and_then(|x| x.window.as_ref())
+            else {
+                continue;
+            };
+            assert_eq!(
+                (
+                    v.samples,
+                    v.baseline_samples,
+                    v.game_samples,
+                    v.baseline_game_samples
+                ),
+                (
+                    w.samples,
+                    w.baseline_samples,
+                    w.game_samples,
+                    w.baseline_game_samples
+                )
+            );
+            assert_eq!(f.summary(), w.summary(f.frametime_ms as f64 / 1000.0));
+            compared += 1;
+        }
+        assert!(compared > 0, "no spike with a window to compare");
     }
 
     #[test]
