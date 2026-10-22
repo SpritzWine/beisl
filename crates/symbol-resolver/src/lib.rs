@@ -825,39 +825,71 @@ struct Sample {
     dso: String,
 }
 
-/// Parse a `perf script` sample line: `<comm...> <pid> [<time>:] <ip> <sym> (<dso>)`. The
-/// comm can carry spaces, so we anchor on the trailing `(<dso>)` and take the tokens
-/// before it in reverse: `sym`, `ip`, the optional `time:`, then `pid`.
+/// Parse a `perf script` sample line: `<comm...> <pid> [<time>:] <ip> <sym...> (<dso>)`.
+///
+/// Both the comm and the symbol can hold spaces (engine thread names, demangled C++ such
+/// as `aco::(anonymous namespace)::...`), and the dso can hold parentheses (Wine's
+/// `/memfd:wine-mapping (deleted)`). So the dso is the line's final balanced group, and
+/// with a time on the line (beisl always asks for one) the rest is anchored from the left
+/// on `<pid> <time>: <ip>`. Reading from the right instead dropped 48% of a .NET game's
+/// samples and 12% of one whose stalls were the shader compiler (2026-10-22).
 fn parse_sample(line: &str) -> Option<Sample> {
-    let open = line.rfind('(')?;
-    let close = line[open..].find(')')? + open;
-    let dso = line[open + 1..close].to_string();
-    if dso.is_empty() {
-        return None;
+    let (head, dso) = split_dso(line.trim_end())?;
+    let toks: Vec<&str> = head.split_whitespace().collect();
+    if let Some(k) = toks.iter().position(|t| is_time(t)).filter(|&k| k >= 1) {
+        let ip = u64::from_str_radix(toks.get(k + 1)?.trim_start_matches("0x"), 16).ok()?;
+        let sym = toks.get(k + 2..).filter(|s| !s.is_empty())?.join(" ");
+        return Some(Sample {
+            comm: toks[..k - 1].join(" "),
+            pid: toks[k - 1].parse().ok()?,
+            time: toks[k].trim_end_matches(':').parse().ok(),
+            ip,
+            sym,
+            dso,
+        });
     }
-    let mut toks = line[..open].split_whitespace().rev();
-    let sym = toks.next()?.to_string();
-    let ip = u64::from_str_radix(toks.next()?.trim_start_matches("0x"), 16).ok()?;
-    let mut tok = toks.next()?;
-    let time = match tok.strip_suffix(':') {
-        Some(t) => {
-            let t = t.parse().ok()?;
-            tok = toks.next()?;
-            Some(t)
-        }
-        None => None,
-    };
-    let pid = tok.parse().ok()?;
-    let mut comm: Vec<&str> = toks.collect();
+    // No time column: `<comm...> <pid> <ip> <sym>`, read from the right, the one shape
+    // that has no anchor to read from the left.
+    let mut rev = toks.iter().rev();
+    let sym = rev.next()?.to_string();
+    let ip = u64::from_str_radix(rev.next()?.trim_start_matches("0x"), 16).ok()?;
+    let pid = rev.next()?.parse().ok()?;
+    let mut comm: Vec<&str> = rev.copied().collect();
     comm.reverse();
     Some(Sample {
         comm: comm.join(" "),
         pid,
-        time,
+        time: None,
         ip,
         sym,
         dso,
     })
+}
+
+/// The line's final balanced parenthesis group as the dso, and what comes before it.
+fn split_dso(line: &str) -> Option<(&str, String)> {
+    let body = line.strip_suffix(')')?;
+    let mut depth = 1;
+    for (i, c) in body.char_indices().rev() {
+        match c {
+            ')' => depth += 1,
+            '(' => {
+                depth -= 1;
+                if depth == 0 {
+                    let dso = &body[i + 1..];
+                    return (!dso.is_empty()).then(|| (&body[..i], dso.to_string()));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// perf's sample time: `12756.875611:`.
+fn is_time(tok: &str) -> bool {
+    tok.strip_suffix(':')
+        .is_some_and(|t| t.contains('.') && t.parse::<f64>().is_ok())
 }
 
 /// Parse a `PERF_RECORD_MMAP2` line into a [`Mapping`]:
@@ -1114,6 +1146,41 @@ mod tests {
                 (ThreadClass::Render, 1)
             ]
         );
+    }
+
+    /// Real lines from 2026-10-22 traces that the right-anchored parse dropped.
+    #[test]
+    fn parses_parenthesised_dsos_and_spaced_symbols() {
+        let memfd = parse_sample(
+            "     Main Thread  173967 12756.875611:      6fff9ce5019a [unknown] \
+             (/memfd:wine-mapping (deleted))",
+        )
+        .unwrap();
+        assert_eq!(memfd.dso, "/memfd:wine-mapping (deleted)");
+        assert_eq!((memfd.comm.as_str(), memfd.pid), ("Main Thread", 173967));
+        assert_eq!(memfd.sym, "[unknown]");
+        assert_eq!(memfd.ip, 0x6fff9ce5019a);
+
+        let aco = parse_sample(
+            "  SRLauncher.exe  415938 20972.320303:      7ff47928f5c7 \
+             aco::(anonymous namespace)::add_coupling_code(aco::(anonymous namespace)::\
+             exec_ctx&, aco::Block*) (/run/host/usr/local/lib64/libvulkan_radeon.so)",
+        )
+        .unwrap();
+        assert_eq!(aco.dso, "/run/host/usr/local/lib64/libvulkan_radeon.so");
+        assert_eq!(aco.time, Some(20972.320303));
+        assert!(aco
+            .sym
+            .starts_with("aco::(anonymous namespace)::add_coupling_code("));
+        assert!(aco.sym.ends_with("aco::Block*)"));
+
+        // A thread name that is all digits after a space must not be read as the pid.
+        let pool = parse_sample("PoolThread 12 4242 1.5: 7f00 foo bar (/x/game.so)").unwrap();
+        assert_eq!(
+            (pool.comm.as_str(), pool.pid, pool.sym.as_str()),
+            ("PoolThread 12", 4242, "foo bar")
+        );
+        assert!(parse_sample("x 1 2.5: 7f00 sym (unbalanced").is_none());
     }
 
     #[test]
