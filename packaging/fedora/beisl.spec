@@ -10,9 +10,10 @@
 # All build logic is upstream's Makefile; this file is metadata. See
 # packaging/README.md.
 
-# cargo strips the release binaries itself, so there is nothing for rpm to
-# extract debuginfo from and the build would fail on an empty file list.
-%global debug_package %{nil}
+# No debug_package override: %%build's RUSTFLAGS (Fedora's %%build_rustflags)
+# add debuginfo and turn off the profile's strip, so rpm splits a -debuginfo
+# package as for any C program. Disabling it left binaries with a symbol table
+# and threw the debug info away (rpmlint: unstripped-binary-or-object).
 
 Name:           beisl
 Version:        0.4.0
@@ -20,10 +21,11 @@ Release:        1%{?dist}
 Summary:        Find out what made a game stutter
 License:        LGPL-2.1-or-later
 URL:            https://codeberg.org/SpritzWine/beisl
-# Both produced by upstream's `make srpm`: the source at the tag, and the
-# vendored dependencies of both cargo workspaces with their cargo config.
-Source0:        %{name}-%{version}.tar.gz
-Source1:        %{name}-%{version}-vendor.tar.zst
+# Both published with each release and produced by upstream's `make srpm`: the
+# source at the tag, and the vendored dependencies of both cargo workspaces
+# with their cargo config. rpmbuild uses the local copies when present.
+Source0:        %{url}/releases/download/v%{version}/%{name}-%{version}.tar.gz
+Source1:        %{url}/releases/download/v%{version}/%{name}-%{version}-vendor.tar.zst
 
 # The only architecture upstream builds and tests.
 ExclusiveArch:  x86_64
@@ -42,10 +44,22 @@ BuildRequires:  desktop-file-utils
 # says so, which is why these are recommendations rather than requirements.
 Recommends:     perf
 Recommends:     mangohud
+# The GUI loads these at runtime, so rpm cannot see them: a display connection
+# (Wayland, or X11) and the GPU renderer, which falls back to software without
+# Vulkan or EGL. Weak because the CLI needs none of them and a desktop has all.
+Recommends:     libwayland-client.so.0()(64bit)
+Recommends:     libwayland-egl.so.1()(64bit)
+Recommends:     libX11.so.6()(64bit)
+Recommends:     libX11-xcb.so.1()(64bit)
+Recommends:     libXi.so.6()(64bit)
+Recommends:     libxcb.so.1()(64bit)
+Recommends:     libxkbcommon-x11.so.0()(64bit)
+Recommends:     libvulkan.so.1()(64bit)
+Recommends:     libEGL.so.1()(64bit)
 
 %description
 Beisl records what a game was actually doing when it stuttered. It wraps a
-launch, captures frametimes alongside CPU samples, and attributes each slow
+launch, captures frame times alongside CPU samples, and attributes each slow
 frame to a layer: the game itself, Wine, DXVK or vkd3d, the graphics driver,
 or the kernel.
 

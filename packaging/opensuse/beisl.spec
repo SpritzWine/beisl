@@ -42,7 +42,7 @@ Recommends:     mangohud
 
 %description
 Beisl records what a game was actually doing when it stuttered. It wraps a
-launch, captures frametimes alongside CPU samples, and attributes each slow
+launch, captures frame times alongside CPU samples, and attributes each slow
 frame to a layer: the game itself, Wine, DXVK or vkd3d, the graphics driver,
 or the kernel.
 

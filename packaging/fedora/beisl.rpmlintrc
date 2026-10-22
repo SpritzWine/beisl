@@ -1,0 +1,11 @@
+# What rpmlint still reports, and why it is not a packaging bug. Anything new
+# fails packaging/fedora/build-in-container.sh.
+
+# LICENSE is the LGPL-2.1 text as upstream ships it, with the FSF's postal
+# address from before its 2024 move. Updating a licence text is upstream's
+# call, not the package's.
+addFilter("incorrect-fsf-address /usr/share/licenses/beisl/LICENSE")
+
+# rpmlint expects libmagic to call it "ZSTD compressed"; libmagic says
+# "Zstandard compressed data".
+addFilter("inconsistent-file-extension beisl-.*-vendor.tar.zst")
