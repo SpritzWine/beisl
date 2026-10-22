@@ -1198,7 +1198,7 @@ pub enum RecordMode {
     /// System-wide (`perf record -a`): kernel + every process. Needs `perf_event_paranoid
     /// <= 0` (see [`PARANOID_MAX`]) or `perf` carrying CAP_PERFMON — the full-fidelity path.
     Full,
-    /// Per-command, userspace only (`perf record -e cycles:u -- <game>`): the game's own
+    /// Per-command, userspace only (`perf record -e cycles:u -p <game>`): the game's own
     /// process subtree, no privilege. Unprivileged users may profile the userspace of
     /// processes they launch at `perf_event_paranoid <= 2` (the common default, and
     /// SteamOS); kernel samples are dropped. Keeps the game/dxvk/wine/**userspace-driver**

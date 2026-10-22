@@ -71,11 +71,19 @@ trace:
 
 - **Full** - `perf record -F 499 -a`: system-wide, kernel included. Needs
   `CAP_PERFMON` on the perf binary or `perf_event_paranoid <= 0`.
-- **Degraded** - `perf record -e cycles:u -F 499 -- <game>`: the game's own
+- **Degraded** - `perf record -e cycles:u -F 499 -p <game>`: the game's own
   process tree, userspace only, no privilege needed at the common
   `perf_event_paranoid <= 2`. Keeps the game, translation, Wine and
-  userspace-driver layers; loses the kernel bar. Blind to a launcher that
-  reparents the game out of perf's subtree.
+  userspace-driver layers; loses the kernel bar. Blind to a game started by
+  something outside that tree (a launcher asking another process to run it).
+  The game is beisl's own child, held just before its exec until perf has
+  attached and acknowledged `enable` over its control fifo, so nothing it forks
+  runs unsampled. Until 2026-10-22 perf started the game itself, and as its
+  parent changed its environment (`PATH`, `PREFIX`, `PERF_BUILDID_DIR`, a blanked
+  `DEBUGINFOD_URLS`), ended the recording at the first stop signal (it took the
+  SIGCHLD as its workload exiting), and could not stop recording without taking
+  the game down. All three are gone; stopping the recording mid-game now works in
+  this mode too.
 - **None** - no perf, or paranoia too high. The game runs untraced, frametimes
   only.
 
@@ -458,16 +466,7 @@ data that work needs - and a trace nobody can read is a trace nobody fixes.
   the session window looks up any frame's hot symbols on demand), and a named,
   likely cause per spike on top of it. Design in the vault: "Stutter-Cause Hypothesis - Fault Harness
   and Feature Vector".
-- **In degraded mode a stop signal to the game ends the recording**: perf, as the
-  game's parent, takes the SIGCHLD that a SIGSTOP raises as its workload exiting
-  and stops sampling, then waits for the real exit. Ctrl+Z on a terminal launch
-  or a debugger stopping the process would do it. Found 2026-10-22, not
-  addressed.
 - **A/B compare**: two traces side by side, tiers and outcomes labeled.
-- **In degraded mode perf alters the game's environment**: it prepends its own
-  directory to `PATH`, sets `PREFIX` and `PERF_BUILDID_DIR`, and blanks
-  `DEBUGINFOD_URLS`. That is perf's doing as the game's parent, and it is against
-  the environment rule above. Found 2026-10-10, not addressed.
 - **Feedback polish**: MangoHud's own logging indicator or a notification on
   start and stop; a notification when a launcher behind a menu entry fails, which
   today only reaches stderr.

@@ -46,21 +46,14 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
         &prog[1..]
     ));
 
-    // Pick how perf will capture this session up front — Full (system-wide), Degraded
-    // (own-process userspace-only, when paranoia blocks -a but not own profiling), or None
-    // — because Degraded changes what we spawn: `perf` wrapping the game, not the game
-    // directly (see `launch_argv`).
-    let perf_data = run_dir.join("perf.data");
+    // Pick how perf will capture this session up front: Full (system-wide), Degraded
+    // (own-process userspace-only, when paranoia blocks -a but not own profiling), or
+    // None. Degraded changes how we spawn: the game is held before its exec until perf
+    // is attached (see `perf::spawn_held`).
     let mode = select_record_mode();
-    let (program, args) = launch_argv(mode, &perf_data, &prog);
 
-    let mut child = Command::new(&program);
-    child.args(&args);
-    if mode == RecordMode::Degraded {
-        // Degraded has no Recorder::start() of its own (perf IS `child` here) — arm the
-        // same death-signal backstop `Recorder::start` gives Full mode.
-        perf::arm_pdeathsig(&mut child);
-    }
+    let mut child = Command::new(&prog[0]);
+    child.args(&prog[1..]);
     for (k, v) in &envs {
         child.env(k, v);
     }
@@ -155,9 +148,17 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
     let _ = sess.write(&run_dir);
 
     cue::play(cue::Cue::Ready);
-    let mut proc = match child.spawn() {
+    let mut attached: Option<Result<(), String>> = None;
+    let spawned = match mode {
+        RecordMode::Degraded => perf::spawn_held(child, |pid| {
+            attached = Some(recorder.start_attached(pid));
+        }),
+        _ => child.spawn(),
+    };
+    let mut proc = match spawned {
         Ok(p) => p,
         Err(e) => {
+            recorder.stop();
             log.line(&format!("error: failed to launch {}: {e}", prog[0]));
             sess.state = State::Error;
             sess.message = format!("Failed to launch {}: {e}", prog[0]);
@@ -187,9 +188,9 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
     // Open the session window alongside the game (best-effort; headless still works).
     spawn_monitor(&run_dir);
 
-    // Start/acknowledge recording per the chosen mode. Full drives perf as our own child
-    // via Recorder; Degraded's perf is already live (it's `child`, spawned above — wrapping
-    // the game); None just tells the user why nothing's being captured.
+    // Start/acknowledge recording per the chosen mode. Full starts perf now; Degraded's was
+    // attached before the game's exec (above); None just tells the user why nothing's
+    // being captured.
     match mode {
         RecordMode::Full => match recorder.start() {
             Ok(()) => {
@@ -202,11 +203,22 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
                 log.line(&format!("perf: {e}"));
             }
         },
-        RecordMode::Degraded => {
-            sess.state = State::Recording;
-            perf::set_perf_pid(proc.id());
-            log.line("perf: recording started (degraded / userspace-only)");
-        }
+        RecordMode::Degraded => match attached.unwrap_or_else(|| {
+            Err("perf couldn't attach: the launch never reached its exec".to_string())
+        }) {
+            Ok(()) => {
+                sess.state = State::Recording;
+                log.line(&format!(
+                    "perf: recording started (degraded / userspace-only, attached to pid {})",
+                    proc.id()
+                ));
+            }
+            Err(e) => {
+                sess.state = State::Running;
+                sess.warnings.push(e.clone());
+                log.line(&format!("perf: {e}"));
+            }
+        },
         RecordMode::None => {
             sess.state = State::Running;
             let warning =
@@ -241,11 +253,10 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
     let mut last_presence_ask: Option<Duration> = None;
     let mut presence_asks = 0u32;
     let mut presence_reachable = false;
-    let mut stop_refused = false;
     loop {
         if let Some(status) = proc.try_wait()? {
-            // Close the pid-reuse window: whatever PID we published (Recorder's own child,
-            // or `proc` in Degraded) is about to become stale now that it's exited.
+            // Close the pid-reuse window: the perf PID we published is about to become
+            // stale now that the game has exited.
             perf::set_perf_pid(0);
             if !stopped {
                 recorder.stop();
@@ -428,42 +439,19 @@ pub fn trace(cmd: &[String]) -> io::Result<i32> {
 
         // The window can ask us to stop the trace while the game keeps running. We must
         // keep living until the game exits (Steam waits on the launch-options process),
-        // so we only stop the recorder, not the game. Degraded can't honor this at all:
-        // its one `perf` process IS the game's parent, so "stop" would have to kill perf
-        // and take the game down with it — the opposite of "keep the game running".
-        if mode != RecordMode::Degraded {
-            if !stopped {
-                if let Some(disk) = Session::read(&run_dir) {
-                    if disk.stop_requested {
-                        recorder.stop();
-                        cue::play(cue::Cue::RecordStop);
-                        stopped = true;
-                        sess.stop_requested = true;
-                        sess.trace_bytes = trace_size(&run_dir);
-                        // Saved, not Done: the trace is complete but the game lives on —
-                        // the window can offer analysis while still saying so.
-                        sess.state = State::Saved;
-                        sess.message = "Stopped — trace saved. Game still running.".to_string();
-                    }
-                }
-            }
-        } else if !stop_refused {
+        // so we only stop the recorder, not the game.
+        if !stopped {
             if let Some(disk) = Session::read(&run_dir) {
                 if disk.stop_requested {
-                    stop_refused = true;
-                    log.line(
-                        "stop: degraded mode records the whole session — ignoring stop to \
-                         keep the game running",
-                    );
-                    sess.message = "Stop isn't available in degraded mode — it records the \
-                                     whole session, so it stays on until the game exits."
-                        .to_string();
-                    sess.warnings.push(
-                        "Degraded recording mode captures the whole session, so it can't be \
-                         stopped early without ending the game too — ignoring the stop \
-                         request and continuing to record."
-                            .to_string(),
-                    );
+                    recorder.stop();
+                    cue::play(cue::Cue::RecordStop);
+                    stopped = true;
+                    sess.stop_requested = true;
+                    sess.trace_bytes = trace_size(&run_dir);
+                    // Saved, not Done: the trace is complete but the game lives on, so
+                    // the window can offer analysis while still saying so.
+                    sess.state = State::Saved;
+                    sess.message = "Stopped: trace saved. Game still running.".to_string();
                 }
             }
         }
@@ -664,21 +652,6 @@ fn select_record_mode() -> RecordMode {
         eprintln!("beisl: BEISL_FORCE_RECORD_MODE={v:?} not recognized — detecting instead");
     }
     preflight::detect_record_mode()
-}
-
-/// The program + args to actually spawn for `mode`. Full and None launch the game
-/// directly (today's behavior, unchanged); Degraded wraps it in `perf record` (own-process
-/// cycles, no `-a`) so perf's lifetime is the game's — no separate Recorder needed.
-fn launch_argv(mode: RecordMode, perf_data: &Path, prog: &[String]) -> (String, Vec<String>) {
-    match mode {
-        RecordMode::Full | RecordMode::None => (prog[0].clone(), prog[1..].to_vec()),
-        RecordMode::Degraded => {
-            let mut args = perf::degraded_args(perf_data);
-            args.push("--".to_string());
-            args.extend(prog.iter().cloned());
-            ("perf".to_string(), args)
-        }
-    }
 }
 
 /// Peel leading `VAR=value` tokens (Steam/user env assignments) off the front of the
@@ -1191,29 +1164,5 @@ mod tests {
         assert_eq!(parse_forced_mode(Some("none")), Some(RecordMode::None));
         assert_eq!(parse_forced_mode(Some("bogus")), None);
         assert_eq!(parse_forced_mode(None), None);
-    }
-
-    #[test]
-    fn launch_argv_full_and_none_run_the_game_directly() {
-        let perf_data = Path::new("/tmp/beisl-test/perf.data");
-        let prog = vec!["game.exe".to_string(), "-windowed".to_string()];
-        for mode in [RecordMode::Full, RecordMode::None] {
-            let (program, args) = launch_argv(mode, perf_data, &prog);
-            assert_eq!(program, "game.exe");
-            assert_eq!(args, vec!["-windowed".to_string()]);
-        }
-    }
-
-    #[test]
-    fn launch_argv_degraded_wraps_the_game_in_perf() {
-        let perf_data = Path::new("/tmp/beisl-test/perf.data");
-        let prog = vec!["game.exe".to_string(), "-windowed".to_string()];
-        let (program, args) = launch_argv(RecordMode::Degraded, perf_data, &prog);
-        assert_eq!(program, "perf");
-        // perf's own flags, then the `--` separator, then the game's argv verbatim.
-        let sep = args.iter().position(|a| a == "--").expect("-- separator");
-        assert_eq!(&args[sep + 1..], &prog[..]);
-        assert!(args[..sep].contains(&"-q".to_string()));
-        assert!(!args[..sep].contains(&"-a".to_string()));
     }
 }
