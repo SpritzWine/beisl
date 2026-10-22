@@ -19,6 +19,11 @@ pub type Features = BTreeMap<String, f32>;
 /// frame's end is the first that can reflect it.
 const SENSOR_LAG_S: f64 = 0.6;
 
+/// How far before and after a frame its level is read. Two seconds, not one: one long
+/// neighbour then fills half the window, and two back-to-back hitches read as a
+/// loading screen (SE2, 2026-10-22: 551 and 420 ms frames, then smooth play).
+const LEVEL_S: f64 = 2.0;
+
 /// Caps that keep a long quiet stretch from dominating a distance.
 const SINCE_CAP_S: f32 = 60.0;
 const LOG_TIME_CAP_S: f32 = 600.0;
@@ -31,10 +36,12 @@ pub(crate) fn frame_features(kept: &KeptFrames, i: usize) -> Features {
     let base_from = first_at_or_after(frames, f.t_s - BASELINE_S);
     let base = median(frames[base_from..i].iter().map(|x| x.ms));
     let local = base.unwrap_or(f.ms).max(0.001);
-    // How the second before ran against the whole log: a loading screen runs at a few
+    // How the seconds before ran against the whole log: a loading screen runs at a few
     // frames a second, and a 1.6 s frame there is a load step, not a hitch (Assetto
-    // Corsa, 2026-10-22: 40-350 times the run median). Absent with no second before.
-    if let Some(b) = base.filter(|_| kept.median_ms > 0.0) {
+    // Corsa, 2026-10-22: 40-350 times the run median). Time-weighted on both sides, as
+    // the log's is: CarX loads between bursts of sub-millisecond menu frames. Absent
+    // with no second before.
+    if let Some(b) = level(&frames[..i], f.t_s - LEVEL_S, f.t_s).filter(|_| kept.median_ms > 0.0) {
         out.insert(
             "base_level_log".into(),
             (b.max(0.001) / kept.median_ms).ln(),
@@ -42,10 +49,9 @@ pub(crate) fn frame_features(kept: &KeptFrames, i: usize) -> Features {
     }
     // How close to the end: a game's last frames are its shutdown.
     let end = f.t_s + f.ms as f64 / 1000.0;
-    // And the second after: a load that starts from smooth play shows only there (Space
+    // And the seconds after: a load that starts from smooth play shows only there (Space
     // Engineers 2, 2026-10-22: a 3.3 s frame, a 1.5 s one, then a run at 67 ms).
-    let after_to = first_at_or_after(frames, end + BASELINE_S);
-    let after = median(frames[(i + 1).min(after_to)..after_to].iter().map(|x| x.ms));
+    let after = level(&frames[i + 1..], end, end + LEVEL_S);
     if let Some(a) = after.filter(|_| kept.median_ms > 0.0) {
         out.insert(
             "next_level_log".into(),
@@ -195,6 +201,28 @@ fn count_within(sorted: &[f32], lo: f32, hi: f32) -> usize {
     sorted.partition_point(|&x| x <= hi) - sorted.partition_point(|&x| x < lo)
 }
 
+/// The frametime that held for most of `from..to`, each frame weighted by how much of
+/// that stretch it covered: a long frame starting just before the end counts for the
+/// moment it overlaps, not its whole length (Icarus, 2026-10-22: a 2.3 s freeze 20 ms
+/// before the end of the window made a separate freeze before it read as loading).
+fn level(frames: &[Frame], from: f64, to: f64) -> Option<f32> {
+    let mut v: Vec<(f32, f64)> = frames
+        .iter()
+        .map(|x| {
+            let end = x.t_s + x.ms as f64 / 1000.0;
+            (x.ms, end.min(to) - x.t_s.max(from))
+        })
+        .filter(|&(_, w)| w > 0.0)
+        .collect();
+    v.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let half = v.iter().map(|&(_, w)| w).sum::<f64>() / 2.0;
+    let mut acc = 0.0;
+    v.into_iter().find_map(|(ms, w)| {
+        acc += w;
+        (acc >= half).then_some(ms)
+    })
+}
+
 fn median(values: impl Iterator<Item = f32>) -> Option<f32> {
     let mut v: Vec<f32> = values.collect();
     if v.is_empty() {
@@ -252,18 +280,51 @@ mod tests {
     #[test]
     fn a_load_from_smooth_play_shows_in_the_second_after() {
         // The SE2 shape: smooth play, a 3.3 s frame, 1.5 s, then 67 ms frames.
-        let mut ms = vec![16.7; 200];
+        let mut ms = vec![16.7; 2000];
         ms.extend([3300.0, 1500.0]);
         ms.extend(vec![67.0; 30]);
         let kept = KeptFrames::new(frames(&ms), 0, vec![]);
-        let into = frame_features(&kept, 200);
+        let into = frame_features(&kept, 2000);
         assert!(into["base_level_log"].abs() < 1e-4);
         assert!((into["next_level_log"] - (1500.0f32 / 16.7).ln()).abs() < 1e-3);
-        let during = frame_features(&kept, 201);
+        let during = frame_features(&kept, 2001);
         assert!((during["next_level_log"] - (67.0f32 / 16.7).ln()).abs() < 1e-3);
         // The last frame has no second after.
         let last = frame_features(&kept, ms.len() - 1);
         assert!(!last.contains_key("next_level_log"));
+    }
+
+    #[test]
+    fn a_level_is_where_the_time_went_not_the_frame_count() {
+        // CarX's shape: a minute of 20 ms play, then a load of 450 ms frames between
+        // bursts of 0.4 ms menu frames. By count the load runs at 0.4 ms; by time, at 450.
+        let mut ms = vec![20.0; 3000];
+        for _ in 0..6 {
+            ms.extend(vec![0.4; 200]);
+            ms.push(450.0);
+        }
+        let spike = ms.len();
+        ms.push(600.0);
+        ms.extend(vec![20.0; 200]);
+        let kept = KeptFrames::new(frames(&ms), 0, vec![]);
+        assert_eq!(kept.median_ms, 20.0);
+        let f = frame_features(&kept, spike);
+        assert!((f["base_level_log"] - 22.5f32.ln()).abs() < 1e-3, "{f:?}");
+    }
+
+    #[test]
+    fn a_frame_counts_for_the_time_it_overlaps() {
+        // Icarus's shape: two freezes 2 s apart. The second starts just inside the
+        // first's after-window and must not make that window read as frozen.
+        let mut ms = vec![20.0; 3000];
+        let first = ms.len();
+        ms.push(2500.0);
+        ms.extend(vec![20.0; 99]);
+        ms.push(2300.0);
+        ms.extend(vec![20.0; 100]);
+        let kept = KeptFrames::new(frames(&ms), 0, vec![]);
+        let f = frame_features(&kept, first);
+        assert!(f["next_level_log"].abs() < 1e-3, "{f:?}");
     }
 
     #[test]

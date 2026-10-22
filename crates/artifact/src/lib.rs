@@ -1390,6 +1390,9 @@ pub(crate) struct KeptFrames {
     pub(crate) threshold: f32,
     /// Every frame at or over the threshold, sorted, for the repetition feature.
     pub(crate) spike_lengths: Vec<f32>,
+    /// Time-weighted, what the log mostly ran at: a menu at thousands of frames a
+    /// second puts the per-frame median under a millisecond (CarX Street: 0.38 ms
+    /// against 21 ms experienced), and every gameplay second would read as loading.
     pub(crate) median_ms: f32,
 }
 
@@ -1411,7 +1414,7 @@ impl KeptFrames {
         let threshold = spike_threshold(&frames);
         let mut lengths: Vec<f32> = frames.iter().map(|f| f.ms).collect();
         lengths.sort_by(|a, b| a.total_cmp(b));
-        let median_ms = lengths.get(lengths.len() / 2).copied().unwrap_or(0.0);
+        let median_ms = time_weighted_median_ms(&lengths);
         let spike_lengths = lengths.into_iter().filter(|&ms| ms >= threshold).collect();
         let logged_seconds = frames.last().map_or(0.0, |f| f.t_s + f.ms as f64 / 1000.0);
         KeptFrames {

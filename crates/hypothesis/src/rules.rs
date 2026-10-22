@@ -155,7 +155,7 @@ pub(crate) fn candidates(f: &Features) -> Vec<Candidate> {
             Cause::Loading,
             0.65,
             vec![format!(
-                "the second before already ran at {:.0} times the log's median frametime: \
+                "the seconds before already ran at {:.0} times the log's median frametime: \
                  a loading screen",
                 l.exp()
             )],
@@ -166,7 +166,7 @@ pub(crate) fn candidates(f: &Features) -> Vec<Candidate> {
             Cause::Loading,
             0.6,
             vec![format!(
-                "the second after still ran at {:.0} times the log's median frametime: \
+                "the seconds after still ran at {:.0} times the log's median frametime: \
                  a loading screen",
                 l.exp()
             )],
